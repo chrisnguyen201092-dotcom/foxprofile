@@ -6,15 +6,18 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...interfaces.protocols import IProxyService
-from ...models.profile import Profile
+from ...models.profile import PROFILE_COLOR_PALETTES, Profile
 from ...services.proxy.geo_check import GeoCheckResult, check_geo
 from ...utils.validation import (
+    validate_color,
+    validate_group,
     validate_locale,
+    validate_notes,
     validate_profile_name,
     validate_proxy_format,
     validate_timezone,
 )
-from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_SEMIBOLD
+from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_engine_dropdown, build_os_dropdown
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
 
@@ -22,8 +25,9 @@ from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
 def open_profile_dialog(
     page: ft.Page,
     proxy_service: IProxyService,
-    on_save: Callable[[str, str, str, str, str, str], str | None],
+    on_save: Callable[..., str | None],
     profile: Profile | None = None,
+    existing_groups: list[str] | None = None,
 ) -> None:
     is_edit = profile is not None
     title = get_string("edit_profile") if is_edit else get_string("create_new_profile")
@@ -40,6 +44,49 @@ def open_profile_dialog(
         hint_text="" if profile is not None else get_string("enter_profile_name"),
         **DLG_FIELD_KWARGS,
     )
+    group_field = ft.TextField(
+        value=(profile.group or "") if profile is not None else "",
+        hint_text=get_string("group_hint"),
+        **DLG_FIELD_KWARGS,
+    )
+    notes_field = ft.TextField(
+        value=(profile.notes or "") if profile is not None else "",
+        hint_text=get_string("notes_hint"),
+        multiline=True,
+        min_lines=2,
+        max_lines=3,
+        **DLG_FIELD_KWARGS,
+    )
+
+    def _pick_group(g: str) -> None:
+        group_field.value = g
+        page.update()
+
+    group_chips_row: ft.Control | None = None
+    if existing_groups:
+        group_chips_row = ft.Row(
+            spacing=6,
+            wrap=True,
+            run_spacing=6,
+            controls=[
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=5,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["rule_strong"]),
+                    ink=True,
+                    on_click=lambda _, g=grp: _pick_group(g),
+                    content=ft.Text(
+                        grp,
+                        size=11.5,
+                        font_family=FONT_MEDIUM,
+                        color=COLORS["text_sub"],
+                    ),
+                )
+                for grp in existing_groups[:8]
+            ],
+        )
+
     proxy_field = ft.TextField(
         value=(profile.proxy or "") if profile is not None else "",
         hint_text="socks5://user:pass@host:port",
@@ -93,6 +140,207 @@ def open_profile_dialog(
         text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
+
+    selected_color: list[str | None] = [profile.color if profile is not None else None]
+    palettes_open: list[bool] = [False]
+    color_section = ft.Column(spacing=8, tight=True)
+
+    def _make_swatch(hex_c: str, cur: str | None, size: int = 24) -> ft.Container:
+        active = (cur or "").upper() == hex_c.upper()
+        return ft.Container(
+            width=size,
+            height=size,
+            border_radius=size // 2,
+            bgcolor=hex_c,
+            border=ft.Border.all(2.5, COLORS["text_main"]) if active else None,
+            alignment=ft.Alignment(0, 0),
+            tooltip=hex_c,
+            on_click=lambda _, c=hex_c: _pick_color(c),
+            content=ft.Icon(ft.Icons.CHECK, size=13, color="#FFFFFF") if active else None,
+        )
+
+    def _pick_color(c: str | None) -> None:
+        if c is not None and selected_color[0] and selected_color[0].upper() == c.upper():
+            selected_color[0] = None
+        else:
+            selected_color[0] = c
+        _rebuild_color_section()
+        page.update()
+
+    def _toggle_palettes(_: ft.ControlEvent) -> None:
+        palettes_open[0] = not palettes_open[0]
+        _rebuild_color_section()
+        page.update()
+
+    def _on_hex_submit(e: ft.ControlEvent) -> None:
+        raw = (e.control.value or "").strip()
+        if not raw:
+            return
+        if not raw.startswith("#"):
+            raw = f"#{raw}"
+        ok, _ = validate_color(raw)
+        if ok:
+            selected_color[0] = raw.upper()
+            _rebuild_color_section()
+            page.update()
+
+    def _rebuild_color_section() -> None:
+        cur = selected_color[0]
+        is_def = cur is None
+        quick_colors = PROFILE_COLOR_PALETTES[0][1][:6]
+        top_controls: list[ft.Control] = [
+            ft.Container(
+                height=30,
+                padding=ft.Padding.symmetric(horizontal=10),
+                border_radius=6,
+                bgcolor=COLORS["sidebar"] if is_def else COLORS["card_bg"],
+                border=ft.Border.all(1, COLORS["sidebar"] if is_def else COLORS["rule_strong"]),
+                alignment=ft.Alignment(0, 0),
+                on_click=lambda _: _pick_color(None),
+                content=ft.Text(
+                    get_string("color_default"),
+                    size=12,
+                    font_family=FONT_MEDIUM,
+                    color=COLORS["cover_ink"] if is_def else COLORS["text_main"],
+                ),
+            ),
+            *[_make_swatch(c, cur, size=24) for c in quick_colors],
+            ft.Container(
+                height=30,
+                padding=ft.Padding.symmetric(horizontal=10),
+                border_radius=6,
+                bgcolor=COLORS["input_bg"] if palettes_open[0] else COLORS["card_bg"],
+                border=ft.Border.all(
+                    1.5 if palettes_open[0] or (cur and cur.upper() not in quick_colors) else 1,
+                    COLORS["sidebar"]
+                    if palettes_open[0] or (cur and cur.upper() not in quick_colors)
+                    else COLORS["rule_strong"],
+                ),
+                alignment=ft.Alignment(0, 0),
+                on_click=_toggle_palettes,
+                content=ft.Row(
+                    spacing=6,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            width=12,
+                            height=12,
+                            border_radius=6,
+                            bgcolor=cur,
+                            border=ft.Border.all(1, COLORS["rule_strong"]),
+                        )
+                        if cur
+                        else ft.Icon(ft.Icons.PALETTE_OUTLINED, size=15, color=COLORS["text_main"]),
+                        ft.Text(
+                            cur.upper() if cur else get_string("color_more_palettes"),
+                            size=12,
+                            font_family=FONT_DATA if cur else FONT_MEDIUM,
+                            color=COLORS["text_main"],
+                        ),
+                        ft.Icon(
+                            ft.Icons.EXPAND_LESS if palettes_open[0] else ft.Icons.EXPAND_MORE,
+                            size=16,
+                            color=COLORS["text_sub"],
+                        ),
+                    ],
+                ),
+            ),
+        ]
+
+        children: list[ft.Control] = [
+            ft.Row(
+                spacing=7,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=top_controls,
+            )
+        ]
+
+        if palettes_open[0]:
+            palette_rows: list[ft.Control] = []
+            for label_key, group in PROFILE_COLOR_PALETTES:
+                palette_rows.append(
+                    ft.Row(
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                width=115,
+                                content=ft.Text(
+                                    get_string(label_key),
+                                    size=11.5,
+                                    font_family=FONT_MEDIUM,
+                                    color=COLORS["text_sub"],
+                                ),
+                            ),
+                            ft.Row(
+                                spacing=8,
+                                controls=[_make_swatch(c, cur, size=24) for c in group],
+                            ),
+                        ],
+                    )
+                )
+            palette_rows.append(
+                ft.Row(
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            width=115,
+                            content=ft.Text(
+                                get_string("color_custom_hex"),
+                                size=11.5,
+                                font_family=FONT_MEDIUM,
+                                color=COLORS["text_sub"],
+                            ),
+                        ),
+                        ft.Container(
+                            width=22,
+                            height=22,
+                            border_radius=11,
+                            bgcolor=cur or COLORS["card_bg"],
+                            border=ft.Border.all(1, COLORS["rule_strong"]),
+                        ),
+                        ft.Container(
+                            width=110,
+                            height=30,
+                            padding=ft.Padding.symmetric(horizontal=8),
+                            border_radius=6,
+                            bgcolor=COLORS["card_bg"],
+                            border=ft.Border.all(1, COLORS["rule_strong"]),
+                            alignment=ft.Alignment(0, 0),
+                            content=ft.TextField(
+                                value=cur or "",
+                                hint_text="#RRGGBB",
+                                border=ft.InputBorder.NONE,
+                                collapsed=True,
+                                dense=True,
+                                text_size=12,
+                                text_style=_DATA,
+                                color=COLORS["text_main"],
+                                cursor_color=COLORS["accent"],
+                                hint_style=ft.TextStyle(color=COLORS["text_dim"], size=11.5),
+                                on_submit=_on_hex_submit,
+                                on_blur=_on_hex_submit,
+                            ),
+                        ),
+                    ],
+                )
+            )
+            children.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                    border_radius=8,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["rule_strong"]),
+                    content=ft.Column(spacing=8, tight=True, controls=palette_rows),
+                )
+            )
+
+        color_section.controls = children
+
+    _rebuild_color_section()
+
     geo_error = ft.Text("", size=12, color=COLORS["error"], visible=False)
     # The Check IP report is the only part that can grow; it scrolls on its own
     # so the dialog keeps its height on short windows.
@@ -126,6 +374,8 @@ def open_profile_dialog(
 
     def on_submit(_: ft.ControlEvent) -> None:
         name = (name_field.value or "").strip()
+        group = (group_field.value or "").strip()
+        notes = (notes_field.value or "").strip()
         proxy = (proxy_field.value or "").strip()
         os_type = os_dropdown.value or "windows"
         engine = engine_dropdown.value or "camoufox"
@@ -139,6 +389,14 @@ def open_profile_dialog(
             name_error.visible = True
             page.update()
             return
+
+        for validate_meta, meta_val in ((validate_group, group), (validate_notes, notes)):
+            valid_meta, meta_err = validate_meta(meta_val)
+            if not valid_meta:
+                name_error.value = meta_err
+                name_error.visible = True
+                page.update()
+                return
 
         valid_proxy, proxy_err = validate_proxy_format(proxy)
         if not valid_proxy:
@@ -155,7 +413,17 @@ def open_profile_dialog(
                 page.update()
                 return
 
-        error = on_save(name, proxy, os_type, timezone, locale, engine)
+        error = on_save(
+            name,
+            proxy,
+            os_type,
+            timezone,
+            locale,
+            engine,
+            selected_color[0],
+            group or None,
+            notes or None,
+        )
         if error:
             name_error.value = error
             name_error.visible = True
@@ -189,10 +457,27 @@ def open_profile_dialog(
             content=ft.Column(
                 tight=True,
                 spacing=4,
+                scroll=ft.ScrollMode.AUTO,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
-                    _field(get_string("profile_name"), name_field),
+                    ft.Row(
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Container(
+                                expand=3,
+                                content=_field(get_string("profile_name"), name_field),
+                            ),
+                            ft.Container(
+                                expand=2,
+                                content=_field(get_string("group_optional"), group_field),
+                            ),
+                        ],
+                    ),
+                    *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
+                    _field(get_string("notes_optional"), notes_field),
+                    _field(get_string("profile_color"), color_section),
                     ft.Row(
                         spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.START,

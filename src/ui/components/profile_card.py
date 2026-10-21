@@ -5,7 +5,7 @@ import flet as ft
 from ...core.strings import get_string
 from ...models.profile import Profile
 from ...utils.proxy_parser import mask_proxy
-from ..theme.colors import COLORS, FONT_DATA, FONT_SEMIBOLD
+from ..theme.colors import COLORS, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import DANGER_ICON_STYLE, ICON_STYLE
 from .launch_button import build_launch_button
 
@@ -14,15 +14,13 @@ _OS_LABELS = {"windows": "WIN", "macos": "MAC", "linux": "LIN"}
 # One column grid for the header and every row: (expand, fixed width).
 COLUMNS = {
     "select": (None, 32),
-    # Sized from real data: "shop-facebook-01", "1920x1080 · 12 CPU",
-    # "198.51.100.40:1080", "America/Los_Angeles".
-    "name": (9, None),
-    "device": (11, None),
-    "proxy": (9, None),
-    "geo": (9, None),
-    "status": (None, 100),
-    # Launch button (112, wide enough for "Launch") + gap (8) + three 40px icon buttons.
-    "actions": (None, 244),
+    # Give profile name ~40% of flexible space for long names, group badges, and notes.
+    "name": (16, None),
+    "device": (9, None),
+    "proxy": (8, None),
+    "geo": (7, None),
+    # Launch button (112) + gap (6) + three icon buttons (~108).
+    "actions": (None, 232),
 }
 ROW_HEIGHT = 58
 
@@ -59,7 +57,6 @@ def build_header_row(
                 _cell("device", label("col_device")),
                 _cell("proxy", label("col_proxy")),
                 _cell("geo", label("col_geo")),
-                _cell("status", label("col_status")),
                 _cell("actions", None),
             ],
         ),
@@ -79,8 +76,9 @@ def build_profile_card(
     device: str = "",
     since: str = "",
     failed: bool = False,
+    draggable: bool = False,
 ) -> ft.Container:
-    """One profile as a table row: identity, device, proxy, geo, stamp, actions."""
+    """One profile as a table row: identity, device, proxy, geo, actions."""
     if is_running:
         bg = COLORS["card_hover"]
     elif is_selected:
@@ -88,11 +86,127 @@ def build_profile_card(
     else:
         bg = COLORS["card_bg"]
 
+    row_border = (
+        ft.Border(
+            left=ft.BorderSide(5, profile.color),
+            bottom=ft.BorderSide(1, COLORS["card_border"]),
+        )
+        if profile.color
+        else ft.Border.only(bottom=ft.BorderSide(1, COLORS["card_border"]))
+    )
+
+    show_failed = failed and not is_loading and not is_running
+    name_text = ft.Text(
+        profile.name,
+        size=14,
+        font_family=FONT_SEMIBOLD,
+        color=COLORS["text_main"],
+        no_wrap=True,
+        overflow=ft.TextOverflow.ELLIPSIS,
+        tooltip=profile.name,
+        expand=bool(profile.group or show_failed or profile.color or draggable),
+    )
+    top_line_controls: list[ft.Control] = [name_text]
+    if show_failed:
+        top_line_controls.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                border_radius=4,
+                border=ft.Border.all(1, COLORS["error"]),
+                tooltip=get_string("stamp_failed"),
+                content=ft.Text(
+                    get_string("stamp_failed").upper(),
+                    size=10,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_700,
+                    color=COLORS["error"],
+                ),
+            )
+        )
+    if profile.group:
+        top_line_controls.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["rule_strong"]),
+                tooltip=profile.group,
+                content=ft.Text(
+                    profile.group,
+                    size=10.5,
+                    font_family=FONT_MEDIUM,
+                    color=COLORS["text_sub"],
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            )
+        )
+    top_line: ft.Control = (
+        ft.Row(
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=top_line_controls,
+        )
+        if len(top_line_controls) > 1
+        else name_text
+    )
+    if profile.notes:
+        single_line_note = " ".join(profile.notes.splitlines()).strip()
+        note_text = ft.Text(
+            single_line_note,
+            size=11.5,
+            color=COLORS["text_dim"],
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=profile.notes,
+        )
+        text_block: ft.Control = _stack(top_line, note_text)
+    else:
+        text_block = top_line
+
+    name_parts: list[ft.Control] = []
+    if draggable:
+        name_parts.append(ft.Icon(ft.Icons.DRAG_INDICATOR, size=16, color=COLORS["text_dim"]))
+    if profile.color:
+        name_parts.append(
+            ft.Container(
+                width=9,
+                height=9,
+                border_radius=5,
+                bgcolor=profile.color,
+            )
+        )
+    if name_parts:
+        name_parts.append(ft.Container(expand=True, content=text_block))
+        name_cell_content: ft.Control = ft.Row(
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=name_parts,
+        )
+    else:
+        name_cell_content = text_block
+
+    def _drag_wrap(ctrl: ft.Control) -> ft.Control:
+        if not draggable:
+            return ctrl
+        return ft.ReorderableDragHandle(
+            mouse_cursor=ft.MouseCursor.GRAB,
+            content=ctrl,
+        )
+
+    launch_btn = build_launch_button(profile.name, is_loading, is_running, on_launch)
+    if is_running and since:
+        launch_btn.tooltip = f"{get_string('stamp_live')} ({since})"
+
     return ft.Container(
+        key=profile.name,
         height=ROW_HEIGHT,
-        padding=ft.Padding.symmetric(horizontal=14),
+        padding=ft.Padding.only(
+            left=10 if profile.color else 14,
+            right=14,
+        ),
         bgcolor=bg,
-        border=ft.Border.only(bottom=ft.BorderSide(1, COLORS["card_border"])),
+        border=row_border,
         content=ft.Row(
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -105,23 +219,10 @@ def build_profile_card(
                         on_change=lambda _, n=profile.name: on_select(n) if on_select else None,
                     ),
                 ),
-                _cell(
-                    "name",
-                    ft.Text(
-                        profile.name,
-                        size=14,
-                        font_family=FONT_SEMIBOLD,
-                        color=COLORS["text_main"],
-                        no_wrap=True,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                        tooltip=profile.name,
-                    ),
-                ),
-                _cell("device", _device(profile, device)),
-                _cell("proxy", _proxy(profile)),
-                _cell("geo", _geo(profile)),
-                # A Row lets the stamp keep its own width instead of filling the cell.
-                _cell("status", ft.Row(controls=[_stamp(is_loading, is_running, since, failed)])),
+                _cell("name", _drag_wrap(name_cell_content)),
+                _cell("device", _drag_wrap(_device(profile, device))),
+                _cell("proxy", _drag_wrap(_proxy(profile))),
+                _cell("geo", _drag_wrap(_geo(profile))),
                 _cell(
                     "actions",
                     ft.Row(
@@ -129,10 +230,14 @@ def build_profile_card(
                         alignment=ft.MainAxisAlignment.END,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
-                            build_launch_button(profile.name, is_loading, is_running, on_launch),
-                            ft.Container(width=8),
+                            launch_btn,
+                            ft.Container(width=6),
                             *_action_buttons(
-                                profile.name, is_running, on_edit, on_delete, on_cookies
+                                profile.name,
+                                is_running,
+                                on_edit,
+                                on_delete,
+                                on_cookies,
                             ),
                         ],
                     ),
@@ -314,7 +419,7 @@ def _action_buttons(
     on_delete: Callable[[str], None],
     on_cookies: Callable[[str], None] | None,
 ) -> list[ft.IconButton]:
-    buttons = []
+    buttons: list[ft.IconButton] = []
     if on_cookies:
         buttons.append(
             ft.IconButton(

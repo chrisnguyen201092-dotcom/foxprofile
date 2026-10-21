@@ -16,41 +16,66 @@ FILTERS = (
 )
 
 
+def _filter_row(
+    fid: str, label_text: str, count: int, active: str, on_filter: Callable[[str], None]
+) -> ft.Container:
+    on = fid == active
+    return ft.Container(
+        height=34,
+        border_radius=7,
+        padding=ft.Padding.symmetric(horizontal=10),
+        bgcolor=COLORS["cover_ink"] if on else None,
+        ink=True,
+        on_click=lambda _, f=fid: on_filter(f),
+        content=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    label_text,
+                    size=13.5,
+                    font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
+                    color=COLORS["sidebar"] if on else COLORS["cover_ink"],
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                    expand=True,
+                ),
+                ft.Text(
+                    str(count),
+                    size=12,
+                    font_family=FONT_DATA,
+                    color=COLORS["sidebar"] if on else COLORS["cover_muted"],
+                ),
+            ],
+        ),
+    )
+
+
 def build_filter_buttons(
-    active: str, counts: dict[str, int], on_filter: Callable[[str], None]
+    active: str,
+    counts: dict[str, int],
+    on_filter: Callable[[str], None],
+    group_counts: dict[str, int] | None = None,
 ) -> list[ft.Control]:
     """The rail's filter list; the active filter is set in cover ink."""
-    controls: list[ft.Control] = []
-    for fid, key in FILTERS:
-        on = fid == active
+    controls: list[ft.Control] = [
+        _filter_row(fid, get_string(key), counts.get(fid, 0), active, on_filter)
+        for fid, key in FILTERS
+    ]
+    if group_counts:
         controls.append(
             ft.Container(
-                height=36,
-                border_radius=7,
-                padding=ft.Padding.symmetric(horizontal=10),
-                bgcolor=COLORS["cover_ink"] if on else None,
-                ink=True,
-                on_click=lambda _, f=fid: on_filter(f),
-                content=ft.Row(
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[
-                        ft.Text(
-                            get_string(key),
-                            size=13.5,
-                            font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
-                            color=COLORS["sidebar"] if on else COLORS["cover_ink"],
-                        ),
-                        ft.Text(
-                            str(counts.get(fid, 0)),
-                            size=12,
-                            font_family=FONT_DATA,
-                            color=COLORS["sidebar"] if on else COLORS["cover_muted"],
-                        ),
-                    ],
+                padding=ft.Padding.only(left=10, top=12, bottom=4),
+                content=ft.Text(
+                    get_string("groups_title"),
+                    size=11.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["cover_muted"],
                 ),
             )
         )
+        for grp, cnt in group_counts.items():
+            controls.append(_filter_row(f"group:{grp}", grp, cnt, active, on_filter))
     return controls
 
 

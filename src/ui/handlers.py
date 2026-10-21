@@ -73,6 +73,10 @@ class AppHandlers:
         assert page is not None
         add_profile(page, self._pm, self._ps, self._log, self._refresh)
 
+    def on_move(self, name: str, direction: int) -> None:
+        if self._pm.move_profile(name, direction):
+            self._refresh()
+
     async def on_import(self, _: ft.ControlEvent | None = None) -> None:
         refs = self._get_refs()
         assert refs is not None

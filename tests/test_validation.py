@@ -1,7 +1,13 @@
 import pytest
 
 from src.utils.proxy_parser import parse_proxy
-from src.utils.validation import validate_profile_name, validate_proxy_format
+from src.utils.validation import (
+    validate_color,
+    validate_group,
+    validate_notes,
+    validate_profile_name,
+    validate_proxy_format,
+)
 
 
 @pytest.mark.parametrize("name", ["shop-01", "TikTok US 2", "ads_agency.3", "tài-khoản-1"])
@@ -95,3 +101,35 @@ def test_proxy_host_9000_chars_rejected():
 def test_proxy_port_out_of_range_rejected(port):
     ok, _ = validate_proxy_format(f"192.0.2.1:{port}")
     assert not ok
+
+
+@pytest.mark.parametrize("color", ["", "#ef4444", "#22C55E", "#06b6d4"])
+def test_valid_colors(color):
+    assert validate_color(color) == (True, "")
+
+
+@pytest.mark.parametrize("color", ["red", "#fff", "#12345g", "ef4444", "#1234567"])
+def test_invalid_colors(color):
+    ok, msg = validate_color(color)
+    assert not ok and msg
+
+
+@pytest.mark.parametrize("group", ["", "TikTok US", "Shop 1 - Phụ kiện", "x" * 48])
+def test_valid_groups(group):
+    assert validate_group(group) == (True, "")
+
+
+@pytest.mark.parametrize("group", ["x" * 49, "bad\nline"])
+def test_invalid_groups(group):
+    ok, msg = validate_group(group)
+    assert not ok and msg
+
+
+@pytest.mark.parametrize("notes", ["", "acc: user@mail.com | 2FA: ABCD", "line1\nline2", "x" * 500])
+def test_valid_notes(notes):
+    assert validate_notes(notes) == (True, "")
+
+
+def test_invalid_notes():
+    ok, msg = validate_notes("x" * 501)
+    assert not ok and msg

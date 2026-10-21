@@ -16,6 +16,12 @@ class ProfileCreate(BaseModel):
         description="camoufox (Firefox) or chrome (experimental, fingerprint-chromium). "
         "Fixed once the profile is created",
     )
+    color: str | None = Field(None, description="Optional #RRGGBB highlight color. Unset = default")
+    group: str | None = Field(None, description="Optional group/folder name")
+    notes: str | None = Field(None, description="Optional free-text notes")
+    pages: list[str] = Field(
+        default_factory=list, description="Custom pages this profile belongs to"
+    )
 
 
 class ProfileUpdate(BaseModel):
@@ -27,6 +33,28 @@ class ProfileUpdate(BaseModel):
     timezone: str | None = Field(None, description='"" switches back to automatic')
     locale: str | None = Field(None, description='"" switches back to automatic')
     engine: str | None = Field(None, description="Cannot be changed; only the current value")
+    color: str | None = Field(None, description='"" switches back to default (no color)')
+    group: str | None = Field(None, description='"" clears the group')
+    notes: str | None = Field(None, description='"" clears the notes')
+    pages: list[str] | None = Field(None, description="Custom pages this profile belongs to")
+
+
+class CustomPageRequest(BaseModel):
+    name: str
+    profile_names: list[str] | None = None
+    original_name: str | None = None
+
+
+class CustomPageMembersRequest(BaseModel):
+    profile_names: list[str]
+
+
+class ProfileOrderRequest(BaseModel):
+    names: list[str]
+
+
+class ProfileMoveRequest(BaseModel):
+    direction: int = Field(..., description="-1 to move up, 1 to move down")
 
 
 class ProfileResponse(BaseModel):
@@ -36,6 +64,10 @@ class ProfileResponse(BaseModel):
     timezone: str | None = None
     locale: str | None = None
     engine: str = "camoufox"
+    color: str | None = None
+    group: str | None = None
+    notes: str | None = None
+    pages: list[str] = Field(default_factory=list)
     data_dir: str
     is_running: bool
 
@@ -43,6 +75,7 @@ class ProfileResponse(BaseModel):
 class ProfileListResponse(BaseModel):
     profiles: list[ProfileResponse]
     total: int
+    custom_pages: list[str] = Field(default_factory=list)
 
 
 class DataDirResponse(BaseModel):

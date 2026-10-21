@@ -26,7 +26,7 @@
   --ui: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", sans-serif;
   --data: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
   --row-h: 58px;
-  --cols: 32px minmax(150px, 1.15fr) minmax(170px, 1.05fr) minmax(170px, 1.15fr) minmax(150px, 1fr) 112px 232px;
+  --cols: 32px minmax(220px, 1.85fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(140px, 0.9fr) 248px;
   --ease-out: cubic-bezier(.16, 1, .3, 1);
 }
 * { box-sizing: border-box; }
@@ -110,12 +110,14 @@ main { min-width: 0; padding: 26px 32px 40px; }
 .head h1 { margin: 0; font-size: 26px; line-height: 1.2; font-weight: 700; letter-spacing: -.02em; }
 .head .counts { margin-top: 4px; color: var(--ink-2); font-size: 13.5px; }
 .head .counts b { color: var(--live); font-weight: 600; }
-.search { position: relative; width: min(340px, 100%); }
+.head-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sort-select { width: auto; min-width: 175px; height: 40px; font-size: 13.5px; }
+.search { position: relative; width: min(290px, 100%); }
 .search svg { position: absolute; left: 12px; top: 11px; color: var(--ink-3); }
 .search input { padding-left: 38px; }
 
 /* Table */
-.sheet { container: sheet / inline-size; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: 10px; }
+.sheet { container: sheet / inline-size; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
 .bulk { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--rule); background: var(--paper-sunk); border-radius: 10px 10px 0 0; }
 .bulk .n { font-weight: 600; margin-right: 6px; }
 .bulk .btn { height: 32px; padding: 0 12px; font-size: 13px; }
@@ -133,7 +135,44 @@ main { min-width: 0; padding: 26px 32px 40px; }
 .stack > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stack .minor { font-size: 11.5px; color: var(--ink-3); }
 .geo-inline { display: none; }
-.name { font-weight: 600; font-size: 14.5px; }
+.name { font-weight: 600; font-size: 14.5px; display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-pill { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--rule-strong); background: var(--paper-sunk); color: var(--ink-2); font-size: 10.5px; font-weight: 500; flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.group-chip { height: 24px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--rule-strong); background: var(--paper-sunk); color: var(--ink-2); font-size: 11.5px; font-weight: 500; cursor: pointer; }
+.group-chip:hover { border-color: var(--ink-2); color: var(--ink); }
+.pages-bar { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 12px; }
+.page-tab { display: inline-flex; align-items: center; height: 34px; border-radius: 8px; border: 1px solid var(--rule-strong); background: var(--paper-raised); color: var(--ink); font-size: 13px; font-weight: 500; flex: none; overflow: hidden; }
+.page-tab.active { background: var(--cover); border-color: var(--cover); color: var(--cover-ink); font-weight: 600; }
+.page-tab-btn { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 12px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.page-tab-cnt { font-family: var(--data); font-size: 11.5px; opacity: .75; }
+.page-tab-edit { display: inline-grid; place-items: center; height: 100%; padding: 0 8px 0 2px; border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; }
+.page-tab-edit:hover { opacity: 1; }
+.page-add-btn { display: inline-flex; align-items: center; gap: 5px; height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--rule-strong); background: var(--paper-sunk); color: var(--ink); font-size: 12.5px; font-weight: 600; cursor: pointer; flex: none; }
+.page-add-btn svg { color: var(--act); }
+.page-check-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--paper); padding: 4px; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.page-check-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13.5px; }
+.page-check-item:hover { background: var(--paper-sunk); }
+.drag-grip { color: var(--ink-3); cursor: grab; font-size: 14px; line-height: 1; user-select: none; }
+.row.dragging { opacity: .45; }
+.row.drag-over { box-shadow: inset 0 2px 0 var(--cover); }
+.color-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+.color-swatches { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.color-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2.5px solid transparent; cursor: pointer; display: inline-grid; place-items: center; padding: 0; color: #fff; flex: none; }
+.color-swatch.active { border-color: var(--ink); }
+.color-def, .color-more { height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--rule-strong); background: var(--paper-raised); color: var(--ink); font-size: 12px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.color-def.active { background: var(--cover); border-color: var(--cover); color: var(--cover-ink); }
+.color-more.open { background: var(--paper-sunk); border-color: var(--cover); }
+.color-palettes { margin-top: 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--rule-strong); background: var(--paper-sunk); display: flex; flex-direction: column; gap: 8px; }
+.palette-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.palette-label { width: 115px; font-size: 11.5px; font-weight: 500; color: var(--ink-2); flex: none; }
+.color-hex { width: 110px !important; height: 30px !important; padding: 0 8px !important; font-family: var(--data) !important; font-size: 12px !important; border-radius: 6px !important; }
+.color-native { width: 28px !important; height: 28px !important; padding: 0 !important; border: 1px solid var(--rule-strong) !important; border-radius: 6px !important; cursor: pointer; background: none !important; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+.pager-left, .pager-right { display: flex; align-items: center; gap: 6px; }
+.pager-chip { height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--rule-strong); background: var(--paper-raised); color: var(--ink); font-size: 12.5px; font-weight: 500; cursor: pointer; }
+.pager-chip.active { background: var(--cover); border-color: var(--cover); color: var(--cover-ink); }
+.pager-custom { width: 116px !important; height: 34px !important; padding: 0 10px !important; font-size: 13px !important; text-align: center; border-radius: 6px !important; }
 .tag { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; margin-left: 8px; border-radius: 5px; border: 1px solid var(--rule-strong); color: var(--ink-2); font-size: 11.5px; font-weight: 600; vertical-align: 1px; }
 .tag.chrome { border-color: #9DB7AE; color: var(--cover); background: #E6EEEA; }
 .engine { font-weight: 500; font-size: 13px; }
@@ -143,7 +182,7 @@ main { min-width: 0; padding: 26px 32px 40px; }
 .muted { color: var(--ink-3); }
 .direct { color: var(--ink-3); font-style: normal; }
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
-.actions .main { width: 96px; margin-right: 8px; height: 36px; }
+.actions .main { width: 96px; margin-right: 6px; height: 36px; }
 
 /* The entry stamp */
 .stamp { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-width: 86px; padding: 3px 9px 2px; border: 1.5px solid currentColor; outline: 1px solid currentColor; outline-offset: 2px; border-radius: 6px; transform: rotate(-4deg); color: var(--live); font: 700 10.5px/1.2 var(--data); letter-spacing: .08em; text-transform: uppercase; background: rgba(255,255,255,.35); }
@@ -243,20 +282,19 @@ code { font-family: var(--data); font-size: 12.5px; background: var(--paper-sunk
 
 /* The table follows its own width, not the viewport: all columns need about
    1140px, the version without Timezone · Locale about 870px. */
-@container sheet (max-width: 1150px) {
-  .row { --cols: 32px minmax(140px, 1.1fr) minmax(140px, 1fr) minmax(140px, 1.1fr) 108px 218px; column-gap: 12px; }
+@container sheet (max-width: 1080px) {
+  .row { --cols: 32px minmax(200px, 1.75fr) minmax(140px, 1fr) minmax(140px, 1fr) 248px; column-gap: 12px; }
   .col-geo { display: none; }
   .geo-inline { display: block; }
 }
-@container sheet (max-width: 880px) {
+@container sheet (max-width: 820px) {
   .row.head-row { display: none; }
-  .row.body { grid-template-columns: 24px 1fr auto; grid-template-areas: "sel name stamp" "sel device device" "sel proxy proxy" "acts acts acts"; row-gap: 6px; padding: 12px; }
+  .row.body { grid-template-columns: 24px 1fr; grid-template-areas: "sel name" "sel device" "sel proxy" "acts acts"; row-gap: 6px; padding: 12px; }
   .row.body > .c-sel { grid-area: sel; align-self: start; padding-top: 3px; }
   .row.body > .c-name { grid-area: name; }
   .row.body > .c-device { grid-area: device; }
   .row.body > .c-proxy { grid-area: proxy; }
   .row.body > .col-geo { display: none; }
-  .row.body > .c-stamp { grid-area: stamp; }
   .row.body > .actions { grid-area: acts; justify-content: flex-start; }
   .actions .main { flex: 1; max-width: 200px; }
 }
@@ -271,7 +309,7 @@ code { font-family: var(--data); font-size: 12.5px; background: var(--paper-sunk
   .seg { width: 200px; }
   .seg button { white-space: nowrap; }
   main { padding: 18px 14px 32px; }
-  .search { width: 100%; }
+  .head-tools, .search, .sort-select { width: 100%; }
   .login { grid-template-columns: 1fr; }
   .login .cover-side { padding: 24px; }
 }
@@ -310,6 +348,8 @@ code { font-family: var(--data); font-size: 12.5px; background: var(--paper-sunk
   <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
   <symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1-.1 2.5-.3 4M14 13.1c0 2.4 0 6.4-1 8.9M17.3 21c.1-.6.4-2.3.5-3M2 12a10 10 0 0 1 18-6M21.8 16c.2-2 .1-5.4 0-6M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .3-2M8.7 22c.2-.7.4-1.3.6-2M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
   <symbol id="i-tab" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M12 13v4M10 15h4"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
 </svg>
 
 <div id="login" class="login hidden">
@@ -347,8 +387,12 @@ code { font-family: var(--data); font-size: 12.5px; background: var(--paper-sunk
   <main>
     <div class="head">
       <div><h1 data-t="your_profiles"></h1><div class="counts" id="counts"></div></div>
-      <label class="search"><svg class="i s" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" autocomplete="off"></label>
+      <div class="head-tools">
+        <select id="sort" class="sort-select"></select>
+        <label class="search"><svg class="i s" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" autocomplete="off"></label>
+      </div>
     </div>
+    <div class="pages-bar" id="pages-bar"></div>
     <div class="sheet" id="sheet" role="table"></div>
   </main>
 </div>
@@ -381,9 +425,9 @@ code { font-family: var(--data); font-size: 12.5px; background: var(--paper-sunk
 "use strict";
 const I18N = {
   vi: {
-    tagline: "Quản lý profile anti-detect", new_profile: "Tạo profile", filters: "Lọc",
+    tagline: "Quản lý profile anti-detect", new_profile: "Tạo profile", filters: "Lọc", groups: "Nhóm",
     f_all: "Tất cả", f_running: "Đang chạy", f_proxy: "Có proxy", f_direct: "Không proxy", f_chrome: "Engine Chrome",
-    api_docs: "Tài liệu API", logout: "Đăng xuất", your_profiles: "Profile", search: "Tìm theo tên hoặc proxy",
+    api_docs: "Tài liệu API", logout: "Đăng xuất", your_profiles: "Profile", search: "Tìm theo tên, nhóm, ghi chú hoặc proxy",
     counts: "{n} profile · {r} đang chạy", counts_none: "{n} profile · chưa có profile nào chạy",
     col_profile: "Profile", col_device: "Thiết bị", col_proxy: "Proxy", col_geo: "Timezone · Locale", col_status: "Trạng thái",
     empty_title: "Chưa có profile nào", empty: "Mỗi profile là một danh tính riêng: fingerprint, cookie và proxy của nó. Tạo profile đầu tiên để bắt đầu.",
@@ -396,7 +440,9 @@ const I18N = {
     login_side: "Server này chạy FoxProfile. Đăng nhập bằng API token để quản lý profile từ xa.",
     login_hint: "Nhập API token (biến FOXPROFILE_API_TOKEN) của server.", token: "API token", login: "Đăng nhập",
     bad_token: "Token không đúng", create: "Tạo profile", edit_title: "Sửa profile", edit_sub: "Đang sửa {name}", create_sub: "Một profile là một danh tính: thiết bị, proxy và vị trí riêng.",
-    name: "Tên profile", os: "Hệ điều hành", engine: "Engine",
+    name: "Tên profile", group_label: "Nhóm / Thư mục (tùy chọn)", group_hint: "VD: TikTok US, FB Ads...",
+    notes_label: "Ghi chú (tùy chọn)", notes_hint: "Tài khoản, 2FA, trạng thái...",
+    os: "Hệ điều hành", engine: "Engine",
     engine_camoufox: "Camoufox (Firefox)", engine_chrome: "Chrome (thử nghiệm)", engine_locked: "Engine không đổi được sau khi tạo.",
     engine_note: "Engine Chromium đang thử nghiệm. Lần đầu dùng sẽ tự tải về máy chạy FoxProfile (~150 MB). Nên chọn đúng hệ điều hành của máy đó, chọn hệ khác sẽ lộ font. Không đổi được engine sau khi tạo.",
     proxy_label: "Proxy", proxy_hint: "user:pass@host:port, host:port:user:pass, hoặc socks5://... Để trống = kết nối trực tiếp.",
@@ -431,11 +477,21 @@ const I18N = {
     go: "Đi", new_tab: "Tab mới", type: "Gõ", type_hint: "Gõ vào ô đang chọn (bấm lên ảnh để chọn ô)", working: "Đang xử lý...",
     back: "Quay lại", reload: "Tải lại",
     retry: "Thử lại", boot_error: "Không thể kết nối với server",
+    sort_custom: "Thứ tự tuỳ chỉnh", sort_name_asc: "Tên (A → Z)", sort_name_desc: "Tên (Z → A)", sort_group: "Theo nhóm (A → Z)", sort_running: "Đang chạy lên đầu", sort_proxy: "Có proxy lên đầu",
+    move_up: "Di chuyển lên", move_down: "Di chuyển xuống",
+    per_page: "Hiển thị:", per_page_all: "Tất cả", per_page_custom: "Tự nhập", page_of: "Trang {current}/{total}", prev: "Trước", next: "Sau",
+    profile_color: "Dải màu đánh dấu (tùy chọn)", color_default: "Mặc định", color_more: "Bảng màu", color_hex: "Mã #HEX",
+    pal_vibrant: "Nổi bật", pal_deep: "Đậm & Sâu", pal_pastel: "Dịu & Pastel", pal_earth: "Trầm & Trung tính",
+    page_all: "Tất cả", new_page: "Tạo trang", create_page: "Tạo trang mới", edit_page: "Sửa trang",
+    page_name: "Tên trang", page_hint: "VD: Disconnect, Cày sự kiện, Nuôi acc...",
+    page_select: "Chọn profile cho trang này (đã chọn {n})", page_filter: "Lọc nhanh profile...",
+    delete_page: "Xoá trang", bulk_add_page: "Thêm vào trang", bulk_remove_page: "Gỡ khỏi trang",
+    add_to_page_title: "Thêm {n} profile vào trang", pick_page: "Chọn trang có sẵn", or_new_page: "Hoặc nhập tên trang mới", add_btn: "Thêm",
   },
   en: {
-    tagline: "Anti-detect profile manager", new_profile: "New profile", filters: "Filter",
+    tagline: "Anti-detect profile manager", new_profile: "New profile", filters: "Filter", groups: "Groups",
     f_all: "All", f_running: "Running", f_proxy: "With proxy", f_direct: "No proxy", f_chrome: "Chrome engine",
-    api_docs: "API docs", logout: "Log out", your_profiles: "Profiles", search: "Search by name or proxy",
+    api_docs: "API docs", logout: "Log out", your_profiles: "Profiles", search: "Search name, group, notes, or proxy",
     counts: "{n} profiles · {r} running", counts_none: "{n} profiles · none running",
     col_profile: "Profile", col_device: "Device", col_proxy: "Proxy", col_geo: "Timezone · Locale", col_status: "Status",
     empty_title: "No profiles yet", empty: "Each profile is its own identity: its fingerprint, cookies and proxy. Create the first one to get started.",
@@ -448,7 +504,9 @@ const I18N = {
     login_side: "This server runs FoxProfile. Log in with the API token to manage profiles remotely.",
     login_hint: "Enter the server's API token (FOXPROFILE_API_TOKEN).", token: "API token", login: "Log in",
     bad_token: "Invalid token", create: "Create profile", edit_title: "Edit profile", edit_sub: "Editing {name}", create_sub: "A profile is an identity: its own device, proxy and location.",
-    name: "Profile name", os: "Operating system", engine: "Engine",
+    name: "Profile name", group_label: "Group / Folder (optional)", group_hint: "e.g. TikTok US, FB Ads...",
+    notes_label: "Notes (optional)", notes_hint: "Account info, 2FA, status...",
+    os: "Operating system", engine: "Engine",
     engine_camoufox: "Camoufox (Firefox)", engine_chrome: "Chrome (experimental)", engine_locked: "The engine cannot be changed after creation.",
     engine_note: "Experimental Chromium engine. It is downloaded automatically to the FoxProfile machine the first time (~150 MB). Pick that machine's OS: other OSes leak its fonts. The engine cannot be changed later.",
     proxy_label: "Proxy", proxy_hint: "user:pass@host:port, host:port:user:pass, or socks5://... Blank = direct connection.",
@@ -483,8 +541,25 @@ const I18N = {
     go: "Go", new_tab: "New tab", type: "Type", type_hint: "Type into the focused field (click the screen to focus one)", working: "Working...",
     back: "Back", reload: "Reload",
     retry: "Retry", boot_error: "Cannot reach the server",
+    sort_custom: "Custom order", sort_name_asc: "Name (A → Z)", sort_name_desc: "Name (Z → A)", sort_group: "Group (A → Z)", sort_running: "Running first", sort_proxy: "With proxy first",
+    move_up: "Move up", move_down: "Move down",
+    per_page: "Show:", per_page_all: "All", per_page_custom: "Custom", page_of: "Page {current} of {total}", prev: "Previous", next: "Next",
+    profile_color: "Highlight color (optional)", color_default: "Default", color_more: "Color palettes", color_hex: "Custom #HEX",
+    pal_vibrant: "Vibrant", pal_deep: "Deep & Dark", pal_pastel: "Soft & Pastel", pal_earth: "Earth & Slate",
+    page_all: "All", new_page: "New page", create_page: "Create custom page", edit_page: "Edit page",
+    page_name: "Page name", page_hint: "e.g. Disconnect, Ads Team, Event...",
+    page_select: "Select profiles for this page ({n} selected)", page_filter: "Filter profiles...",
+    delete_page: "Delete page", bulk_add_page: "Add to page", bulk_remove_page: "Remove from page",
+    add_to_page_title: "Add {n} profile(s) to page", pick_page: "Pick an existing page", or_new_page: "Or enter a new page name", add_btn: "Add",
   },
 };
+
+const PROFILE_COLOR_PALETTES = [
+  ["pal_vibrant", ["#EF4444", "#F97316", "#EAB308", "#22C55E", "#06B6D4", "#3B82F6", "#8B5CF6", "#EC4899"]],
+  ["pal_deep", ["#B91C1C", "#C2410C", "#A16207", "#15803D", "#0E7490", "#1D4ED8", "#6D28D9", "#BE185D"]],
+  ["pal_pastel", ["#F87171", "#FB923C", "#FACC15", "#4ADE80", "#22D3EE", "#60A5FA", "#A78BFA", "#F472B6"]],
+  ["pal_earth", ["#78350F", "#92400E", "#3F6212", "#115E59", "#1E3A8A", "#4C1D95", "#475569", "#1E293B"]],
+];
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -492,7 +567,11 @@ const store = {
 };
 let lang = store.get("foxprofile.lang") || "en";
 let token = store.get("foxprofile.token") || "";
-let profiles = [], running = new Set(), fingerprints = {};
+let sortBy = store.get("foxprofile.sort") || "custom";
+let perPage = (() => { const v = store.get("foxprofile.perPage"); return v !== null && /^\d+$/.test(v) ? Number(v) : 12; })();
+let currentPage = 1;
+let profiles = [], customPages = [], running = new Set(), fingerprints = {};
+let activePage = "__all__";
 let filter = "all";
 const busy = new Map();          // name -> "starting" | "stopping"
 const failed = new Map();        // name -> error message of the last failed launch
@@ -514,6 +593,17 @@ function applyI18n() {
   $("sheet").setAttribute("aria-label", t("your_profiles"));
   $("v-text").placeholder = t("type_hint");
   document.querySelectorAll("[data-lang]").forEach((b) => b.classList.toggle("active", b.dataset.lang === lang));
+  const sortEl = $("sort");
+  if (sortEl) {
+    sortEl.replaceChildren(...[
+      ["custom", t("sort_custom")],
+      ["name_asc", t("sort_name_asc")],
+      ["name_desc", t("sort_name_desc")],
+      ["group", t("sort_group")],
+      ["running", t("sort_running")],
+      ["proxy", t("sort_proxy")],
+    ].map(([v, label]) => h("option", { value: v, selected: sortBy === v }, label)));
+  }
 }
 function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -580,6 +670,8 @@ async function refresh() {
   try {
     const [list, run] = await Promise.all([api("GET", "/profiles"), api("GET", "/browser")]);
     profiles = list.profiles;
+    customPages = list.custom_pages || [];
+    if (activePage !== "__all__" && !customPages.some((pg) => pg.toLowerCase() === activePage.toLowerCase())) activePage = "__all__";
     const now = new Set(run.running);
     for (const name of now) if (!liveSince.has(name)) liveSince.set(name, new Date());
     for (const name of [...liveSince.keys()]) if (!now.has(name)) liveSince.delete(name);
@@ -603,8 +695,24 @@ const FILTERS = [
 ];
 function visible() {
   const q = $("search").value.trim().toLowerCase();
-  const pass = FILTERS.find((f) => f[0] === filter)[2];
-  return profiles.filter((p) => pass(p) && (!q || p.name.toLowerCase().includes(q) || (p.proxy || "").toLowerCase().includes(q)));
+  const foundFilter = FILTERS.find((f) => f[0] === filter);
+  const pass = filter.startsWith("group:")
+    ? (p) => p.group === filter.slice(6)
+    : (foundFilter ? foundFilter[2] : () => true);
+  const passPage = activePage === "__all__"
+    ? () => true
+    : (p) => (p.pages || []).some((pg) => pg.toLowerCase() === activePage.toLowerCase());
+  const list = profiles.filter((p) => passPage(p) && pass(p) && (!q
+    || p.name.toLowerCase().includes(q)
+    || (p.proxy || "").toLowerCase().includes(q)
+    || (p.group || "").toLowerCase().includes(q)
+    || (p.notes || "").toLowerCase().includes(q)));
+  if (sortBy === "name_asc") list.sort((a, b) => a.name.localeCompare(b.name));
+  else if (sortBy === "name_desc") list.sort((a, b) => b.name.localeCompare(a.name));
+  else if (sortBy === "group") list.sort((a, b) => (b.group ? 1 : 0) - (a.group ? 1 : 0) || (a.group || "").localeCompare(b.group || "") || a.name.localeCompare(b.name));
+  else if (sortBy === "running") list.sort((a, b) => (running.has(b.name) ? 1 : 0) - (running.has(a.name) ? 1 : 0) || a.name.localeCompare(b.name));
+  else if (sortBy === "proxy") list.sort((a, b) => (b.proxy ? 1 : 0) - (a.proxy ? 1 : 0) || a.name.localeCompare(b.name));
+  return list;
 }
 
 let lastRender = "";
@@ -613,7 +721,7 @@ function render() {
   const shown = visible();
   // Rebuilding the list replaces every button; skip it when nothing changed so a
   // periodic refresh cannot swap the button under the user's cursor mid-click.
-  const key = JSON.stringify([lang, q, filter, profiles, [...running].sort(), [...busy], [...failed], [...selected].sort(),
+  const key = JSON.stringify([lang, q, filter, activePage, customPages, sortBy, profiles, [...running].sort(), [...busy], [...failed], [...selected].sort(),
     [...justLanded], shown.map((p) => fingerprints[p.name] || null)]);
   if (key === lastRender) return;
   lastRender = key;
@@ -623,6 +731,7 @@ function render() {
     $("counts").replaceChildren(before, h("b", {}, String(running.size)), after);
   } else $("counts").replaceChildren(t("counts_none", { n: profiles.length }));
   renderFilters();
+  renderPagesBar();
 
   const sheet = $("sheet");
   sheet.replaceChildren();
@@ -630,15 +739,50 @@ function render() {
   if (selected.size) sheet.append(bulkBar());
   sheet.append(headRow(shown));
   if (!shown.length) sheet.append(emptyState(true, q));
-  for (const p of shown) sheet.append(row(p));
+  const idxMap = new Map(profiles.map((p, i) => [p.name, i]));
+  for (const p of shown) sheet.append(row(p, idxMap.get(p.name), profiles.length));
   justLanded.clear();
+}
+
+let draggedName = null;
+async function reorderOnDrop(fromName, toName) {
+  if (!fromName || !toName || fromName === toName) return;
+  const shownNames = visible().map((x) => x.name);
+  const oldIdx = shownNames.indexOf(fromName);
+  const newIdx = shownNames.indexOf(toName);
+  if (oldIdx < 0 || newIdx < 0) return;
+  shownNames.splice(oldIdx, 1);
+  shownNames.splice(newIdx, 0, fromName);
+  const visSet = new Set(shownNames);
+  let i = 0;
+  const fullOrder = profiles.map((x) => (visSet.has(x.name) ? shownNames[i++] : x.name));
+  try {
+    await api("PUT", "/profiles/order", { names: fullOrder });
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 function renderFilters() {
   const nav = $("filters");
-  nav.replaceChildren(h("div", { class: "nav-title" }, t("filters")),
+  const groupCounts = new Map();
+  for (const p of profiles) if (p.group) groupCounts.set(p.group, (groupCounts.get(p.group) || 0) + 1);
+  const sortedGroups = [...groupCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const items = [
+    h("div", { class: "nav-title" }, t("filters")),
     ...FILTERS.map(([id, label, pass]) => h("button", { class: filter === id ? "active" : "", "aria-pressed": String(filter === id),
-      onclick: () => { filter = id; render(); } }, t(label), h("span", { class: "count" }, String(profiles.filter(pass).length)))));
+      onclick: () => { filter = id; currentPage = 1; render(); } }, t(label), h("span", { class: "count" }, String(profiles.filter(pass).length)))),
+  ];
+  if (sortedGroups.length) {
+    items.push(h("div", { class: "nav-title", style: "margin-top:10px" }, t("groups")));
+    for (const [grp, cnt] of sortedGroups) {
+      const id = `group:${grp}`;
+      items.push(h("button", { class: filter === id ? "active" : "", "aria-pressed": String(filter === id),
+        onclick: () => { filter = id; currentPage = 1; render(); } },
+        h("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, grp),
+        h("span", { class: "count" }, String(cnt))));
+    }
+  }
+  nav.replaceChildren(...items);
 }
 
 function emptyState(filtered, q = "") {
@@ -646,7 +790,7 @@ function emptyState(filtered, q = "") {
     h("h2", {}, filtered ? t("no_match_title") : t("empty_title")),
     h("p", {}, filtered ? t("no_match", { q }) : t("empty")),
     filtered
-      ? h("button", { class: "btn btn-line", onclick: () => { filter = "all"; $("search").value = ""; render(); } }, t("clear_filters"))
+      ? h("button", { class: "btn btn-line", onclick: () => { filter = "all"; activePage = "__all__"; $("search").value = ""; currentPage = 1; render(); } }, t("clear_filters"))
       : h("button", { class: "btn btn-act", onclick: () => openEditor(null) }, icon("plus"), t("new_profile")));
 }
 
@@ -659,19 +803,7 @@ function headRow(shown) {
   return h("div", { class: "row head-row", role: "row" },
     h("div", { class: "c-sel", role: "columnheader" }, box),
     h("div", { role: "columnheader" }, t("col_profile")), h("div", { role: "columnheader" }, t("col_device")), h("div", { role: "columnheader" }, t("col_proxy")),
-    h("div", { class: "col-geo", role: "columnheader" }, t("col_geo")), h("div", { role: "columnheader" }, t("col_status")), h("div", { role: "columnheader" }));
-}
-
-function stamp(p) {
-  const state = busy.get(p.name);
-  if (state) return h("span", { class: "stamp pending" }, t(state === "stopping" ? "stamp_stopping" : "stamp_starting"));
-  if (running.has(p.name)) {
-    const since = liveSince.get(p.name);
-    return h("span", { class: "stamp" + (justLanded.has(p.name) ? " land" : "") },
-      t("stamp_live"), since ? h("small", {}, hhmm(since)) : null);
-  }
-  if (failed.has(p.name)) return h("span", { class: "stamp failed", title: failed.get(p.name) }, t("stamp_failed"));
-  return h("span", { class: "idle" }, t("idle"));
+    h("div", { class: "col-geo", role: "columnheader" }, t("col_geo")), h("div", { role: "columnheader" }));
 }
 
 function row(p) {
@@ -684,16 +816,36 @@ function row(p) {
     onchange: (e) => { e.target.checked ? selected.add(p.name) : selected.delete(p.name); render(); } });
   box.checked = selected.has(p.name);
   const proxy = maskProxy(p.proxy);
+  const since = liveSince.get(p.name);
   const main = on
-    ? h("button", { class: "btn btn-ink main", disabled: isBusy, onclick: () => toggle(p) }, icon("stop", true), t("stop"))
+    ? h("button", { class: "btn btn-ink main", disabled: isBusy, title: since ? `${t("stamp_live")} (${hhmm(since)})` : "", onclick: () => toggle(p) }, icon("stop", true), t("stop"))
     : h("button", { class: "btn btn-act main", disabled: isBusy, onclick: () => toggle(p) }, icon("play", true), t("launch"));
   const iconBtn = (name, label, fn, cls = "", disabled = false) =>
     h("button", { class: "icon-btn " + cls, title: label, "aria-label": `${label}: ${p.name}`, disabled, onclick: fn }, icon(name));
-  return h("div", { class: "row body" + (on ? " live" : "") + (selected.has(p.name) ? " selected" : ""), role: "row" },
+  const isCustom = sortBy === "custom";
+  const rowStyle = p.color ? `border-left: 5px solid ${p.color}; padding-left: 10px;` : undefined;
+  const dragProps = isCustom ? {
+    draggable: "true",
+    ondragstart: (e) => { draggedName = p.name; e.currentTarget.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; },
+    ondragend: (e) => { draggedName = null; e.currentTarget.classList.remove("dragging"); document.querySelectorAll(".row.drag-over").forEach((el) => el.classList.remove("drag-over")); },
+    ondragover: (e) => { if (!draggedName || draggedName === p.name) return; e.preventDefault(); e.dataTransfer.dropEffect = "move"; e.currentTarget.classList.add("drag-over"); },
+    ondragleave: (e) => { e.currentTarget.classList.remove("drag-over"); },
+    ondrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove("drag-over"); reorderOnDrop(draggedName, p.name); },
+  } : {};
+  const noteLine = p.notes ? p.notes.replace(/\s+/g, " ").trim() : "";
+  const hasFail = failed.has(p.name) && !on && !isBusy;
+  return h("div", { class: "row body" + (on ? " live" : "") + (selected.has(p.name) ? " selected" : ""), style: rowStyle, role: "row", ...dragProps },
     h("div", { class: "c-sel", role: "cell" }, box),
     h("div", { class: "c-name stack", role: "cell" },
-      h("span", { class: "name", title: p.name }, p.name),
-      h("span", { class: "minor" }, engine)),
+      h("span", { class: "name", title: p.name },
+        isCustom ? h("span", { class: "drag-grip", "aria-hidden": "true" }, "⠿") : null,
+        p.color ? h("span", { class: "color-dot", style: `background:${p.color}` }) : null,
+        h("span", { class: "name-text" }, p.name),
+        hasFail ? h("span", { class: "group-pill", style: "border-color:var(--err);color:var(--err);background:var(--err-tint)", title: failed.get(p.name) }, t("stamp_failed")) : null,
+        p.group ? h("span", { class: "group-pill", title: p.group }, p.group) : null),
+      noteLine
+        ? h("span", { class: "minor", style: "display:block", title: p.notes }, noteLine)
+        : h("span", { class: "minor" }, engine)),
     h("div", { class: "c-device device", role: "cell" }, h("span", { class: "os", title: p.os_type }, os),
       h("div", { class: "stack" }, h("span", { class: p.engine === "chrome" ? "engine chrome" : "engine" }, engine),
         fp && fp.exists ? h("span", { class: "data minor" }, [fp.screen, `${fp.hardware_concurrency || "?"} CPU`].filter(Boolean).join(" · "))
@@ -705,7 +857,6 @@ function row(p) {
     h("div", { class: "col-geo stack", role: "cell" },
       h("span", { class: p.timezone ? "data" : "muted" }, p.timezone || t("follow_ip")),
       h("span", { class: "minor" + (p.locale ? " data" : "") }, p.locale || t("follow_ip"))),
-    h("div", { class: "c-stamp", role: "cell" }, stamp(p)),
     h("div", { class: "actions", role: "cell" }, main,
       iconBtn("monitor", t("view"), () => openViewer(p.name), "", !on || isBusy),
       iconBtn("cookie", t("cookies"), () => openCookies(p), "", on),
@@ -720,7 +871,130 @@ function bulkBar() {
     h("button", { class: "btn btn-act", onclick: () => bulk("launch") }, icon("play", true), t("bulk_launch")),
     h("button", { class: "btn btn-line", onclick: () => bulk("stop") }, icon("stop", true), t("bulk_stop")),
     h("button", { class: "btn btn-line", onclick: () => bulk("delete") }, icon("trash", true), t("bulk_delete")),
+    h("button", { class: "btn btn-line", onclick: () => openAddToPageModal(names) }, icon("plus", true), t("bulk_add_page")),
+    activePage !== "__all__"
+      ? h("button", { class: "btn btn-line", onclick: () => bulkRemoveFromPage(names) }, icon("x", true), t("bulk_remove_page"))
+      : null,
     h("button", { class: "btn btn-ghost", style: "margin-left:auto", onclick: () => { selected.clear(); render(); } }, t("clear_sel")));
+}
+
+function renderPagesBar() {
+  const bar = $("pages-bar");
+  if (!bar) return;
+  const makeTab = (id, label, count, editable = false) => {
+    const isAct = activePage === id;
+    return h("div", { class: "page-tab" + (isAct ? " active" : "") },
+      h("button", { type: "button", class: "page-tab-btn", onclick: () => { activePage = id; render(); } },
+        h("span", {}, label),
+        h("span", { class: "page-tab-cnt" }, String(count))),
+      editable
+        ? h("button", { type: "button", class: "page-tab-edit", title: t("edit_page"), onclick: () => openPageModal(label) }, icon("edit", true))
+        : null);
+  };
+  bar.replaceChildren(
+    makeTab("__all__", t("page_all"), profiles.length, false),
+    ...customPages.map((pg) => {
+      const cnt = profiles.filter((p) => (p.pages || []).some((x) => x.toLowerCase() === pg.toLowerCase())).length;
+      return makeTab(pg, pg, cnt, true);
+    }),
+    h("button", { type: "button", class: "page-add-btn", onclick: () => openPageModal(null) }, icon("plus", true), t("new_page")));
+}
+
+function openPageModal(editingPage) {
+  const isEdit = !!editingPage;
+  const chosen = new Set(isEdit
+    ? profiles.filter((p) => (p.pages || []).some((x) => x.toLowerCase() === editingPage.toLowerCase())).map((p) => p.name)
+    : [...selected]);
+  modal((close) => {
+    const nameInput = h("input", { id: "f-page-name", value: editingPage || "", placeholder: t("page_hint"), maxlength: 48, required: true, autocomplete: "off" });
+    const filterInput = h("input", { type: "search", placeholder: t("page_filter"), autocomplete: "off" });
+    const countLabel = h("label", {});
+    const listWrap = h("div", { class: "page-check-list" });
+    const msg = h("div", { class: "msg err" });
+    const filtered = () => {
+      const fq = filterInput.value.trim().toLowerCase();
+      return fq ? profiles.filter((p) => p.name.toLowerCase().includes(fq) || (p.group || "").toLowerCase().includes(fq)) : profiles;
+    };
+    const drawList = () => {
+      countLabel.textContent = t("page_select", { n: chosen.size });
+      listWrap.replaceChildren(...filtered().map((p) => {
+        const cb = h("input", { type: "checkbox", onchange: (e) => { e.target.checked ? chosen.add(p.name) : chosen.delete(p.name); countLabel.textContent = t("page_select", { n: chosen.size }); } });
+        cb.checked = chosen.has(p.name);
+        return h("label", { class: "page-check-item" }, cb, h("span", { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, p.name),
+          p.group ? h("span", { class: "group-pill" }, p.group) : null);
+      }));
+    };
+    filterInput.oninput = drawList;
+    drawList();
+    return h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      const pgName = nameInput.value.trim();
+      if (!pgName) return;
+      try {
+        await api("POST", "/profiles/pages", { name: pgName, profile_names: [...chosen], original_name: editingPage || null });
+        activePage = pgName;
+        close();
+        await refresh();
+      } catch (err) { msg.textContent = err.message; }
+    } },
+      modalHead(isEdit ? t("edit_page") : t("create_page"), null, close),
+      h("div", { class: "modal-body" },
+        field(t("page_name"), nameInput),
+        h("div", { class: "field" },
+          h("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px" },
+            countLabel,
+            h("div", { style: "display:flex;gap:6px" },
+              h("button", { type: "button", class: "btn btn-ghost", style: "height:26px;padding:0 8px;font-size:12px", onclick: () => { filtered().forEach((p) => chosen.add(p.name)); drawList(); } }, t("select_all")),
+              h("button", { type: "button", class: "btn btn-ghost", style: "height:26px;padding:0 8px;font-size:12px", onclick: () => { filtered().forEach((p) => chosen.delete(p.name)); drawList(); } }, t("clear_sel")))),
+          filterInput,
+          listWrap),
+        msg),
+      h("div", { class: "modal-foot" },
+        isEdit ? h("button", { type: "button", class: "btn btn-danger", style: "margin-right:auto", onclick: async () => {
+          try { await api("DELETE", `/profiles/pages/${enc(editingPage)}`); if (activePage === editingPage) activePage = "__all__"; close(); await refresh(); }
+          catch (err) { msg.textContent = err.message; }
+        } }, t("delete_page")) : null,
+        h("button", { type: "button", class: "btn btn-line", onclick: close }, t("cancel")),
+        h("button", { class: "btn btn-act" }, isEdit ? t("save") : t("new_page"))));
+  });
+}
+
+function openAddToPageModal(names) {
+  modal((close) => {
+    const newInput = h("input", { id: "f-add-page", placeholder: t("page_hint"), maxlength: 48, autocomplete: "off" });
+    const msg = h("div", { class: "msg err" });
+    const apply = async (pgName) => {
+      const clean = pgName.trim();
+      if (!clean) return;
+      try {
+        await api("POST", `/profiles/pages/${enc(clean)}/members`, { profile_names: names });
+        selected.clear();
+        activePage = clean;
+        close();
+        await refresh();
+      } catch (err) { msg.textContent = err.message; }
+    };
+    return h("form", { onsubmit: (e) => { e.preventDefault(); apply(newInput.value); } },
+      modalHead(t("add_to_page_title", { n: names.length }), null, close),
+      h("div", { class: "modal-body" },
+        customPages.length ? h("div", { class: "field" },
+          h("label", {}, t("pick_page")),
+          h("div", { class: "chips" }, ...customPages.map((pg) => h("button", { type: "button", onclick: () => apply(pg) }, pg)))) : null,
+        field(customPages.length ? t("or_new_page") : t("page_name"), newInput),
+        msg),
+      h("div", { class: "modal-foot" },
+        h("button", { type: "button", class: "btn btn-line", onclick: close }, t("cancel")),
+        h("button", { class: "btn btn-act" }, t("add_btn"))));
+  });
+}
+
+async function bulkRemoveFromPage(names) {
+  if (activePage === "__all__") return;
+  try {
+    await api("POST", `/profiles/pages/${enc(activePage)}/remove-members`, { profile_names: names });
+    selected.clear();
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function bulk(action) {
@@ -807,6 +1081,61 @@ function field(label, input, hint) {
 function openEditor(p) {
   modal((close) => {
     const name = h("input", { id: "f-name", value: p ? p.name : "", required: true, maxlength: 64, autocomplete: "off" });
+    const grpInput = h("input", { id: "f-group", value: p && p.group ? p.group : "", maxlength: 48, placeholder: t("group_hint"), autocomplete: "off" });
+    const existingGroups = [...new Set(profiles.map((x) => x.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const groupChips = existingGroups.length
+      ? h("div", { class: "group-chips" }, ...existingGroups.slice(0, 8).map((g) =>
+          h("button", { type: "button", class: "group-chip", onclick: () => { grpInput.value = g; } }, g)))
+      : null;
+    const notesInput = h("textarea", { id: "f-notes", rows: 2, maxlength: 500, placeholder: t("notes_hint") }, p && p.notes ? p.notes : "");
+    let pickedColor = p && p.color ? p.color : "";
+    let palettesOpen = false;
+    const colorWrap = h("div", { id: "f-color" });
+    const makeSwatch = (c) => {
+      const active = pickedColor.toUpperCase() === c.toUpperCase();
+      return h("button", {
+        type: "button", class: "color-swatch" + (active ? " active" : ""), style: `background:${c}`, title: c,
+        onclick: () => { pickedColor = active ? "" : c; drawColors(); },
+      }, active ? icon("check", true) : null);
+    };
+    const drawColors = () => {
+      const quick = PROFILE_COLOR_PALETTES[0][1].slice(0, 6);
+      const topBar = h("div", { class: "color-swatches" },
+        h("button", { type: "button", class: "color-def" + (!pickedColor ? " active" : ""), onclick: () => { pickedColor = ""; drawColors(); } }, t("color_default")),
+        ...quick.map(makeSwatch),
+        h("button", {
+          type: "button", class: "color-more" + (palettesOpen ? " open" : ""),
+          onclick: () => { palettesOpen = !palettesOpen; drawColors(); },
+        },
+          pickedColor ? h("span", { class: "color-dot", style: `background:${pickedColor}` }) : null,
+          h("span", {}, pickedColor ? pickedColor.toUpperCase() : t("color_more")),
+          h("span", { style: "font-size:10px;opacity:.75" }, palettesOpen ? "▴" : "▾")));
+      const nodes = [topBar];
+      if (palettesOpen) {
+        const hexInput = h("input", {
+          type: "text", class: "color-hex", value: pickedColor, placeholder: "#RRGGBB", maxlength: 7,
+          onchange: (e) => {
+            let v = e.target.value.trim();
+            if (v && !v.startsWith("#")) v = "#" + v;
+            if (/^#[0-9a-fA-F]{6}$/.test(v)) { pickedColor = v.toUpperCase(); drawColors(); }
+          },
+        });
+        const nativePicker = h("input", {
+          type: "color", class: "color-native", value: /^#[0-9a-fA-F]{6}$/.test(pickedColor) ? pickedColor : "#3B82F6",
+          oninput: (e) => { pickedColor = e.target.value.toUpperCase(); drawColors(); },
+        });
+        nodes.push(h("div", { class: "color-palettes" },
+          ...PROFILE_COLOR_PALETTES.map(([key, group]) => h("div", { class: "palette-row" },
+            h("span", { class: "palette-label" }, t(key)),
+            ...group.map(makeSwatch))),
+          h("div", { class: "palette-row" },
+            h("span", { class: "palette-label" }, t("color_hex")),
+            nativePicker,
+            hexInput)));
+      }
+      colorWrap.replaceChildren(...nodes);
+    };
+    drawColors();
     const os = h("select", { id: "f-os" }, [["windows", "Windows"], ["macos", "macOS"], ["linux", "Linux"]].map(([v, label]) =>
       h("option", { value: v, selected: (p ? p.os_type : "windows") === v }, label)));
     // The engine is fixed once a profile exists: the two keep incompatible browser data.
@@ -845,7 +1174,8 @@ function openEditor(p) {
       const submitBtn = e.currentTarget.querySelector(".modal-foot .btn-act");
       if (submitBtn) submitBtn.disabled = true;
       const body = { name: name.value.trim(), os_type: os.value, proxy: proxy.value.trim() || null,
-        timezone: tz.value.trim(), locale: loc.value.trim() };
+        timezone: tz.value.trim(), locale: loc.value.trim(), color: pickedColor || "",
+        group: grpInput.value.trim(), notes: notesInput.value.trim() };
       if (!p) body.engine = engine.value;
       try {
         if (p) { await api("PATCH", `/profiles/${enc(p.name)}`, body); delete fingerprints[p.name]; toast(t("saved")); }
@@ -856,7 +1186,10 @@ function openEditor(p) {
     } },
       modalHead(p ? t("edit_title") : t("create"), p ? t("edit_sub", { name: p.name }) : t("create_sub"), close),
       h("div", { class: "modal-body" },
-        field(t("name"), name),
+        h("div", { class: "field-row" }, field(t("name"), name), field(t("group_label"), grpInput)),
+        groupChips,
+        field(t("notes_label"), notesInput),
+        field(t("profile_color"), colorWrap),
         h("div", { class: "field-row" }, field(t("engine"), engine, p ? t("engine_locked") : null), field(t("os"), os)),
         engineNote,
         field(t("proxy_label"), proxy, t("proxy_hint")),
@@ -1114,7 +1447,8 @@ $("login-form").onsubmit = async (e) => {
 $("logout-btn").onclick = () => { token = ""; store.set("foxprofile.token", null); showLogin(); };
 $("new-btn").onclick = () => openEditor(null);
 $("mcp-btn").onclick = openMcpGuide;
-$("search").oninput = render;
+$("search").oninput = () => { currentPage = 1; render(); };
+$("sort").onchange = () => { sortBy = $("sort").value; store.set("foxprofile.sort", sortBy); currentPage = 1; render(); };
 document.querySelectorAll("[data-lang]").forEach((b) => { b.onclick = () => { lang = b.dataset.lang; store.set("foxprofile.lang", lang); applyI18n(); lastRender = ""; render(); }; });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {

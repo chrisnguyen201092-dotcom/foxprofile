@@ -11,10 +11,11 @@ class UIRefs:
     log_column: ft.Container
     log_toggle_btn: ft.TextButton
     content_subtitle: ft.Text
-    profile_list_area: ft.Column
+    profile_list_area: ft.ReorderableListView
     prev_btn: ft.IconButton
     next_btn: ft.IconButton
     page_label: ft.Text
     bulk_bar: ft.Row
     file_picker: ft.FilePicker
     search_field: ft.TextField
+    sort_dropdown: ft.Dropdown | None = None

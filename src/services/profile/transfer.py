@@ -9,7 +9,10 @@ from ...core.logging import get_logger
 from ...models.profile import ENGINES, Profile
 from ...utils.validation import (
     valid_or_none,
+    validate_color,
+    validate_group,
     validate_locale,
+    validate_notes,
     validate_profile_name,
     validate_timezone,
 )
@@ -98,6 +101,16 @@ def import_from_zip(
                 engine=profile_data.get("engine")
                 if profile_data.get("engine") in ENGINES
                 else "camoufox",
+                color=valid_or_none(profile_data.get("color"), validate_color),
+                group=valid_or_none(profile_data.get("group"), validate_group),
+                notes=valid_or_none(profile_data.get("notes"), validate_notes),
+                pages=[
+                    s.strip()
+                    for s in (profile_data.get("pages") or [])
+                    if isinstance(s, str) and s.strip() and validate_group(s.strip())[0]
+                ]
+                if isinstance(profile_data.get("pages"), list)
+                else [],
             )
 
             data_files = [f for f in zipf.namelist() if f.startswith("data/")]

@@ -13,6 +13,7 @@ from ..services.browser import fingerprint
 from .components import (
     build_content_area,
     build_empty_state,
+    build_pages_bar,
     build_profile_card,
     build_sidebar,
     build_ui_refs,
@@ -20,10 +21,11 @@ from .components import (
 )
 from .components.profile_card import build_header_row
 from .components.sidebar import build_filter_buttons
+from .dialogs import open_add_to_page_dialog, open_custom_page_dialog
 from .dialogs.mcp_guide import open_mcp_guide
 from .handlers import AppHandlers
 from .refs import UIRefs
-from .state import ITEMS_PER_PAGE, AppState
+from .state import AppState
 from .theme import COLORS, configure_page
 from .theme.colors import FONT_SEMIBOLD
 from .theme.page import ASSETS_DIR
@@ -42,9 +44,11 @@ class App:
         self._reconcile_started = False
         self.refs: UIRefs | None = None
         self.filter = "all"
+        self.active_page = "__all__"
         self._live_since: dict[str, str] = {}
         self._filter_column = ft.Column(spacing=2)
         self._header_slot = ft.Container()
+        self._pages_bar_slot = ft.Container()
         c.event_bus.subscribe(self.state.schedule_refresh)
         self.h = AppHandlers(
             pm=self.pm,
@@ -83,9 +87,13 @@ class App:
             on_change_page=self._change_page,
             file_picker=self._file_picker,
             on_search=self._on_search,
+            sort_by=self.state.sort_by,
+            on_sort=self._on_sort,
+            on_reorder=self._on_reorder,
         )
         self._filter_column = ft.Column(spacing=2)
         self._header_slot = ft.Container()
+        self._pages_bar_slot = ft.Container()
         self.page.title = get_string("window_title")
         self.page.controls.clear()
         self.page.add(self._build_root_layout(self.refs))
@@ -139,6 +147,8 @@ class App:
             r.bulk_bar,
             r.search_field,
             header_slot=self._header_slot,
+            sort_control=r.sort_dropdown,
+            pages_bar=self._pages_bar_slot,
         )
         return ft.Row(
             expand=True,
@@ -153,6 +163,76 @@ class App:
         self.state.search_query = query.strip().lower()
         self.state.current_page = 1
         self._refresh_profiles()
+
+    def _on_sort(self, sort_by: str) -> None:
+        self.state.sort_by = sort_by
+        self.state.current_page = 1
+        self._refresh_profiles()
+
+    def _on_select_custom_page(self, page_id: str) -> None:
+        self.active_page = page_id
+        self.state.current_page = 1
+        self._refresh_profiles()
+
+    def _on_add_custom_page(self) -> None:
+        if self.page is None:
+            return
+        open_custom_page_dialog(
+            self.page,
+            self.pm,
+            on_saved=self._on_select_custom_page,
+            preselected_names=self.state.selected_names(),
+        )
+
+    def _on_edit_custom_page(self, page_name: str) -> None:
+        if self.page is None:
+            return
+        open_custom_page_dialog(
+            self.page,
+            self.pm,
+            on_saved=self._on_select_custom_page,
+            on_deleted=lambda: self._on_select_custom_page("__all__"),
+            editing_page=page_name,
+        )
+
+    def _on_bulk_add_to_page(self) -> None:
+        if self.page is None:
+            return
+        selected = list(self.state.selected_names())
+        if not selected:
+            return
+
+        def _done(pg: str) -> None:
+            self.state.clear_selection()
+            self._on_select_custom_page(pg)
+
+        open_add_to_page_dialog(self.page, self.pm, selected, on_done=_done)
+
+    def _on_bulk_remove_from_page(self) -> None:
+        if self.active_page == "__all__":
+            return
+        selected = list(self.state.selected_names())
+        if not selected:
+            return
+        if self.pm.remove_profiles_from_page(self.active_page, selected):
+            self.state.clear_selection()
+            self._refresh_profiles()
+
+    def _on_reorder(self, old_index: int, new_index: int) -> None:
+        if self.state.sort_by != "custom" or old_index == new_index:
+            return
+        _, page_profiles, _ = self._get_page_profiles()
+        visible_names = [p.name for p in page_profiles]
+        if not (0 <= old_index < len(visible_names)):
+            return
+        moved = visible_names.pop(old_index)
+        new_index = max(0, min(new_index, len(visible_names)))
+        visible_names.insert(new_index, moved)
+        visible_set = set(visible_names)
+        it = iter(visible_names)
+        full_order = [next(it) if k in visible_set else k for k in self.pm.profiles]
+        if self.pm.reorder_profiles(full_order):
+            self._refresh_profiles()
 
     def _on_filter(self, fid: str) -> None:
         self.filter = fid
@@ -170,16 +250,52 @@ class App:
 
     def _get_page_profiles(self) -> tuple[list, list, int]:
         all_profiles = self.pm.list_profiles()
-        test = self._filter_tests().get(self.filter, lambda p: True)
-        all_profiles = [p for p in all_profiles if test(p)]
+        if self.active_page != "__all__":
+            custom_pages = self.pm.list_custom_pages()
+            if not any(pg.casefold() == self.active_page.casefold() for pg in custom_pages):
+                self.active_page = "__all__"
+            else:
+                target_pg = self.active_page.casefold()
+                all_profiles = [
+                    p for p in all_profiles if any(pg.casefold() == target_pg for pg in p.pages)
+                ]
+        if self.filter.startswith("group:"):
+            target_group = self.filter.removeprefix("group:")
+            all_profiles = [p for p in all_profiles if p.group == target_group]
+        else:
+            test = self._filter_tests().get(self.filter, lambda p: True)
+            all_profiles = [p for p in all_profiles if test(p)]
         if q := self.state.search_query:
             all_profiles = [
-                p for p in all_profiles if q in p.name.lower() or q in (p.proxy or "").lower()
+                p
+                for p in all_profiles
+                if q in p.name.lower()
+                or q in (p.proxy or "").lower()
+                or q in (p.group or "").lower()
+                or q in (p.notes or "").lower()
             ]
-        total = max(1, (len(all_profiles) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+        sort_by = self.state.sort_by
+        if sort_by == "name_asc":
+            all_profiles.sort(key=lambda p: p.name.casefold())
+        elif sort_by == "name_desc":
+            all_profiles.sort(key=lambda p: p.name.casefold(), reverse=True)
+        elif sort_by == "group":
+            all_profiles.sort(
+                key=lambda p: (not bool(p.group), (p.group or "").casefold(), p.name.casefold())
+            )
+        elif sort_by == "running":
+            all_profiles.sort(key=lambda p: (not self.bl.is_running(p.name), p.name.casefold()))
+        elif sort_by == "proxy":
+            all_profiles.sort(key=lambda p: (not bool(p.proxy), p.name.casefold()))
+
+        per_page = self.state.items_per_page
+        if per_page <= 0:
+            self.state.current_page = 1
+            return all_profiles, all_profiles, 1
+        total = max(1, (len(all_profiles) + per_page - 1) // per_page)
         self.state.current_page = min(self.state.current_page, total)
-        start = (self.state.current_page - 1) * ITEMS_PER_PAGE
-        return all_profiles, all_profiles[start : start + ITEMS_PER_PAGE], total
+        start = (self.state.current_page - 1) * per_page
+        return all_profiles, all_profiles[start : start + per_page], total
 
     def _refresh_profiles(self) -> None:
         r = self.refs
@@ -201,11 +317,38 @@ class App:
             del self._live_since[name]
 
         everything = self.pm.list_profiles()
+        custom_pages = self.pm.list_custom_pages()
+        page_counts = [
+            (
+                pg,
+                sum(
+                    1
+                    for p in everything
+                    if any(item.casefold() == pg.casefold() for item in p.pages)
+                ),
+            )
+            for pg in custom_pages
+        ]
+        self._pages_bar_slot.content = build_pages_bar(
+            self.active_page,
+            len(everything),
+            page_counts,
+            self._on_select_custom_page,
+            self._on_add_custom_page,
+            self._on_edit_custom_page,
+        )
+
         tests = self._filter_tests()
+        group_counts: dict[str, int] = {}
+        for p in everything:
+            if p.group:
+                group_counts[p.group] = group_counts.get(p.group, 0) + 1
+        group_counts = dict(sorted(group_counts.items(), key=lambda kv: kv[0].casefold()))
         self._filter_column.controls = build_filter_buttons(
             self.filter,
             {fid: sum(1 for p in everything if test(p)) for fid, test in tests.items()},
             self._on_filter,
+            group_counts=group_counts,
         )
         names = [p.name for p in page_profiles]
         all_sel = bool(names) and all(self.state.is_selected(n) for n in names)
@@ -219,6 +362,8 @@ class App:
             if page_profiles
             else None
         )
+
+        is_custom_sort = self.state.sort_by == "custom"
 
         r.profile_list_area.controls = (
             [
@@ -235,6 +380,7 @@ class App:
                     device=self._device_label(p.name),
                     since=self._live_since.get(p.name, ""),
                     failed=p.name in self.state.failed,
+                    draggable=is_custom_sort,
                 )
                 for p in page_profiles
             ]
@@ -246,13 +392,16 @@ class App:
             self.state,
             page_profiles,
             {
-                "launch": self.h.on_bulk_launch,
+                "launch": self.h.on_launch if False else self.h.on_bulk_launch,
                 "stop": self.h.on_bulk_stop,
                 "delete": self.h.on_bulk_delete,
+                "add_to_page": self._on_bulk_add_to_page,
+                "remove_from_page": self._on_bulk_remove_from_page,
                 "select_page": self.h.on_select_all_page,
                 "deselect_page": self.h.on_deselect_page,
                 "clear": self.h.on_clear_selection,
             },
+            active_page=self.active_page,
         )
         self._set_subtitle(r.content_subtitle)
         r.page_label.value = get_string(
@@ -275,6 +424,7 @@ class App:
     def _build_empty_or_no_results(self) -> ft.Control:
         if self.pm.profiles:
             return ft.Container(
+                key="__empty__",
                 padding=ft.Padding.symmetric(vertical=56, horizontal=24),
                 alignment=ft.Alignment(0, 0),
                 content=ft.Column(
@@ -296,10 +446,13 @@ class App:
                     ],
                 ),
             )
-        return build_empty_state(lambda _: self.h.open_add_dialog())
+        empty = build_empty_state(lambda _: self.h.open_add_dialog())
+        empty.key = "__empty__"
+        return empty
 
     def _clear_filters(self) -> None:
         self.filter = "all"
+        self.active_page = "__all__"
         self.state.search_query = ""
         if self.refs and self.refs.search_field is not None:
             self.refs.search_field.value = ""

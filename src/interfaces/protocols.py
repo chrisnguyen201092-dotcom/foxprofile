@@ -7,6 +7,7 @@ from ..models.profile import Profile
 
 class IProfileManager(Protocol):
     profiles: dict[str, Profile]
+    custom_pages: list[str]
 
     def add_profile(
         self,
@@ -16,6 +17,10 @@ class IProfileManager(Protocol):
         timezone: str | None = None,
         locale: str | None = None,
         engine: str = "camoufox",
+        color: str | None = None,
+        group: str | None = None,
+        notes: str | None = None,
+        pages: list[str] | None = None,
     ) -> bool: ...
 
     def update_profile(
@@ -26,7 +31,30 @@ class IProfileManager(Protocol):
         new_os: str,
         new_timezone: str | None = None,
         new_locale: str | None = None,
+        new_color: str | None = None,
+        new_group: str | None = None,
+        new_notes: str | None = None,
+        new_pages: list[str] | None = None,
     ) -> bool: ...
+
+    def move_profile(self, name: str, direction: int) -> bool: ...
+
+    def reorder_profiles(self, names: list[str]) -> bool: ...
+
+    def list_custom_pages(self) -> list[str]: ...
+
+    def save_custom_page(
+        self,
+        page_name: str,
+        profile_names: list[str] | None = None,
+        original_name: str | None = None,
+    ) -> bool: ...
+
+    def delete_custom_page(self, page_name: str) -> bool: ...
+
+    def add_profiles_to_page(self, page_name: str, profile_names: list[str]) -> bool: ...
+
+    def remove_profiles_from_page(self, page_name: str, profile_names: list[str]) -> bool: ...
 
     def delete_profile(self, name: str) -> bool: ...
 

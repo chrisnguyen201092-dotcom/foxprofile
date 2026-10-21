@@ -23,6 +23,37 @@ _PROXY_PATTERN = re.compile(
 )
 # language[-Script]-REGION, e.g. vi-VN, zh-Hant-TW, es-419
 _LOCALE_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[A-Z][a-z]{3})?-(?:[A-Z]{2}|\d{3})$")
+_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def validate_color(value: str) -> tuple[bool, str]:
+    """A #RRGGBB hex color for row highlight; empty means default (no color)."""
+    if not value:
+        return True, ""
+    if not _COLOR_PATTERN.match(value):
+        return False, get_string("validation_invalid_color", value=value)
+    return True, ""
+
+
+def validate_group(value: str) -> tuple[bool, str]:
+    """Optional folder/group name (up to 48 characters, no control chars)."""
+    if not value:
+        return True, ""
+    if len(value) > 48:
+        return False, get_string("validation_group_too_long")
+    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
+    if found_control:
+        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    return True, ""
+
+
+def validate_notes(value: str) -> tuple[bool, str]:
+    """Optional free-text notes for a profile (up to 500 characters)."""
+    if not value:
+        return True, ""
+    if len(value) > 500:
+        return False, get_string("validation_notes_too_long")
+    return True, ""
 
 
 def validate_profile_name(name: str) -> tuple[bool, str]:

@@ -16,6 +16,7 @@ def rebuild_bulk_bar(
     state: AppState,
     page_profiles: list[Profile],
     cbs: BulkCallbacks,
+    active_page: str = "__all__",
 ) -> None:
     count = len(state.selected_names())
     if count == 0:
@@ -23,13 +24,33 @@ def rebuild_bulk_bar(
         bulk_bar.controls = []
         return
     bulk_bar.visible = True
-    bulk_bar.controls = [_build_container(count, cbs)]
+    bulk_bar.controls = [_build_container(count, cbs, active_page)]
 
 
-def _build_container(count: int, cbs: BulkCallbacks) -> ft.Container:
+def _build_container(count: int, cbs: BulkCallbacks, active_page: str) -> ft.Container:
     def btn(label: str, icon: str, key: str, style: ft.ButtonStyle) -> ft.Control:
         cls = ft.Button if style is ACCENT_STYLE else ft.OutlinedButton
         return cls(label, icon=icon, height=32, style=style, on_click=lambda _: cbs[key]())
+
+    extra_btns: list[ft.Control] = []
+    if "add_to_page" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_add_to_page"),
+                ft.Icons.BOOKMARK_ADD_OUTLINED,
+                "add_to_page",
+                OUTLINE_STYLE,
+            )
+        )
+    if active_page != "__all__" and "remove_from_page" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_remove_from_page"),
+                ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                "remove_from_page",
+                OUTLINE_STYLE,
+            )
+        )
 
     return ft.Container(
         expand=True,
@@ -50,6 +71,7 @@ def _build_container(count: int, cbs: BulkCallbacks) -> ft.Container:
                 btn(get_string("launch"), ft.Icons.PLAY_ARROW_ROUNDED, "launch", ACCENT_STYLE),
                 btn(get_string("stop"), ft.Icons.STOP_ROUNDED, "stop", OUTLINE_STYLE),
                 btn(get_string("delete"), ft.Icons.DELETE_OUTLINE, "delete", OUTLINE_STYLE),
+                *extra_btns,
                 ft.Container(expand=True),
                 ft.TextButton(
                     get_string("clear"),

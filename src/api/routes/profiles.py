@@ -14,7 +14,10 @@ from ...services.browser import chrome_prefetch, cookies, fingerprint
 from ...services.browser.launcher import ProfileBusyError
 from ...services.proxy.geo_check import check_geo
 from ...utils.validation import (
+    validate_color,
+    validate_group,
     validate_locale,
+    validate_notes,
     validate_profile_name,
     validate_proxy_format,
     validate_timezone,
@@ -25,6 +28,8 @@ from ..schemas.common import ErrorResponse, SuccessResponse
 from ..schemas.profiles import (
     CookieImportRequest,
     CookieImportResponse,
+    CustomPageMembersRequest,
+    CustomPageRequest,
     DataDirResponse,
     ExportRequest,
     ExportResponse,
@@ -33,6 +38,8 @@ from ..schemas.profiles import (
     ImportResponse,
     ProfileCreate,
     ProfileListResponse,
+    ProfileMoveRequest,
+    ProfileOrderRequest,
     ProfileResponse,
     ProfileUpdate,
 )
@@ -74,13 +81,94 @@ def _require_geo(timezone: str | None, locale: str | None) -> None:
             raise HTTPException(status_code=400, detail=msg)
 
 
+def _require_color(color: str | None) -> None:
+    valid, msg = validate_color(color or "")
+    if not valid:
+        raise HTTPException(status_code=400, detail=msg)
+
+
+def _require_meta(group: str | None, notes: str | None) -> None:
+    for validate, value in ((validate_group, group), (validate_notes, notes)):
+        valid, msg = validate(value or "")
+        if not valid:
+            raise HTTPException(status_code=400, detail=msg)
+
+
 @router.get("", response_model=ProfileListResponse)
 def list_profiles(
     pm: IProfileManager = Depends(get_profile_manager),
     bl: IBrowserLauncher = Depends(get_browser_launcher),
 ) -> ProfileListResponse:
     profiles = [profile_response(p, bl) for p in pm.list_profiles()]
-    return ProfileListResponse(profiles=profiles, total=len(profiles))
+    return ProfileListResponse(
+        profiles=profiles,
+        total=len(profiles),
+        custom_pages=pm.list_custom_pages(),
+    )
+
+
+@router.post("/pages", response_model=SuccessResponse)
+def save_custom_page(
+    body: CustomPageRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    valid, msg = validate_group(body.name.strip())
+    if not body.name.strip() or not valid:
+        raise HTTPException(status_code=400, detail=msg or "Page name cannot be empty")
+    if not pm.save_custom_page(body.name, body.profile_names, body.original_name):
+        raise HTTPException(status_code=409, detail="Page name already exists or invalid")
+    bus.emit()
+    return SuccessResponse(message=f"Saved page '{body.name.strip()}'")
+
+
+@router.delete("/pages/{page_name}", response_model=SuccessResponse)
+def delete_custom_page(
+    page_name: str,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    if not pm.delete_custom_page(page_name):
+        raise HTTPException(status_code=404, detail=f"Page '{page_name}' not found")
+    bus.emit()
+    return SuccessResponse(message=f"Deleted page '{page_name}'")
+
+
+@router.post("/pages/{page_name}/members", response_model=SuccessResponse)
+def add_profiles_to_page(
+    page_name: str,
+    body: CustomPageMembersRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    if not pm.add_profiles_to_page(page_name, body.profile_names):
+        raise HTTPException(status_code=400, detail="Invalid page name")
+    bus.emit()
+    return SuccessResponse(message=f"Added profiles to '{page_name}'")
+
+
+@router.post("/pages/{page_name}/remove-members", response_model=SuccessResponse)
+def remove_profiles_from_page(
+    page_name: str,
+    body: CustomPageMembersRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    if not pm.remove_profiles_from_page(page_name, body.profile_names):
+        raise HTTPException(status_code=404, detail=f"Page '{page_name}' not found")
+    bus.emit()
+    return SuccessResponse(message=f"Removed profiles from '{page_name}'")
+
+
+@router.put("/order", response_model=SuccessResponse)
+def reorder_profiles(
+    body: ProfileOrderRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    pm.reorder_profiles(body.names)
+    bus.emit()
+    return SuccessResponse(message="Profile order updated")
 
 
 @router.post(
@@ -101,6 +189,8 @@ def create_profile(
     _require_os(body.os_type)
     _require_engine(body.engine)
     _require_geo(body.timezone, body.locale)
+    _require_color(body.color)
+    _require_meta(body.group, body.notes)
 
     if body.proxy:
         valid, msg = validate_proxy_format(body.proxy)
@@ -114,6 +204,10 @@ def create_profile(
         body.timezone or None,
         body.locale or None,
         body.engine,
+        body.color or None,
+        (body.group or "").strip() or None,
+        (body.notes or "").strip() or None,
+        body.pages,
     ):
         raise HTTPException(status_code=409, detail="Profile already exists")
 
@@ -122,6 +216,25 @@ def create_profile(
         chrome_prefetch.start()
     bus.emit()
     return build_profile_response(body.name, pm, bl)
+
+
+@router.post(
+    "/{name}/move",
+    response_model=SuccessResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def move_profile(
+    name: str,
+    body: ProfileMoveRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    require_profile(name, pm)
+    if body.direction == 0:
+        raise HTTPException(status_code=400, detail="direction must be non-zero")
+    pm.move_profile(name, body.direction)
+    bus.emit()
+    return SuccessResponse(message=f"Moved profile '{name}'")
 
 
 @router.get(
@@ -158,6 +271,9 @@ def update_profile(
     new_os = supplied.get("os_type", profile.os_type)
     new_timezone = supplied.get("timezone", profile.timezone)
     new_locale = supplied.get("locale", profile.locale)
+    new_color = supplied.get("color", profile.color)
+    new_group = supplied.get("group", profile.group)
+    new_notes = supplied.get("notes", profile.notes)
 
     if "name" in supplied:
         valid, msg = validate_profile_name(new_name)
@@ -177,6 +293,8 @@ def update_profile(
     if "os_type" in supplied:
         _require_os(new_os)
     _require_geo(supplied.get("timezone"), supplied.get("locale"))
+    _require_color(supplied.get("color"))
+    _require_meta(supplied.get("group"), supplied.get("notes"))
 
     if "proxy" in supplied and new_proxy:
         valid, msg = validate_proxy_format(new_proxy)
@@ -184,7 +302,16 @@ def update_profile(
             raise HTTPException(status_code=400, detail=msg)
 
     if not pm.update_profile(
-        name, new_name, new_proxy or "", new_os, new_timezone or None, new_locale or None
+        name,
+        new_name,
+        new_proxy or "",
+        new_os,
+        new_timezone or None,
+        new_locale or None,
+        new_color or None,
+        (new_group or "").strip() or None,
+        (new_notes or "").strip() or None,
+        supplied.get("pages"),
     ):
         raise HTTPException(status_code=409, detail="Update failed (name conflict?)")
 
