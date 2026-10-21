@@ -16,11 +16,21 @@ def delete_profile(
     refresh: Callable[[], None],
 ) -> None:
     def do_delete() -> None:
-        pm.delete_profile(name)
-        log(get_string("deleted_profile", name=name))
+        if hasattr(pm, "trash_profile"):
+            pm.trash_profile(name)
+            log(get_string("moved_to_trash", name=name))
+        else:
+            pm.delete_profile(name)
+            log(get_string("deleted_profile", name=name))
         refresh()
 
-    open_confirm_dialog(page, name, do_delete)
+    open_confirm_dialog(
+        page,
+        name,
+        do_delete,
+        title=get_string("confirm_trash_msg", name=name),
+        body=get_string("trash_can_restore_note"),
+    )
 
 
 def _existing_groups(pm: IProfileManager) -> list[str]:

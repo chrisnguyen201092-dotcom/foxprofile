@@ -27,6 +27,12 @@ class AppState:
         self._ui_update_lock = threading.Lock()
         self._selected_profiles: set[str] = set()
         self._selection_lock = threading.Lock()
+        self.last_selected_name: str | None = None
+        self.shift_down: bool = False
+        self.editing_note: str | None = None
+        self.editing_proxy: str | None = None
+        # profile_name -> ("checking" | "ok" | "fail", short_label)
+        self.proxy_status: dict[str, tuple[str, str]] = {}
 
     def is_loading(self, name: str) -> bool:
         with self._loading_lock:
@@ -81,6 +87,39 @@ class AppState:
                 self._selected_profiles.discard(name)
             else:
                 self._selected_profiles.add(name)
+            self.last_selected_name = name
+
+    def select_range(
+        self,
+        visible_names: list[str],
+        target_name: str | None = None,
+    ) -> int:
+        with self._selection_lock:
+            if target_name is not None:
+                anchor = self.last_selected_name
+                if anchor in visible_names and target_name in visible_names:
+                    i1 = visible_names.index(anchor)
+                    i2 = visible_names.index(target_name)
+                    lo, hi = min(i1, i2), max(i1, i2)
+                    span = visible_names[lo : hi + 1]
+                    self._selected_profiles.update(span)
+                    self.last_selected_name = target_name
+                    return len(span)
+                self._selected_profiles.add(target_name)
+                self.last_selected_name = target_name
+                return 1
+
+            indices = [
+                idx
+                for idx, n in enumerate(visible_names)
+                if n in self._selected_profiles
+            ]
+            if len(indices) < 2:
+                return len(indices)
+            lo, hi = min(indices), max(indices)
+            span = visible_names[lo : hi + 1]
+            self._selected_profiles.update(span)
+            return len(span)
 
     def is_selected(self, name: str) -> bool:
         with self._selection_lock:

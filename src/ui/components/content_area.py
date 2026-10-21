@@ -3,7 +3,91 @@ from collections.abc import Callable
 import flet as ft
 
 from ...core.strings import get_string
+from ...services.monitor import MonitorSnapshot
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
+
+
+def build_monitor_bar(
+    snap: MonitorSnapshot,
+    total_profiles: int = 0,
+    on_check_all_proxies: Callable[[], None] | None = None,
+) -> ft.Container | None:
+    """Compact alert strip that only appears when an active issue is detected."""
+    _ = (total_profiles, on_check_all_proxies)
+
+    def _pill(
+        text: str,
+        icon: ft.IconData,
+        color: str,
+        bg: str | None = None,
+    ) -> ft.Container:
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=9, vertical=4),
+            border_radius=6,
+            bgcolor=bg or COLORS["card_bg"],
+            border=ft.Border.all(1, color if bg else COLORS["card_border"]),
+            content=ft.Row(
+                spacing=5,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(icon, size=13, color=color),
+                    ft.Text(
+                        text,
+                        size=11.5,
+                        font_family=FONT_DATA,
+                        color=color,
+                    ),
+                ],
+            ),
+        )
+
+    pills: list[ft.Control] = []
+
+    for port, members in snap.proxy_collisions:
+        pills.append(
+            _pill(
+                get_string(
+                    "monitor_alert_proxy_collision",
+                    port=port,
+                    names=", ".join(members),
+                ),
+                ft.Icons.GPP_MAYBE,
+                COLORS["error"],
+                COLORS["input_bg"],
+            )
+        )
+    for pname, count in snap.token_bursts:
+        pills.append(
+            _pill(
+                get_string("monitor_alert_token_burst", name=pname, count=count),
+                ft.Icons.BOLT,
+                COLORS["warning"],
+                COLORS["input_bg"],
+            )
+        )
+    if snap.disk_low:
+        pills.append(
+            _pill(
+                get_string("monitor_alert_disk_low", gb=f"{snap.free_gb:.1f}"),
+                ft.Icons.WARNING_AMBER_ROUNDED,
+                COLORS["error"],
+                COLORS["input_bg"],
+            )
+        )
+
+    if not pills:
+        return None
+
+    return ft.Container(
+        padding=ft.Padding.only(bottom=8),
+        content=ft.Row(
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=pills,
+        ),
+    )
 
 
 def build_pages_bar(
@@ -230,6 +314,8 @@ def build_content_area(
     header_slot: ft.Container | None = None,
     sort_control: ft.Control | None = None,
     pages_bar: ft.Control | None = None,
+    monitor_bar: ft.Control | None = None,
+    check_proxy_btn: ft.Control | None = None,
 ) -> ft.Container:
     """Main content: title, search, custom pages bar, then the profile sheet."""
     _ = (prev_btn, next_btn, page_label)
@@ -249,7 +335,9 @@ def build_content_area(
             ],
         ),
     )
-    right_head_controls = [c for c in (sort_control, search_field) if c is not None]
+    right_head_controls = [
+        c for c in (check_proxy_btn, sort_control, search_field) if c is not None
+    ]
     return ft.Container(
         expand=True,
         bgcolor=COLORS["bg"],
@@ -288,6 +376,7 @@ def build_content_area(
                     ],
                 ),
                 ft.Container(height=14),
+                *([] if monitor_bar is None else [monitor_bar]),
                 *([] if pages_bar is None else [pages_bar, ft.Container(height=10)]),
                 sheet,
             ],

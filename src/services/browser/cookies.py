@@ -10,11 +10,13 @@ Cookies travel between three shapes:
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import time
 from typing import Any
 
+from ...core.config import DATA_DIR
 from ...core.logging import get_logger
 
 logger = get_logger("browser.cookies")
@@ -194,8 +196,38 @@ def _from_netscape(text: str) -> list[dict[str, Any]]:
     return cookies
 
 
+def _from_header_string(text: str, default_domain: str = ".hatch.io") -> list[dict[str, Any]]:
+    """Parse 'Cookie: k1=v1; k2=v2' or 'k1=v1; k2=v2' header string."""
+    raw = text.strip()
+    if raw.lower().startswith("cookie:"):
+        raw = raw.split(":", 1)[1].strip()
+    cookies = []
+    for part in raw.split(";"):
+        piece = part.strip()
+        if not piece or "=" not in piece:
+            continue
+        k, v = piece.split("=", 1)
+        name = k.strip()
+        val = v.strip()
+        if not name or "\n" in name or "\t" in name or " " in name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": val,
+                "domain": default_domain,
+                "path": "/",
+                "httpOnly": False,
+                "secure": True,
+                "sameSite": "Lax",
+                "expires": time.time() + _SESSION_COOKIE_TTL,
+            }
+        )
+    return cookies
+
+
 def parse_cookies(text: str) -> list[dict[str, Any]]:
-    """Parse JSON (extension or Playwright layout) or Netscape cookies.txt."""
+    """Parse JSON (extension or Playwright layout), Netscape cookies.txt, or Cookie header string."""
     stripped = text.strip()
     if stripped.startswith(("[", "{")):
         try:
@@ -207,7 +239,93 @@ def parse_cookies(text: str) -> list[dict[str, Any]]:
         if not isinstance(data, list):
             raise CookieError("Cookie JSON must be a list of cookies")
         return _from_json(data)
-    return _from_netscape(text)
+    netscape = _from_netscape(text)
+    if netscape:
+        return netscape
+    if "\t" not in stripped and "=" in stripped:
+        return _from_header_string(stripped)
+    return []
+
+
+def format_cookies(cookies: list[dict[str, Any]], fmt: str = "json") -> tuple[str, int]:
+    """Format a list of Playwright-shaped cookie dicts into `fmt` ('json' or 'netscape')."""
+    if fmt not in FORMATS:
+        raise CookieError(f"Unknown format '{fmt}'. Use one of: {', '.join(FORMATS)}")
+    if fmt == "netscape":
+        return _to_netscape(cookies), len(cookies)
+    return json.dumps(_to_extension_json(cookies), indent=2, ensure_ascii=False), len(cookies)
+
+
+_MOZ_SAMESITE = {0: "None", 1: "Lax", 2: "Strict"}
+
+
+def read_cookies_sqlite_readonly(profile_name: str) -> list[dict[str, Any]] | None:
+    """Fast read-only SQLite read of Camoufox/Firefox cookies.sqlite (<5ms).
+
+    Returns None if cookies.sqlite does not exist or cannot be queried.
+    """
+    db_path = pathlib.Path(DATA_DIR) / profile_name / "cookies.sqlite"
+    if not db_path.exists():
+        return None
+    try:
+        uri = f"file:{db_path.as_posix()}?mode=ro&immutable=1"
+        conn = sqlite3.connect(uri, uri=True, timeout=0.5)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite "
+                "FROM moz_cookies"
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+    out: list[dict[str, Any]] = []
+    for name, value, host, path, expiry, is_secure, is_http_only, same_site in rows:
+        exp_val = float(expiry or -1)
+        if exp_val > 10_000_000_000:
+            exp_val = exp_val / 1000.0
+        out.append(
+            {
+                "name": str(name or ""),
+                "value": str(value or ""),
+                "domain": str(host or ""),
+                "path": str(path or "/"),
+                "expires": exp_val if exp_val > 0 else -1,
+                "secure": bool(is_secure),
+                "httpOnly": bool(is_http_only),
+                "sameSite": _MOZ_SAMESITE.get(int(same_site or 0), "Lax"),
+            }
+        )
+    return out
+
+
+def inspect_cookie_summary(
+    profile_name: str,
+    live_cookies: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return a safe metadata summary of cookies (counts & domains, no secret values)."""
+    raw = live_cookies if live_cookies is not None else (read_cookies_sqlite_readonly(profile_name) or [])
+    domain_counts: dict[str, int] = {}
+    has_gw = False
+    has_session = False
+    for c in raw:
+        dom = str(c.get("domain") or "").lstrip(".") or "unknown"
+        domain_counts[dom] = domain_counts.get(dom, 0) + 1
+        cname = str(c.get("name") or "")
+        if "cf_clearance" in cname or "__cf_bm" in cname:
+            has_gw = True
+        if any(k in cname.lower() for k in ("session", "token", "auth", "sid", "user")):
+            has_session = True
+    top_domains = sorted(domain_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+    return {
+        "total": len(raw),
+        "domains": top_domains,
+        "has_gw": has_gw,
+        "has_session": has_session,
+    }
 
 
 # --- Public API --------------------------------------------------------------
@@ -219,13 +337,13 @@ def export_cookies(
     """Return (text, count) of a stopped profile's cookies in `fmt`."""
     if fmt not in FORMATS:
         raise CookieError(f"Unknown format '{fmt}'. Use one of: {', '.join(FORMATS)}")
-    cookies = _call_tool("export", profile_name, os_type, engine=engine)["cookies"]
+    fast = read_cookies_sqlite_readonly(profile_name) if engine == "camoufox" else None
+    if fast is not None:
+        cookies = fast
+    else:
+        cookies = _call_tool("export", profile_name, os_type, engine=engine)["cookies"]
     logger.info("Exported %d cookies from %s (%s)", len(cookies), profile_name, fmt)
-    if fmt == "netscape":
-        return _to_netscape(cookies), len(cookies)
-    return json.dumps(_to_extension_json(cookies), indent=2, ensure_ascii=False), len(
-        cookies,
-    )
+    return format_cookies(cookies, fmt)
 
 
 def import_cookies(profile_name: str, os_type: str, text: str, engine: str = "camoufox") -> int:

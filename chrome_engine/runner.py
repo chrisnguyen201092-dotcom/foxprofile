@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chrome_engine import fetch
 from chrome_engine.engine import ChromeEngine
 from src.core.config import DATA_DIR, HEADLESS, RESTORE_TABS
-from src.services.browser import control, session
+from src.services.browser import control, session, window_title
 from src.services.browser.runner import restore_tabs, snapshot_tabs
 
 _shutdown = asyncio.Event()
@@ -135,6 +135,13 @@ async def run_browser(
             if RESTORE_TABS
             else None
         )
+        title_task = (
+            asyncio.create_task(
+                window_title.keep_window_title_prefixed(profile_name, close_event)
+            )
+            if not _headless()
+            else None
+        )
         close_task = asyncio.create_task(close_event.wait())
         shutdown_task = asyncio.create_task(_shutdown.wait())
         done, pending = await asyncio.wait(
@@ -146,6 +153,8 @@ async def run_browser(
             session.save(profile_dir, [p.url for p in context.pages if not p.is_closed()])
         if snapshot_task:
             snapshot_task.cancel()
+        if title_task:
+            title_task.cancel()
         await control_runner.cleanup()
         for task in pending:
             task.cancel()

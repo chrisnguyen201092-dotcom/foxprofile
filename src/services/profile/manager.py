@@ -66,6 +66,35 @@ class ProfileManager:
     def _pages_file() -> pathlib.Path:
         return pathlib.Path(PROFILES_FILE).with_name("custom_pages.json")
 
+    @staticmethod
+    def _trash_file() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).with_name("trash_profiles.json")
+
+    @staticmethod
+    def _trash_data_dir() -> pathlib.Path:
+        return pathlib.Path(DATA_DIR) / ".trash"
+
+    def _load_trash_dict(self) -> dict[str, dict]:
+        path = self._trash_file()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_trash_dict(self, data: dict[str, dict]) -> None:
+        path = self._trash_file()
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _replace(tmp, path)
+        except Exception as e:
+            logger.exception("Error saving trash profiles: %s", e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+
     def _find_by_casefold(self, name: str) -> str | None:
         """Return the existing profile key that case-folds to *name*, or None.
 
@@ -422,6 +451,161 @@ class ProfileManager:
             shutil.rmtree(self._data_path(name), ignore_errors=True)
         logger.info("Deleted profile: %s", name)
         return True
+
+    def clone_profile(
+        self,
+        source_name: str,
+        new_name: str,
+        copy_proxy: bool = True,
+    ) -> bool:
+        clean_new = new_name.strip()
+        if not validate_profile_name(clean_new)[0]:
+            return False
+        with self._lock:
+            src = self.profiles.get(source_name)
+            if src is None:
+                return False
+            return self.add_profile(
+                name=clean_new,
+                proxy=(src.proxy or "") if copy_proxy else "",
+                os_type=src.os_type,
+                timezone=src.timezone,
+                locale=src.locale,
+                engine=src.engine,
+                color=src.color,
+                group=src.group,
+                notes=src.notes,
+                pages=list(src.pages),
+            )
+
+    def trash_profile(self, name: str) -> bool:
+        with self._lock:
+            if name not in self.profiles:
+                return False
+            profile = self.profiles.pop(name)
+            self.save_profiles()
+            trash_data = self._load_trash_dict()
+            entry = profile.to_dict()
+            entry["deleted_at"] = int(time.time())
+            trash_data[name] = entry
+            self._save_trash_dict(trash_data)
+
+            src_dir = pathlib.Path(self._data_path(name))
+            if src_dir.exists():
+                trash_root = self._trash_data_dir()
+                trash_root.mkdir(exist_ok=True, parents=True)
+                dst_dir = trash_root / name
+                if dst_dir.exists():
+                    shutil.rmtree(dst_dir, ignore_errors=True)
+                try:
+                    shutil.move(str(src_dir), str(dst_dir))
+                except OSError:
+                    shutil.rmtree(src_dir, ignore_errors=True)
+        logger.info("Moved profile to trash: %s", name)
+        return True
+
+    def restore_profile(self, name: str) -> bool:
+        with self._lock:
+            trash_data = self._load_trash_dict()
+            key = next((k for k in trash_data if k == name or k.casefold() == name.casefold()), None)
+            if key is None:
+                return False
+            p_data = trash_data.pop(key)
+            target_name = key
+            if self._find_by_casefold(target_name) is not None:
+                idx = 1
+                while True:
+                    candidate = f"{key} ({idx})"
+                    if validate_profile_name(candidate)[0] and self._find_by_casefold(candidate) is None:
+                        target_name = candidate
+                        break
+                    idx += 1
+
+            src_trash_dir = self._trash_data_dir() / key
+            dst_dir = pathlib.Path(self._data_path(target_name))
+            if src_trash_dir.exists():
+                if dst_dir.exists():
+                    shutil.rmtree(dst_dir, ignore_errors=True)
+                try:
+                    shutil.move(str(src_trash_dir), str(dst_dir))
+                except OSError:
+                    dst_dir.mkdir(exist_ok=True, parents=True)
+            else:
+                dst_dir.mkdir(exist_ok=True, parents=True)
+
+            pages = self._register_pages(p_data.get("pages"))
+            self.profiles[target_name] = Profile(
+                name=target_name,
+                proxy=p_data.get("proxy") or None,
+                os_type=p_data.get("os_type", "windows"),
+                timezone=valid_or_none(p_data.get("timezone"), validate_timezone),
+                locale=valid_or_none(p_data.get("locale"), validate_locale),
+                engine=_engine_or_default(p_data.get("engine")),
+                color=valid_or_none(p_data.get("color"), validate_color),
+                group=valid_or_none(p_data.get("group"), validate_group),
+                notes=valid_or_none(p_data.get("notes"), validate_notes),
+                pages=pages,
+            )
+            self._save_trash_dict(trash_data)
+            self.save_profiles()
+        logger.info("Restored profile from trash: %s -> %s", name, target_name)
+        return True
+
+    def delete_trashed_profile(self, name: str) -> bool:
+        with self._lock:
+            trash_data = self._load_trash_dict()
+            key = next((k for k in trash_data if k == name or k.casefold() == name.casefold()), None)
+            if key is None:
+                return False
+            del trash_data[key]
+            self._save_trash_dict(trash_data)
+            shutil.rmtree(self._trash_data_dir() / key, ignore_errors=True)
+        logger.info("Permanently deleted trashed profile: %s", name)
+        return True
+
+    def empty_trash(self) -> int:
+        with self._lock:
+            trash_data = self._load_trash_dict()
+            count = len(trash_data)
+            self._save_trash_dict({})
+            shutil.rmtree(self._trash_data_dir(), ignore_errors=True)
+        logger.info("Emptied trash (%d profiles)", count)
+        return count
+
+    def list_trashed_profiles(self) -> list[dict]:
+        with self._lock:
+            trash_data = self._load_trash_dict()
+            items = list(trash_data.values())
+            items.sort(key=lambda d: int(d.get("deleted_at") or 0), reverse=True)
+            return items
+
+    def bulk_update_group(self, names: list[str], group: str | None) -> int:
+        clean_group = (group or "").strip() or None
+        if clean_group is not None and not validate_group(clean_group)[0]:
+            return 0
+        count = 0
+        with self._lock:
+            for name in names:
+                p = self.profiles.get(name)
+                if p is not None:
+                    p.group = clean_group
+                    count += 1
+            if count:
+                self.save_profiles()
+        return count
+
+    def bulk_update_color(self, names: list[str], color: str | None) -> int:
+        clean_color = valid_or_none(color, validate_color)
+        count = 0
+        with self._lock:
+            for name in names:
+                p = self.profiles.get(name)
+                if p is not None:
+                    p.color = clean_color
+                    count += 1
+            if count:
+                self.save_profiles()
+        return count
 
     def list_profiles(self) -> list[Profile]:
         with self._lock:

@@ -217,6 +217,16 @@ class PageController:
         self._current = None
         return await self.tabs()
 
+    async def cookies_export(self) -> dict[str, Any]:
+        raw = await self._context.cookies()
+        return {"cookies": raw}
+
+    async def cookies_import(self, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(cookies, list):
+            raise ControlError("cookies must be a list")
+        await self._context.add_cookies(cookies)
+        return {"imported": len(cookies)}
+
     ACTIONS = (
         "navigate",
         "back",
@@ -234,6 +244,8 @@ class PageController:
         "tab_new",
         "tab_select",
         "tab_close",
+        "cookies_export",
+        "cookies_import",
     )
 
     async def dispatch(self, action: str, params: dict[str, Any]) -> Any:

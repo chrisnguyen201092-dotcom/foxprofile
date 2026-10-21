@@ -10,6 +10,7 @@ from ..core.logging import get_logger
 from ..core.strings import current_language, get_string, set_language
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.browser import fingerprint
+from ..services.monitor import MonitorService, MonitorSnapshot
 from .components import (
     build_content_area,
     build_empty_state,
@@ -19,6 +20,7 @@ from .components import (
     build_ui_refs,
     rebuild_bulk_bar,
 )
+from .components.content_area import build_monitor_bar
 from .components.profile_card import build_header_row
 from .components.sidebar import build_filter_buttons
 from .dialogs import open_add_to_page_dialog, open_custom_page_dialog
@@ -29,6 +31,7 @@ from .state import AppState
 from .theme import COLORS, configure_page
 from .theme.colors import FONT_SEMIBOLD
 from .theme.page import ASSETS_DIR
+from .theme.styles import OUTLINE_STYLE, RAIL_STYLE
 
 logger = get_logger("app")
 
@@ -46,9 +49,19 @@ class App:
         self.filter = "all"
         self.active_page = "__all__"
         self._live_since: dict[str, str] = {}
+        self.monitor = MonitorService()
+        self._last_monitor_snap: MonitorSnapshot | None = None
         self._filter_column = ft.Column(spacing=2)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
+        self._monitor_bar_slot = ft.Container()
+        self._trash_btn = ft.OutlinedButton(
+            get_string("trash_button", count=0),
+            icon=ft.Icons.DELETE_OUTLINE,
+            width=208,
+            height=36,
+            style=RAIL_STYLE,
+        )
         c.event_bus.subscribe(self.state.schedule_refresh)
         self.h = AppHandlers(
             pm=self.pm,
@@ -68,6 +81,11 @@ class App:
     def _main(self, page: ft.Page) -> None:
         self.page = page
         configure_page(page)
+
+        def _on_key(e: ft.KeyboardEvent) -> None:
+            self.state.shift_down = bool(e.shift)
+
+        page.on_keyboard_event = _on_key
         fp = ft.FilePicker()
         page.services.append(fp)
         self.clipboard = ft.Clipboard()
@@ -94,6 +112,15 @@ class App:
         self._filter_column = ft.Column(spacing=2)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
+        self._monitor_bar_slot = ft.Container()
+        self._trash_btn = ft.OutlinedButton(
+            get_string("trash_button", count=len(self.pm.list_trashed_profiles())),
+            icon=ft.Icons.DELETE_OUTLINE,
+            width=208,
+            height=36,
+            style=RAIL_STYLE,
+            on_click=lambda _: self.h.on_open_trash(),
+        )
         self.page.title = get_string("window_title")
         self.page.controls.clear()
         self.page.add(self._build_root_layout(self.refs))
@@ -137,6 +164,14 @@ class App:
             filter_column=self._filter_column,
             language=current_language(),
             on_language=self._set_language,
+            trash_btn=self._trash_btn,
+        )
+        check_proxy_btn = ft.OutlinedButton(
+            get_string("bulk_check_proxy"),
+            icon=ft.Icons.NETWORK_CHECK,
+            height=40,
+            style=OUTLINE_STYLE,
+            on_click=lambda _: self.h.on_bulk_check_proxy(),
         )
         content = build_content_area(
             r.content_subtitle,
@@ -149,6 +184,8 @@ class App:
             header_slot=self._header_slot,
             sort_control=r.sort_dropdown,
             pages_bar=self._pages_bar_slot,
+            monitor_bar=self._monitor_bar_slot,
+            check_proxy_btn=check_proxy_btn,
         )
         return ft.Row(
             expand=True,
@@ -262,9 +299,13 @@ class App:
         self._refresh_profiles()
 
     def _filter_tests(self) -> dict:
+        snap = self._last_monitor_snap
         return {
             "all": lambda p: True,
             "running": lambda p: self.bl.is_running(p.name),
+            "warnings": lambda p: bool(
+                snap and p.name in snap.profiles and snap.profiles[p.name].has_warning
+            ),
             "proxy": lambda p: bool(p.proxy),
             "direct": lambda p: not p.proxy,
             "chrome": lambda p: p.engine == "chrome",
@@ -324,7 +365,6 @@ class App:
         assert r is not None
         self._update_stats()
         self._flush_log()
-        all_profiles, page_profiles, total_pages = self._get_page_profiles()
 
         all_names = set(self.pm.profiles)
         for stale in self.state.selected_names() - all_names:
@@ -335,10 +375,25 @@ class App:
         self.state.failed.intersection_update(all_names - running)
         for name in running - set(self._live_since):
             self._live_since[name] = time.strftime("%H:%M")
+            self.monitor.record_started(name)
         for name in set(self._live_since) - running:
             del self._live_since[name]
+            self.monitor.record_stopped(name)
 
         everything = self.pm.list_profiles()
+        snap = self.monitor.snapshot(everything, running)
+        self._last_monitor_snap = snap
+        alert_bar = build_monitor_bar(snap, len(everything))
+        self._monitor_bar_slot.content = alert_bar
+        self._monitor_bar_slot.visible = alert_bar is not None
+        if hasattr(self.pm, "list_trashed_profiles"):
+            self._trash_btn.content = get_string(
+                "trash_button",
+                count=len(self.pm.list_trashed_profiles()),
+            )
+
+        all_profiles, page_profiles, total_pages = self._get_page_profiles()
+
         custom_pages = self.pm.list_custom_pages()
         page_counts = [
             (
@@ -404,6 +459,16 @@ class App:
                     since=self._live_since.get(p.name, ""),
                     failed=p.name in self.state.failed,
                     draggable=is_custom_sort,
+                    editing_note=self.state.editing_note == p.name,
+                    on_start_edit_note=self.h.on_start_edit_note,
+                    on_save_note=self.h.on_save_note,
+                    editing_proxy=self.state.editing_proxy == p.name,
+                    on_start_edit_proxy=self.h.on_start_edit_proxy,
+                    on_save_proxy=self.h.on_save_proxy,
+                    on_check_proxy=self.h.on_quick_check_proxy if p.proxy else None,
+                    on_clone=self.h.on_clone,
+                    monitor_info=snap.profiles.get(p.name),
+                    proxy_check_state=self.state.proxy_status.get(p.name),
                 )
                 for p in page_profiles
             ]
@@ -418,6 +483,10 @@ class App:
                 "launch": self.h.on_launch if False else self.h.on_bulk_launch,
                 "stop": self.h.on_bulk_stop,
                 "delete": self.h.on_bulk_delete,
+                "select_range": self.h.on_bulk_select_range,
+                "set_group": self.h.on_bulk_set_group,
+                "set_color": self.h.on_bulk_set_color,
+                "check_proxy": self.h.on_bulk_check_proxy,
                 "add_to_page": self._on_bulk_add_to_page,
                 "remove_from_page": self._on_bulk_remove_from_page,
                 "select_page": self.h.on_select_all_page,

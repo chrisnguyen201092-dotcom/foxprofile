@@ -33,6 +33,42 @@ def _build_container(count: int, cbs: BulkCallbacks, active_page: str) -> ft.Con
         return cls(label, icon=icon, height=32, style=style, on_click=lambda _: cbs[key]())
 
     extra_btns: list[ft.Control] = []
+    if "select_range" in cbs and count >= 2:
+        extra_btns.append(
+            btn(
+                get_string("bulk_select_range"),
+                ft.Icons.LOW_PRIORITY,
+                "select_range",
+                OUTLINE_STYLE,
+            )
+        )
+    if "set_group" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_set_group"),
+                ft.Icons.FOLDER_OUTLINED,
+                "set_group",
+                OUTLINE_STYLE,
+            )
+        )
+    if "set_color" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_set_color"),
+                ft.Icons.PALETTE_OUTLINED,
+                "set_color",
+                OUTLINE_STYLE,
+            )
+        )
+    if "check_proxy" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_check_proxy"),
+                ft.Icons.NETWORK_CHECK,
+                "check_proxy",
+                OUTLINE_STYLE,
+            )
+        )
     if "add_to_page" in cbs:
         extra_btns.append(
             btn(

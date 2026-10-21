@@ -1,9 +1,11 @@
 from collections.abc import Callable
+from datetime import datetime
 
 import flet as ft
 
 from ...core.strings import get_string
 from ...models.profile import Profile
+from ...services.monitor import ProfileMonitorInfo
 from ...utils.proxy_parser import mask_proxy
 from ..theme.colors import COLORS, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import DANGER_ICON_STYLE, ICON_STYLE
@@ -19,7 +21,7 @@ COLUMNS = {
     "device": (9, None),
     "proxy": (8, None),
     "geo": (7, None),
-    # Launch button (112) + gap (6) + three icon buttons (~108).
+    # Launch button (100) + gap (4) + four compact icon buttons (4 * 30 = 120).
     "actions": (None, 232),
 }
 ROW_HEIGHT = 58
@@ -27,7 +29,12 @@ ROW_HEIGHT = 58
 
 def _cell(key: str, content: ft.Control | None) -> ft.Container:
     expand, width = COLUMNS[key]
-    return ft.Container(content=content, expand=expand, width=width)
+    return ft.Container(
+        content=content,
+        expand=expand,
+        width=width,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+    )
 
 
 def build_header_row(
@@ -63,6 +70,18 @@ def build_header_row(
     )
 
 
+def _format_cooldown(mins: int | None) -> str:
+    if mins is None:
+        return ""
+    if mins < 1:
+        return get_string("cooldown_just_now")
+    if mins < 60:
+        return get_string("cooldown_minutes", mins=mins)
+    if mins < 1440:
+        return get_string("cooldown_hours", hours=mins // 60, mins=mins % 60)
+    return get_string("cooldown_days", days=mins // 1440)
+
+
 def build_profile_card(
     profile: Profile,
     is_loading: bool,
@@ -77,8 +96,19 @@ def build_profile_card(
     since: str = "",
     failed: bool = False,
     draggable: bool = False,
+    *,
+    editing_note: bool = False,
+    on_start_edit_note: Callable[[str], None] | None = None,
+    on_save_note: Callable[[str, str], None] | None = None,
+    editing_proxy: bool = False,
+    on_start_edit_proxy: Callable[[str], None] | None = None,
+    on_save_proxy: Callable[[str, str], None] | None = None,
+    on_check_proxy: Callable[[str], None] | None = None,
+    on_clone: Callable[[str], None] | None = None,
+    monitor_info: ProfileMonitorInfo | None = None,
+    proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
-    """One profile as a table row: identity, device, proxy, geo, actions."""
+    """One profile as a table row: identity, device, proxy, geo/health, actions."""
     if is_running:
         bg = COLORS["card_hover"]
     elif is_selected:
@@ -96,6 +126,12 @@ def build_profile_card(
     )
 
     show_failed = failed and not is_loading and not is_running
+    has_badges = bool(profile.group or show_failed)
+    name_tooltip = (
+        f"{profile.name}\n({get_string('tooltip_quick_edit_note')})"
+        if on_start_edit_note is not None
+        else profile.name
+    )
     name_text = ft.Text(
         profile.name,
         size=14,
@@ -103,10 +139,23 @@ def build_profile_card(
         color=COLORS["text_main"],
         no_wrap=True,
         overflow=ft.TextOverflow.ELLIPSIS,
-        tooltip=profile.name,
-        expand=bool(profile.group or show_failed or profile.color),
+        tooltip=name_tooltip,
     )
-    top_line_controls: list[ft.Control] = [name_text]
+    name_control: ft.Control = (
+        ft.Container(
+            expand=has_badges,
+            expand_loose=has_badges,
+            on_click=lambda _, n=profile.name: on_start_edit_note(n),
+            content=name_text,
+        )
+        if on_start_edit_note is not None
+        else (
+            ft.Container(expand=True, expand_loose=True, content=name_text)
+            if has_badges
+            else name_text
+        )
+    )
+    top_line_controls: list[ft.Control] = [name_control]
     if show_failed:
         top_line_controls.append(
             ft.Container(
@@ -148,25 +197,48 @@ def build_profile_card(
             controls=top_line_controls,
         )
         if len(top_line_controls) > 1
-        else name_text
+        else name_control
     )
-    if profile.notes:
+
+    if editing_note and on_save_note is not None:
+        note_input = ft.TextField(
+            value=profile.notes or "",
+            hint_text=get_string("notes_hint"),
+            text_size=11.5,
+            height=26,
+            content_padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            bgcolor=COLORS["input_bg"],
+            border_color=COLORS["accent"],
+            border_radius=4,
+            autofocus=True,
+            on_submit=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
+            on_blur=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
+        )
+        text_block: ft.Control = _stack(top_line, note_input)
+    elif profile.notes:
         single_line_note = " ".join(profile.notes.splitlines()).strip()
-        note_text = ft.Text(
+        note_widget: ft.Control = ft.Text(
             single_line_note,
             size=11.5,
             color=COLORS["text_dim"],
             no_wrap=True,
             overflow=ft.TextOverflow.ELLIPSIS,
-            tooltip=profile.notes,
+            tooltip=(
+                f"{profile.notes}\n({get_string('tooltip_quick_edit_note')})"
+                if on_start_edit_note
+                else profile.notes
+            ),
         )
-        text_block: ft.Control = _stack(top_line, note_text)
+        if on_start_edit_note is not None:
+            note_widget = ft.Container(
+                on_click=lambda _, n=profile.name: on_start_edit_note(n),
+                content=note_widget,
+            )
+        text_block = _stack(top_line, note_widget)
     else:
         text_block = top_line
 
     name_parts: list[ft.Control] = []
-    name_parts: list[ft.Control] = []
-
     if profile.color:
         name_parts.append(
             ft.Container(
@@ -186,8 +258,8 @@ def build_profile_card(
     else:
         name_cell_content = text_block
 
-    def _drag_wrap(ctrl: ft.Control) -> ft.Control:
-        if not draggable:
+    def _drag_wrap(ctrl: ft.Control, disable_drag: bool = False) -> ft.Control:
+        if not draggable or disable_drag:
             return ctrl
         return ft.ReorderableDragHandle(
             mouse_cursor=ft.MouseCursor.GRAB,
@@ -195,6 +267,7 @@ def build_profile_card(
         )
 
     launch_btn = build_launch_button(profile.name, is_loading, is_running, on_launch)
+    launch_btn.width = 100
     if is_running and since:
         launch_btn.tooltip = f"{get_string('stamp_live')} ({since})"
 
@@ -219,10 +292,29 @@ def build_profile_card(
                         on_change=lambda _, n=profile.name: on_select(n) if on_select else None,
                     ),
                 ),
-                _cell("name", _drag_wrap(name_cell_content)),
+                _cell("name", _drag_wrap(name_cell_content, disable_drag=editing_note)),
                 _cell("device", _drag_wrap(_device(profile, device))),
-                _cell("proxy", _drag_wrap(_proxy(profile))),
-                _cell("geo", _drag_wrap(_geo(profile))),
+                _cell(
+                    "proxy",
+                    _drag_wrap(
+                        _proxy(
+                            profile,
+                            editing_proxy=editing_proxy,
+                            on_start_edit_proxy=on_start_edit_proxy,
+                            on_save_proxy=on_save_proxy,
+                            on_check_proxy=on_check_proxy,
+                            monitor_info=monitor_info,
+                            proxy_check_state=proxy_check_state,
+                        ),
+                        disable_drag=editing_proxy,
+                    ),
+                ),
+                _cell(
+                    "geo",
+                    _drag_wrap(
+                        _geo(profile, monitor_info, is_running=is_running, since=since)
+                    ),
+                ),
                 _cell(
                     "actions",
                     ft.Row(
@@ -231,13 +323,14 @@ def build_profile_card(
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
                             launch_btn,
-                            ft.Container(width=6),
+                            ft.Container(width=4),
                             *_action_buttons(
                                 profile.name,
                                 is_running,
                                 on_edit,
                                 on_delete,
                                 on_cookies,
+                                on_clone,
                             ),
                         ],
                     ),
@@ -314,24 +407,143 @@ def _device(profile: Profile, device: str) -> ft.Row:
     )
 
 
-def _proxy(profile: Profile) -> ft.Control:
+def _proxy(
+    profile: Profile,
+    *,
+    editing_proxy: bool = False,
+    on_start_edit_proxy: Callable[[str], None] | None = None,
+    on_save_proxy: Callable[[str, str], None] | None = None,
+    on_check_proxy: Callable[[str], None] | None = None,
+    monitor_info: ProfileMonitorInfo | None = None,
+    proxy_check_state: tuple[str, str] | None = None,
+) -> ft.Control:
+    _ = on_check_proxy
+    if editing_proxy and on_save_proxy is not None:
+        return ft.TextField(
+            value=profile.proxy or "",
+            hint_text=get_string("proxy_hint"),
+            text_size=11.5,
+            height=30,
+            content_padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            bgcolor=COLORS["input_bg"],
+            border_color=COLORS["accent"],
+            border_radius=4,
+            autofocus=True,
+            on_submit=lambda e, n=profile.name: on_save_proxy(n, e.control.value or ""),
+            on_blur=lambda e, n=profile.name: on_save_proxy(n, e.control.value or ""),
+        )
+
     server = mask_proxy(profile.proxy)
     if not server:
-        return _stack(
+        base_col: ft.Control = _stack(
             ft.Text(get_string("direct_short"), size=13, color=COLORS["text_sub"]),
             _minor(get_string("no_proxy_short")),
         )
+        if on_start_edit_proxy is not None:
+            return ft.Container(
+                on_click=lambda _, n=profile.name: on_start_edit_proxy(n),
+                tooltip=get_string("tooltip_quick_edit_proxy"),
+                content=base_col,
+            )
+        return base_col
+
     scheme, _, rest = server.partition("://")
-    return _stack(_data(rest), _minor(scheme.upper()))
+    sub_label = scheme.upper()
+    sub_color = COLORS["text_dim"]
+    if proxy_check_state is not None:
+        st_kind, st_msg = proxy_check_state
+        sub_label = st_msg
+        if st_kind == "checking":
+            sub_color = COLORS["accent"]
+        elif st_kind == "ok":
+            sub_color = COLORS["success"]
+        else:
+            sub_color = COLORS["error"]
+    elif monitor_info is not None:
+        if monitor_info.busy_by:
+            sub_label = get_string("proxy_busy_by", other=monitor_info.busy_by[0])
+            sub_color = COLORS["error"]
+        elif monitor_info.port_cooldown_by is not None:
+            other, left = monitor_info.port_cooldown_by
+            sub_label = get_string("proxy_cooldown_by", left=left, other=other)
+            sub_color = COLORS["warning"]
+
+    host_text = _data(rest)
+    host_text.tooltip = (
+        f"{rest} ({get_string('tooltip_quick_edit_proxy')})"
+        if on_start_edit_proxy is not None
+        else rest
+    )
+    line1: ft.Control = (
+        ft.Container(
+            on_click=lambda _, n=profile.name: on_start_edit_proxy(n),
+            content=host_text,
+        )
+        if on_start_edit_proxy is not None
+        else host_text
+    )
+    line2 = ft.Text(
+        sub_label,
+        size=11.5,
+        font_family=FONT_DATA,
+        color=sub_color,
+        no_wrap=True,
+        overflow=ft.TextOverflow.ELLIPSIS,
+        tooltip=sub_label,
+    )
+    return _stack(line1, line2)
 
 
-def _geo(profile: Profile) -> ft.Column:
+def _geo(
+    profile: Profile,
+    monitor_info: ProfileMonitorInfo | None = None,
+    *,
+    is_running: bool = False,
+    since: str = "",
+) -> ft.Column:
     follow = get_string("follows_ip")
     tz = (
         _data(profile.timezone)
         if profile.timezone
-        else ft.Text(follow, size=13, color=COLORS["text_dim"])
+        else ft.Text(follow, size=12.5, color=COLORS["text_dim"])
     )
+    if is_running:
+        run_label = f"● {get_string('stamp_live')}" + (f" · {since}" if since else "")
+        return _stack(
+            tz,
+            ft.Text(
+                run_label,
+                size=11.5,
+                font_family=FONT_DATA,
+                color=COLORS["success"],
+                no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=run_label,
+            ),
+        )
+    if monitor_info is not None and monitor_info.last_closed is not None:
+        cd = _format_cooldown(monitor_info.cooldown_mins)
+        is_today = monitor_info.last_closed.date() == datetime.now().date()
+        short_ts = (
+            monitor_info.last_closed.strftime("%H:%M")
+            if is_today
+            else monitor_info.last_closed.strftime("%d/%m")
+        )
+        full_ts = monitor_info.last_closed.strftime("%H:%M %d/%m")
+        sub_str = f"{cd} · {short_ts}" if cd else short_ts
+        tooltip_str = f"{cd} · {full_ts}" if cd else full_ts
+        return _stack(
+            tz,
+            ft.Text(
+                sub_str,
+                size=11.5,
+                font_family=FONT_DATA,
+                color=COLORS["text_sub"],
+                no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=tooltip_str,
+            ),
+        )
     locale = _minor(profile.locale, data=True) if profile.locale else _minor(follow)
     return _stack(tz, locale)
 
@@ -418,25 +630,46 @@ def _action_buttons(
     on_edit: Callable[[str], None],
     on_delete: Callable[[str], None],
     on_cookies: Callable[[str], None] | None,
+    on_clone: Callable[[str], None] | None = None,
 ) -> list[ft.IconButton]:
     buttons: list[ft.IconButton] = []
     if on_cookies:
         buttons.append(
             ft.IconButton(
                 icon=ft.Icons.COOKIE_OUTLINED,
-                icon_size=19,
-                icon_color=COLORS["rule_strong"] if is_running else COLORS["text_sub"],
+                icon_size=17,
+                width=30,
+                height=30,
+                padding=0,
+                icon_color=COLORS["success"] if is_running else COLORS["text_sub"],
                 tooltip=get_string("tooltip_cookies"),
-                disabled=is_running,
+                disabled=False,
                 style=ICON_STYLE,
                 on_click=lambda _, n=name: on_cookies(n),
+            ),
+        )
+    if on_clone:
+        buttons.append(
+            ft.IconButton(
+                icon=ft.Icons.CONTENT_COPY,
+                icon_size=16,
+                width=30,
+                height=30,
+                padding=0,
+                icon_color=COLORS["text_sub"],
+                tooltip=get_string("tooltip_clone"),
+                style=ICON_STYLE,
+                on_click=lambda _, n=name: on_clone(n),
             ),
         )
     return [
         *buttons,
         ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
-            icon_size=19,
+            icon_size=17,
+            width=30,
+            height=30,
+            padding=0,
             icon_color=COLORS["text_sub"],
             tooltip=get_string("tooltip_edit"),
             style=ICON_STYLE,
@@ -444,7 +677,10 @@ def _action_buttons(
         ),
         ft.IconButton(
             icon=ft.Icons.DELETE_OUTLINE,
-            icon_size=19,
+            icon_size=17,
+            width=30,
+            height=30,
+            padding=0,
             icon_color=COLORS["rule_strong"] if is_running else COLORS["text_sub"],
             tooltip=get_string("tooltip_delete"),
             disabled=is_running,

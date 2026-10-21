@@ -10,6 +10,7 @@ from ..theme.styles import ACCENT_STYLE, RAIL_STYLE
 FILTERS = (
     ("all", "filter_all"),
     ("running", "filter_running"),
+    ("warnings", "filter_warnings"),
     ("proxy", "filter_proxy"),
     ("direct", "filter_direct"),
     ("chrome", "filter_chrome"),
@@ -94,6 +95,7 @@ def build_sidebar(
     filter_column: ft.Column | None = None,
     language: str = "en",
     on_language: Callable[[str], None] | None = None,
+    trash_btn: ft.Control | None = None,
 ) -> ft.Container:
     log_toggle_btn.on_click = on_toggle_log
     return ft.Container(
@@ -190,6 +192,7 @@ def build_sidebar(
                     ],
                 ),
                 log_column,
+                *([] if trash_btn is None else [ft.Container(height=8), trash_btn]),
                 ft.Container(height=8),
                 ft.OutlinedButton(
                     get_string("mcp_button"),
