@@ -159,7 +159,7 @@ def open_bulk_proxy_dialog(
     page: ft.Page,
     profile_names: list[str],
     current_proxies: dict[str, str | None],
-    on_apply: Callable[[dict[str, str | None]], None],
+    on_apply: Callable[..., None],
     session_ports: dict[str, str] | None = None,
 ) -> None:
     """Dialog to paste a list of proxies and map them 1-to-1 (or cyclic) to selected profiles."""
@@ -176,6 +176,10 @@ def open_bulk_proxy_dialog(
     repeat_cb = ft.Checkbox(
         label=get_string("bulk_proxy_repeat_cb"),
         value=False,
+    )
+    auto_geo_cb = ft.Checkbox(
+        label=get_string("auto_pin_geo_cb"),
+        value=True,
     )
     preview_col = ft.Column(
         spacing=4,
@@ -271,7 +275,10 @@ def open_bulk_proxy_dialog(
 
     def _clear_all(_: ft.ControlEvent) -> None:
         page.pop_dialog()
-        on_apply({n: None for n in profile_names})
+        try:
+            on_apply({n: None for n in profile_names}, False)
+        except TypeError:
+            on_apply({n: None for n in profile_names})
 
     def _save(_: ft.ControlEvent) -> None:
         valid_assignments, _ = _compute_mapping()
@@ -280,7 +287,10 @@ def open_bulk_proxy_dialog(
             page.update()
             return
         page.pop_dialog()
-        on_apply(valid_assignments)
+        try:
+            on_apply(valid_assignments, bool(auto_geo_cb.value))
+        except TypeError:
+            on_apply(valid_assignments)
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -299,6 +309,7 @@ def open_bulk_proxy_dialog(
                 controls=[
                     proxy_box,
                     repeat_cb,
+                    auto_geo_cb,
                     ft.Text(
                         get_string("bulk_proxy_preview_label"),
                         size=12,

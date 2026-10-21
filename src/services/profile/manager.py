@@ -650,6 +650,195 @@ class ProfileManager:
                 self.save_profiles()
         return count
 
+    def pin_missing_geo(
+        self,
+        name: str,
+        timezone: str | None,
+        locale: str | None,
+    ) -> bool:
+        """Fill missing timezone/locale on a profile without ever overwriting existing pinned values."""
+        clean_tz = valid_or_none(timezone, validate_timezone)
+        clean_loc = valid_or_none(locale, validate_locale)
+        if not clean_tz and not clean_loc:
+            return False
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            changed = False
+            if not p.timezone and clean_tz:
+                p.timezone = clean_tz
+                changed = True
+            if not p.locale and clean_loc:
+                p.locale = clean_loc
+                changed = True
+            if changed:
+                self.save_profiles()
+            return changed
+
+    def batch_create_profiles(
+        self,
+        entries: list[tuple[str, str | None]],
+        *,
+        os_type: str = "windows",
+        timezone: str | None = None,
+        locale: str | None = None,
+        group: str | None = None,
+        color: str | None = None,
+        pages: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Batch-create new profiles safely; never touches or overwrites existing profiles."""
+        clean_tz = valid_or_none(timezone, validate_timezone)
+        clean_loc = valid_or_none(locale, validate_locale)
+        clean_grp = valid_or_none(group, validate_group)
+        clean_col = valid_or_none(color, validate_color)
+        clean_os = os_type if os_type in ("windows", "macos", "linux") else "windows"
+        created: list[str] = []
+        skipped: list[str] = []
+
+        with self._lock:
+            canonical_pages = self._register_pages(pages)
+            for raw_name, raw_proxy in entries:
+                name = (raw_name or "").strip()
+                if not name or not validate_profile_name(name)[0]:
+                    skipped.append(name or raw_name)
+                    continue
+                if self._find_by_casefold(name) is not None:
+                    skipped.append(name)
+                    continue
+                proxy_clean = (raw_proxy or "").strip()
+                if proxy_clean and not validate_proxy_format(proxy_clean)[0]:
+                    skipped.append(name)
+                    continue
+                try:
+                    pathlib.Path(self._data_path(name)).mkdir(exist_ok=True, parents=True)
+                except OSError:
+                    skipped.append(name)
+                    continue
+                self.profiles[name] = Profile(
+                    name=name,
+                    proxy=proxy_clean or None,
+                    os_type=clean_os,
+                    timezone=clean_tz,
+                    locale=clean_loc,
+                    engine="camoufox",
+                    color=clean_col,
+                    group=clean_grp,
+                    notes=None,
+                    pages=list(canonical_pages),
+                )
+                created.append(name)
+            if created:
+                self.save_profiles()
+        return created, skipped
+
+    def inspect_config_backup(self, backup_path: pathlib.Path) -> dict[str, object] | None:
+        """Read a backup file and return metadata without modifying any state."""
+        if not backup_path.exists():
+            return None
+        try:
+            raw = json.loads(backup_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            st = backup_path.stat()
+            mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+        except Exception:
+            return None
+
+        with self._lock:
+            missing = 0
+            changed = 0
+            for b_name, b_data in raw.items():
+                if not isinstance(b_data, dict) or not validate_profile_name(b_name)[0]:
+                    continue
+                existing_key = self._find_by_casefold(b_name)
+                if existing_key is None:
+                    missing += 1
+                else:
+                    cur = self.profiles[existing_key]
+                    if (
+                        (b_data.get("proxy") or None) != cur.proxy
+                        or (b_data.get("group") or None) != cur.group
+                        or (b_data.get("notes") or None) != cur.notes
+                        or (b_data.get("timezone") or None) != cur.timezone
+                        or (b_data.get("locale") or None) != cur.locale
+                        or (b_data.get("color") or None) != cur.color
+                    ):
+                        changed += 1
+            return {
+                "path": backup_path,
+                "name": backup_path.name,
+                "mtime_str": mtime_str,
+                "total": len(raw),
+                "missing": missing,
+                "changed": changed,
+            }
+
+    def restore_config_backup(
+        self,
+        backup_path: pathlib.Path,
+        *,
+        keep_newer_profiles: bool = True,
+    ) -> tuple[bool, int]:
+        """Safely restore profile settings from a backup without touching camoufox_data/ files."""
+        if not backup_path.exists():
+            return False, 0
+        try:
+            raw = json.loads(backup_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return False, 0
+        except Exception:
+            return False, 0
+
+        with self._lock:
+            # Save current snapshot before restoring
+            cur_file = pathlib.Path(PROFILES_FILE)
+            if cur_file.exists():
+                self._write_config_backup(cur_file.read_text(encoding="utf-8"))
+
+            restored_map: dict[str, Profile] = {}
+            updated_count = 0
+            for b_name, p_data in raw.items():
+                if (
+                    not isinstance(p_data, dict)
+                    or not validate_profile_name(b_name)[0]
+                    or p_data.get("name") != b_name
+                ):
+                    continue
+                existing_key = self._find_by_casefold(b_name)
+                canonical_name = existing_key or b_name
+                with contextlib.suppress(OSError):
+                    pathlib.Path(self._data_path(canonical_name)).mkdir(exist_ok=True, parents=True)
+                pages = self._register_pages(p_data.get("pages"))
+                prof = Profile(
+                    name=canonical_name,
+                    proxy=p_data.get("proxy") or None,
+                    os_type=p_data.get(
+                        "os_type",
+                        p_data.get("config", {}).get("os", "windows"),
+                    ),
+                    timezone=valid_or_none(p_data.get("timezone"), validate_timezone),
+                    locale=valid_or_none(p_data.get("locale"), validate_locale),
+                    engine=_engine_or_default(p_data.get("engine")),
+                    color=valid_or_none(p_data.get("color"), validate_color),
+                    group=valid_or_none(p_data.get("group"), validate_group),
+                    notes=valid_or_none(p_data.get("notes"), validate_notes),
+                    pages=pages,
+                )
+                if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
+                    updated_count += 1
+                restored_map[canonical_name] = prof
+
+            if keep_newer_profiles:
+                seen_lower = {k.casefold() for k in restored_map}
+                for cur_name, cur_prof in self.profiles.items():
+                    if cur_name.casefold() not in seen_lower:
+                        restored_map[cur_name] = cur_prof
+
+            self.profiles = restored_map
+            self.save_profiles()
+            return True, updated_count
+
     def list_profiles(self) -> list[Profile]:
         with self._lock:
             return list(self.profiles.values())

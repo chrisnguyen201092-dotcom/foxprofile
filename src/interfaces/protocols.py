@@ -83,6 +83,36 @@ class IProfileManager(Protocol):
 
     def bulk_update_proxies(self, assignments: dict[str, str | None]) -> int: ...
 
+    def pin_missing_geo(
+        self,
+        name: str,
+        timezone: str | None,
+        locale: str | None,
+    ) -> bool: ...
+
+    def batch_create_profiles(
+        self,
+        entries: list[tuple[str, str | None]],
+        *,
+        os_type: str = "windows",
+        timezone: str | None = None,
+        locale: str | None = None,
+        group: str | None = None,
+        color: str | None = None,
+        pages: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]: ...
+
+    def list_config_backups(self) -> list[Any]: ...
+
+    def inspect_config_backup(self, backup_path: Any) -> dict[str, Any] | None: ...
+
+    def restore_config_backup(
+        self,
+        backup_path: Any,
+        *,
+        keep_newer_profiles: bool = True,
+    ) -> tuple[bool, int]: ...
+
     def list_profiles(self) -> list[Profile]: ...
 
     def export_profile(

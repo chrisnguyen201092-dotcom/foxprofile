@@ -8,6 +8,7 @@ import flet as ft
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.monitor import MonitorService
+from ..services.proxy.geo_check import derive_geo_from_ip, extract_ip_from_check_detail
 from ..utils.validation import validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
@@ -21,6 +22,8 @@ from .actions.cookies import manage_cookies
 from .actions.profile import add_profile, delete_profile, edit_profile
 from .actions.transfer import export_profile, import_profile
 from .dialogs import (
+    open_backup_restore_dialog,
+    open_batch_create_dialog,
     open_bulk_color_dialog,
     open_bulk_group_dialog,
     open_bulk_prelaunch_guard_dialog,
@@ -183,6 +186,98 @@ class AppHandlers:
             _empty_all,
         )
 
+    def on_open_batch_create(self, active_page: str = "__all__") -> None:
+        page = self._get_page()
+        assert page is not None
+        target_pages = [active_page] if active_page != "__all__" else None
+
+        def _do_batch(
+            entries: list[tuple[str, str | None]],
+            os_type: str,
+            group: str,
+            tz: str,
+            loc: str,
+            auto_geo: bool,
+        ) -> None:
+            created, skipped = self._pm.batch_create_profiles(
+                entries,
+                os_type=os_type,
+                timezone=tz or None,
+                locale=loc or None,
+                group=group or None,
+                pages=target_pages,
+            )
+            self._log(
+                get_string(
+                    "batch_created_log",
+                    count=len(created),
+                    skipped=len(skipped),
+                )
+            )
+            self._refresh()
+            if auto_geo and created and page is not None:
+                with_proxy = [
+                    n
+                    for n in created
+                    if n in self._pm.profiles and self._pm.profiles[n].proxy
+                ]
+                if with_proxy:
+                    async def _check_created() -> None:
+                        await bulk_check_proxies(
+                            with_proxy,
+                            self._pm,
+                            self._ps,
+                            self._log,
+                            state=self._state,
+                            bl=self._bl,
+                            auto_pin_geo=True,
+                        )
+
+                    page.run_task(_check_created)
+
+        open_batch_create_dialog(
+            page,
+            set(self._pm.profiles.keys()),
+            _do_batch,
+        )
+
+    def on_open_backups(self) -> None:
+        page = self._get_page()
+        assert page is not None
+
+        def _list_meta() -> list[dict]:
+            if not hasattr(self._pm, "list_config_backups"):
+                return []
+            paths = list(reversed(self._pm.list_config_backups()))
+            out: list[dict] = []
+            for bp in paths:
+                meta = self._pm.inspect_config_backup(bp)
+                if meta is not None:
+                    out.append(meta)
+            return out
+
+        def _is_any_running() -> bool:
+            return bool(self._bl.running_profile_names() or self._state.loading)
+
+        def _do_restore(bpath) -> None:
+            ok, cnt = self._pm.restore_config_backup(bpath, keep_newer_profiles=True)
+            if ok:
+                self._log(
+                    get_string(
+                        "backup_restored_log",
+                        file=getattr(bpath, "name", str(bpath)),
+                        count=cnt,
+                    )
+                )
+                self._refresh()
+
+        open_backup_restore_dialog(
+            page,
+            _list_meta,
+            _is_any_running,
+            _do_restore,
+        )
+
     # --- Inline quick-edit & proxy check handlers ---
 
     def on_start_edit_note(self, name: str) -> None:
@@ -273,8 +368,30 @@ class AppHandlers:
         async def _check() -> None:
             ok, detail = await asyncio.to_thread(self._ps.check_proxy_sync, proxy_str, 10)
             badge = format_proxy_badge(ok, detail)
+            auto_tz, auto_loc = (None, None)
+            if ok:
+                raw_ip = extract_ip_from_check_detail(detail)
+                if raw_ip:
+                    auto_tz, auto_loc = await asyncio.to_thread(derive_geo_from_ip, raw_ip)
             for sib in siblings:
                 self._state.proxy_status[sib] = badge
+                if (
+                    ok
+                    and (auto_tz or auto_loc)
+                    and hasattr(self._pm, "pin_missing_geo")
+                    and not self._bl.is_running(sib)
+                    and not self._state.is_loading(sib)
+                    and self._pm.pin_missing_geo(sib, auto_tz, auto_loc)
+                ):
+                    p_cur = self._pm.profiles.get(sib)
+                    self._log(
+                        get_string(
+                            "auto_pinned_geo_log",
+                            name=sib,
+                            tz=(p_cur.timezone if p_cur else auto_tz) or "-",
+                            loc=(p_cur.locale if p_cur else auto_loc) or "-",
+                        )
+                    )
             self._log(f"[{name}] {detail}")
             self._state.schedule_refresh()
 
@@ -466,13 +583,37 @@ class AppHandlers:
                 if info and (info.hatch_gw or info.hatch_sess) and info.last_used_port:
                     session_ports[n] = info.last_used_port
 
-        def _apply(assignments: dict[str, str | None]) -> None:
+        def _apply(assignments: dict[str, str | None], auto_geo: bool = False) -> None:
             cnt = self._pm.bulk_update_proxies(assignments)
             for pname in assignments:
                 self._state.proxy_status.pop(pname, None)
             self._log(get_string("bulk_proxy_updated", count=cnt))
             self._state.clear_selection()
             self._refresh()
+            if auto_geo and cnt > 0 and page is not None:
+                need_geo = [
+                    pname
+                    for pname, pval in assignments.items()
+                    if pval
+                    and pname in self._pm.profiles
+                    and (
+                        not self._pm.profiles[pname].timezone
+                        or not self._pm.profiles[pname].locale
+                    )
+                ]
+                if need_geo:
+                    async def _auto_check() -> None:
+                        await bulk_check_proxies(
+                            need_geo,
+                            self._pm,
+                            self._ps,
+                            self._log,
+                            state=self._state,
+                            bl=self._bl,
+                            auto_pin_geo=True,
+                        )
+
+                    page.run_task(_auto_check)
 
         open_bulk_proxy_dialog(
             page,
@@ -499,6 +640,8 @@ class AppHandlers:
                 self._ps,
                 self._log,
                 state=self._state,
+                bl=self._bl,
+                auto_pin_geo=True,
             )
 
         page.run_task(_task)

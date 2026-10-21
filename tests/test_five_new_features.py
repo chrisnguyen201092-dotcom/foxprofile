@@ -647,3 +647,218 @@ def test_full_app_ui_and_all_handlers_end_to_end(isolated_pm, tmp_path):
     app.h.open_log_fullscreen()
     app.h.on_deselect_page()
     assert len(app.state.selected_names()) == 0
+
+
+def test_batch_create_profiles_and_proxy_cycling(isolated_pm):
+    created, skipped = isolated_pm.batch_create_profiles(
+        entries=[
+            ("Batch 1", "http://user:pass@1.2.3.4:10001"),
+            ("Batch 2", "http://user:pass@1.2.3.4:10002"),
+            ("Batch 3", None),
+            ("Batch 1", "http://user:pass@1.2.3.4:10003"),
+            ("", None),
+        ],
+        os_type="windows",
+        group="TeamA",
+        pages=["PageBatch"],
+    )
+    assert created == ["Batch 1", "Batch 2", "Batch 3"]
+    assert skipped == ["Batch 1", ""]
+    assert isolated_pm.profiles["Batch 1"].proxy == "http://user:pass@1.2.3.4:10001"
+    assert isolated_pm.profiles["Batch 2"].proxy == "http://user:pass@1.2.3.4:10002"
+    assert isolated_pm.profiles["Batch 3"].proxy is None
+    assert isolated_pm.profiles["Batch 3"].group == "TeamA"
+    assert isolated_pm.profiles["Batch 3"].pages == ["PageBatch"]
+    assert "PageBatch" in isolated_pm.list_custom_pages()
+
+
+def test_pin_missing_geo_never_overwrites_existing_geo(isolated_pm):
+    from src.services.proxy.geo_check import derive_geo_from_ip, extract_ip_from_check_detail
+
+    ip = extract_ip_from_check_detail("IP: 8.8.8.8 (Mountain View, US)")
+    assert ip == "8.8.8.8"
+    tz, loc = derive_geo_from_ip("8.8.8.8")
+    assert tz is not None and loc is not None
+
+    # Profile with missing timezone/locale -> gets pinned
+    isolated_pm.add_profile("NoGeo", "http://u:p@1.2.3.4:10001", "windows")
+    assert isolated_pm.profiles["NoGeo"].timezone is None
+    assert isolated_pm.profiles["NoGeo"].locale is None
+    assert isolated_pm.pin_missing_geo("NoGeo", tz, loc) is True
+    assert isolated_pm.profiles["NoGeo"].timezone == tz
+    assert isolated_pm.profiles["NoGeo"].locale == loc
+
+    # Calling again when already pinned -> returns False and never overwrites
+    isolated_pm.add_profile(
+        "PinnedGeo",
+        "http://u:p@1.2.3.4:10002",
+        "windows",
+        timezone="America/New_York",
+        locale="en-US",
+    )
+    assert isolated_pm.pin_missing_geo("PinnedGeo", "Europe/London", "en-GB") is False
+    assert isolated_pm.profiles["PinnedGeo"].timezone == "America/New_York"
+    assert isolated_pm.profiles["PinnedGeo"].locale == "en-US"
+
+
+def test_backup_inspect_and_restore_preserves_newer_profiles(isolated_pm):
+    isolated_pm.add_profile(
+        "OldAcc",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        group="InitialGroup",
+    )
+    backups = isolated_pm.list_config_backups()
+    assert len(backups) >= 1
+    bpath = backups[0]
+
+    info = isolated_pm.inspect_config_backup(bpath)
+    assert info is not None
+    assert info["total"] == 1
+
+    # Now mutate OldAcc and add NewerAcc
+    isolated_pm.update_profile("OldAcc", "OldAcc", "", "windows")
+    isolated_pm.bulk_update_group(["OldAcc"], "ChangedGroup")
+    isolated_pm.add_profile("NewerAcc", "http://u:p@1.2.3.4:10009", "windows")
+    # Overwrite backup file with snapshot of just OldAcc at InitialGroup
+    bpath.write_text(
+        json.dumps(
+            {
+                "OldAcc": {
+                    "name": "OldAcc",
+                    "proxy": "http://u:p@1.2.3.4:10001",
+                    "os_type": "windows",
+                    "group": "InitialGroup",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, count = isolated_pm.restore_config_backup(bpath, keep_newer_profiles=True)
+    assert ok is True
+    assert count == 1
+    # OldAcc restored to InitialGroup + its proxy, while NewerAcc is preserved
+    assert isolated_pm.profiles["OldAcc"].group == "InitialGroup"
+    assert isolated_pm.profiles["OldAcc"].proxy == "http://u:p@1.2.3.4:10001"
+    assert "NewerAcc" in isolated_pm.profiles
+
+
+def test_keyboard_shortcuts_and_batch_backup_dialogs(isolated_pm, tmp_path):
+    import flet as ft
+
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.ui.app import App
+
+    isolated_pm.add_profile("Acc1", "http://u:p@1.2.3.4:10001", "windows")
+
+    class FakeBL:
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def running_count(self):
+            return 0
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+            self.services = []
+            self.dialogs = []
+            self.tasks = []
+            self.title = ""
+            self.theme_mode = None
+            self.padding = 0
+            self.bgcolor = ""
+            self.window = type(
+                "W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600}
+            )()
+            self.fonts = {}
+            self.theme = None
+            self.on_keyboard_event = None
+
+        def add(self, *ctrls):
+            self.controls.extend(ctrls)
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            dlg.open = True
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                d = self.dialogs.pop()
+                d.open = False
+
+        def run_task(self, coro_fn, *args):
+            self.tasks.append(coro_fn)
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+
+    app = App(c)
+    app.monitor = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"), log_dir=str(tmp_path / "logs")
+    )
+    app.h._monitor = app.monitor
+    fake_page = FakePage()
+    app.page = fake_page  # type: ignore[assignment]
+    app._file_picker = ft.FilePicker()
+    app.clipboard = ft.Clipboard()
+    fake_page.services.extend([app._file_picker, app.clipboard])
+    app._build_ui()
+
+    def _ev(key: str, ctrl: bool = False, shift: bool = False):
+        return type(
+            "KE",
+            (),
+            {"key": key, "ctrl": ctrl, "shift": shift, "alt": False, "meta": False},
+        )()
+
+    # 1. Ctrl+F focuses search field via run_task
+    app._handle_key_event(_ev("F", ctrl=True))  # type: ignore[arg-type]
+    assert len(fake_page.tasks) == 1
+
+    # 2. Escape cancels inline edit first, then clears selection, then clears search
+    app.state.editing_note = "Acc1"
+    app.state.select_all(["Acc1"])
+    app._on_search("acc")
+    assert app.state.editing_note == "Acc1"
+
+    app._handle_key_event(_ev("Escape"))  # type: ignore[arg-type]
+    assert app.state.editing_note is None
+    assert len(app.state.selected_names()) == 1
+
+    app._handle_key_event(_ev("Escape"))  # type: ignore[arg-type]
+    assert len(app.state.selected_names()) == 0
+    assert app.state.search_query == "acc"
+
+    app._handle_key_event(_ev("Escape"))  # type: ignore[arg-type]
+    assert app.state.search_query == ""
+
+    # 3. Ctrl+N opens New Profile dialog
+    app._handle_key_event(_ev("N", ctrl=True))  # type: ignore[arg-type]
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    # 4. Open batch create dialog & backup restore dialog
+    app.h.on_open_batch_create("__all__")
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    app.h.on_open_backups()
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+

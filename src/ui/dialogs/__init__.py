@@ -1,3 +1,7 @@
+from .batch_and_backup import (
+    open_backup_restore_dialog,
+    open_batch_create_dialog,
+)
 from .bulk_edit import (
     open_bulk_color_dialog,
     open_bulk_group_dialog,
@@ -19,6 +23,8 @@ from .trash import open_trash_dialog
 
 __all__ = [
     "open_add_to_page_dialog",
+    "open_backup_restore_dialog",
+    "open_batch_create_dialog",
     "open_bulk_color_dialog",
     "open_bulk_group_dialog",
     "open_bulk_prelaunch_guard_dialog",

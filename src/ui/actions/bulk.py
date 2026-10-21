@@ -5,6 +5,7 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
+from ...services.proxy.geo_check import derive_geo_from_ip, extract_ip_from_check_detail
 from ..dialogs import open_confirm_dialog
 from ..state import AppState
 from .browser import launch_or_stop
@@ -62,6 +63,9 @@ async def bulk_check_proxies(
     ps: IProxyService,
     log: Callable[[str], None],
     state: AppState | None = None,
+    *,
+    bl: IBrowserLauncher | None = None,
+    auto_pin_geo: bool = True,
 ) -> None:
     proxy_to_names: dict[str, list[str]] = {}
     skip_count = 0
@@ -90,6 +94,11 @@ async def bulk_check_proxies(
         async with sem:
             ok, detail = await asyncio.to_thread(ps.check_proxy_sync, pstr, 10)
         badge = format_proxy_badge(ok, detail)
+        auto_tz, auto_loc = (None, None)
+        if ok and auto_pin_geo:
+            raw_ip = extract_ip_from_check_detail(detail)
+            if raw_ip:
+                auto_tz, auto_loc = await asyncio.to_thread(derive_geo_from_ip, raw_ip)
         for pname in member_names:
             if ok:
                 ok_count += 1
@@ -98,6 +107,24 @@ async def bulk_check_proxies(
             if state is not None:
                 state.proxy_status[pname] = badge
             log(f"[{pname}] {detail}")
+            if (
+                ok
+                and auto_pin_geo
+                and (auto_tz or auto_loc)
+                and hasattr(pm, "pin_missing_geo")
+                and (bl is None or not bl.is_running(pname))
+                and (state is None or not state.is_loading(pname))
+                and pm.pin_missing_geo(pname, auto_tz, auto_loc)
+            ):
+                p_cur = pm.profiles.get(pname)
+                log(
+                    get_string(
+                        "auto_pinned_geo_log",
+                        name=pname,
+                        tz=(p_cur.timezone if p_cur else auto_tz) or "-",
+                        loc=(p_cur.locale if p_cur else auto_loc) or "-",
+                    )
+                )
         if state is not None:
             state.schedule_refresh()
 

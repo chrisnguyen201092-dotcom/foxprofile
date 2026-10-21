@@ -62,6 +62,13 @@ class App:
             height=36,
             style=RAIL_STYLE,
         )
+        self._backup_btn = ft.OutlinedButton(
+            get_string("backup_btn"),
+            icon=ft.Icons.HISTORY_ROUNDED,
+            width=208,
+            height=36,
+            style=RAIL_STYLE,
+        )
         self._cooldown_btn = ft.OutlinedButton(
             self._cooldown_btn_text(),
             icon=ft.Icons.TIMER_OUTLINED,
@@ -96,11 +103,7 @@ class App:
     def _main(self, page: ft.Page) -> None:
         self.page = page
         configure_page(page)
-
-        def _on_key(e: ft.KeyboardEvent) -> None:
-            self.state.shift_down = bool(e.shift)
-
-        page.on_keyboard_event = _on_key
+        page.on_keyboard_event = self._handle_key_event
         fp = ft.FilePicker()
         page.services.append(fp)
         self.clipboard = ft.Clipboard()
@@ -111,6 +114,43 @@ class App:
         if not self._reconcile_started:
             self._reconcile_started = True
             page.run_task(self._ui_reconcile_loop)
+
+    def _has_open_dialog(self) -> bool:
+        if self.page is None:
+            return False
+        dialogs = getattr(self.page, "_dialogs", None)
+        controls = getattr(dialogs, "controls", None) or ()
+        return any(getattr(d, "open", False) for d in controls)
+
+    def _handle_key_event(self, e: ft.KeyboardEvent) -> None:
+        self.state.shift_down = bool(e.shift)
+        if self._has_open_dialog():
+            return
+        key = (e.key or "").strip().lower()
+        ctrl = bool(e.ctrl) and not bool(e.alt) and not bool(e.meta)
+        no_mod = not bool(e.ctrl) and not bool(e.alt) and not bool(e.meta)
+        if ctrl and key == "f":
+            if (
+                self.refs is not None
+                and self.refs.search_field is not None
+                and self.page is not None
+                and hasattr(self.page, "run_task")
+            ):
+                self.page.run_task(self.refs.search_field.focus)
+        elif ctrl and key == "n":
+            self.h.open_add_dialog()
+        elif no_mod and key == "escape":
+            if self.state.editing_note is not None or self.state.editing_proxy is not None:
+                self.state.editing_note = None
+                self.state.editing_proxy = None
+                self._refresh_profiles()
+            elif self.state.selected_names():
+                self.h.on_clear_selection()
+            elif self.state.search_query:
+                self.state.search_query = ""
+                if self.refs is not None and self.refs.search_field is not None:
+                    self.refs.search_field.value = ""
+                self._refresh_profiles()
 
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
@@ -135,6 +175,14 @@ class App:
             height=36,
             style=RAIL_STYLE,
             on_click=lambda _: self.h.on_open_trash(),
+        )
+        self._backup_btn = ft.OutlinedButton(
+            get_string("backup_btn"),
+            icon=ft.Icons.HISTORY_ROUNDED,
+            width=208,
+            height=36,
+            style=RAIL_STYLE,
+            on_click=lambda _: self.h.on_open_backups(),
         )
         self._cooldown_btn = ft.OutlinedButton(
             self._cooldown_btn_text(),
@@ -195,6 +243,7 @@ class App:
             r.log_column,
             r.log_toggle_btn,
             on_new_profile=lambda _: self.h.open_add_dialog(),
+            on_batch_create=lambda _: self.h.on_open_batch_create(self.active_page),
             on_import=self.h.on_import,
             on_export=lambda _: self.h.on_export_open(),
             on_mcp=lambda _: open_mcp_guide(self.page, self.clipboard),
@@ -204,6 +253,7 @@ class App:
             language=current_language(),
             on_language=self._set_language,
             trash_btn=self._trash_btn,
+            backup_btn=self._backup_btn,
         )
         check_proxy_btn = ft.OutlinedButton(
             get_string("bulk_check_proxy"),

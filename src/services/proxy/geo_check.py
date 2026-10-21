@@ -124,6 +124,34 @@ def _camoufox_geo(ip: str) -> tuple[str, str, str, float]:
     return country, geo.timezone, locale, float(probabilities[top])
 
 
+_DETAIL_IP_RE = re.compile(r"IP:\s*([0-9a-fA-F:\.]+)")
+
+
+def extract_ip_from_check_detail(detail: str) -> str | None:
+    """Extract the raw IPv4/IPv6 exit IP from a proxy check result string."""
+    if not detail:
+        return None
+    m = _DETAIL_IP_RE.search(detail)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def derive_geo_from_ip(ip: str | None) -> tuple[str | None, str | None]:
+    """Derive validated (timezone, locale) from an exit IP using Camoufox's offline GeoIP DB."""
+    if not ip:
+        return None, None
+    try:
+        from ...utils.validation import validate_locale, validate_timezone
+
+        _country, tz, loc, _share = _camoufox_geo(ip.strip())
+        clean_tz = tz if tz and validate_timezone(tz)[0] else None
+        clean_loc = loc if loc and validate_locale(loc)[0] else None
+        return clean_tz, clean_loc
+    except Exception:
+        return None, None
+
+
 def _cloudflare(proxies: dict[str, str] | None) -> SourceResult:
     text = _get("https://www.cloudflare.com/cdn-cgi/trace", proxies).text
     data = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
