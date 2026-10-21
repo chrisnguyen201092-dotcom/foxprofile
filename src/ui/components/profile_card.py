@@ -104,7 +104,7 @@ def build_profile_card(
         no_wrap=True,
         overflow=ft.TextOverflow.ELLIPSIS,
         tooltip=profile.name,
-        expand=bool(profile.group or show_failed or profile.color or draggable),
+        expand=bool(profile.group or show_failed or profile.color),
     )
     top_line_controls: list[ft.Control] = [name_text]
     if show_failed:
@@ -165,8 +165,8 @@ def build_profile_card(
         text_block = top_line
 
     name_parts: list[ft.Control] = []
-    if draggable:
-        name_parts.append(ft.Icon(ft.Icons.DRAG_INDICATOR, size=16, color=COLORS["text_dim"]))
+    name_parts: list[ft.Control] = []
+
     if profile.color:
         name_parts.append(
             ft.Container(

@@ -30,23 +30,10 @@ def build_pages_bar(
         text_col = COLORS["cover_ink"] if is_active else COLORS["text_main"]
         count_col = COLORS["cover_muted"] if is_active else COLORS["text_dim"]
 
-        row_controls: list[ft.Control] = []
-        if editable and can_drag:
-            row_controls.append(
-                ft.Container(
-                    padding=ft.Padding.only(left=7, right=0, top=6, bottom=6),
-                    tooltip=get_string("tooltip_drag_page"),
-                    content=ft.Icon(
-                        ft.Icons.DRAG_INDICATOR,
-                        size=13,
-                        color=COLORS["cover_muted"] if is_active else COLORS["text_dim"],
-                    ),
-                )
-            )
-        row_controls.append(
+        row_controls: list[ft.Control] = [
             ft.Container(
                 padding=ft.Padding.only(
-                    left=5 if (editable and can_drag) else 12,
+                    left=12,
                     right=6 if editable else 12,
                     top=6,
                     bottom=6,
@@ -71,8 +58,8 @@ def build_pages_bar(
                         ),
                     ],
                 ),
-            )
-        )
+            ),
+        ]
         if editable:
             row_controls.append(
                 ft.Container(

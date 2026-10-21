@@ -838,7 +838,7 @@ function row(p) {
     h("div", { class: "c-sel", role: "cell" }, box),
     h("div", { class: "c-name stack", role: "cell" },
       h("span", { class: "name", title: p.name },
-        isCustom ? h("span", { class: "drag-grip", "aria-hidden": "true" }, "⠿") : null,
+
         p.color ? h("span", { class: "color-dot", style: `background:${p.color}` }) : null,
         h("span", { class: "name-text" }, p.name),
         hasFail ? h("span", { class: "group-pill", style: "border-color:var(--err);color:var(--err);background:var(--err-tint)", title: failed.get(p.name) }, t("stamp_failed")) : null,
