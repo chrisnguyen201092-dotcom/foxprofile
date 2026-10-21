@@ -34,6 +34,15 @@ class AppState:
         # profile_name -> ("checking" | "ok" | "fail", short_label)
         self.proxy_status: dict[str, tuple[str, str]] = {}
 
+    @property
+    def loading(self) -> set[str]:
+        with self._loading_lock:
+            return set(self._loading_profiles)
+
+    def loading_names(self) -> set[str]:
+        with self._loading_lock:
+            return set(self._loading_profiles)
+
     def is_loading(self, name: str) -> bool:
         with self._loading_lock:
             return name in self._loading_profiles

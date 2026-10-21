@@ -401,3 +401,76 @@ def test_ui_dialogs_and_profile_card_focus_render():
         preselected_names={"Kenji"},
     )
     assert len(page.dialogs) == 5
+
+
+def test_app_handlers_on_launch_and_bulk_launch_with_monitor(isolated_pm, tmp_path):
+    from src.ui.handlers import AppHandlers
+
+    isolated_pm.add_profile("DirectAcc", "", "windows")
+    isolated_pm.add_profile(
+        "SafeAcc",
+        "http://u:p@1.2.3.4:10199",
+        "windows",
+        timezone="America/Detroit",
+        locale="en-US",
+    )
+
+    class DummyBL:
+        def __init__(self):
+            self.started = []
+
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def start_thread(self, profile, log_callback, on_start=None, on_ready=None, on_stop=None):
+            self.started.append(profile.name)
+            return True
+
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    state = AppState()
+    bl = DummyBL()
+    page = DummyPage()
+    mon = MonitorService(data_dir=str(tmp_path / "data"), log_dir=str(tmp_path / "logs"))
+    h = AppHandlers(
+        pm=isolated_pm,
+        bl=bl,  # type: ignore[arg-type]
+        ps=None,  # type: ignore[arg-type]
+        state=state,
+        get_page=lambda: page,  # type: ignore[return-value]
+        get_refs=lambda: None,
+        log_fn=lambda _: None,
+        refresh_fn=lambda: None,
+        get_page_profiles=lambda: ([], isolated_pm.list_profiles(), 1),
+        monitor=mon,
+    )
+
+    # SafeAcc launches immediately without dialog
+    h.on_launch("SafeAcc")
+    assert bl.started == ["SafeAcc"]
+    assert len(page.dialogs) == 0
+
+    # DirectAcc (no proxy) opens pre-launch guard dialog instead of launching
+    h.on_launch("DirectAcc")
+    assert bl.started == ["SafeAcc"]
+    assert len(page.dialogs) == 1
+
+    # Bulk launch with DirectAcc selected also opens bulk pre-launch guard dialog
+    state.select_all(["DirectAcc"])
+    h.on_bulk_launch()
+    assert len(page.dialogs) == 2
