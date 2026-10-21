@@ -38,6 +38,8 @@ def export_profile(
     file_picker: ft.FilePicker,
     pm: IProfileManager,
     log: Callable[[str], None],
+    *,
+    preselected_names: set[str] | None = None,
 ) -> None:
     profiles = pm.list_profiles()
     if not profiles:
@@ -51,4 +53,10 @@ def export_profile(
             else:
                 log(get_string("export_error", error=result))
 
-    open_export_dialog(page, file_picker, profiles, on_complete)
+    open_export_dialog(
+        page,
+        file_picker,
+        profiles,
+        on_complete,
+        preselected_names=preselected_names,
+    )

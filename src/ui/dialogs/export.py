@@ -13,19 +13,25 @@ def open_export_dialog(
     file_picker: ft.FilePicker,
     profiles: list[Profile],
     on_complete: Callable[[list[str], str, bool], None],
+    *,
+    preselected_names: set[str] | None = None,
 ) -> None:
     if not profiles:
         return
 
+    presel = preselected_names or set()
     names = [p.name for p in profiles]
-    checkboxes = [ft.Checkbox(label=n, value=False, shape=ft.CircleBorder()) for n in names]
+    checkboxes = [
+        ft.Checkbox(label=n, value=(n in presel), shape=ft.CircleBorder())
+        for n in names
+    ]
     include_data_cb = ft.Checkbox(label=get_string("include_browser_data"), value=True)
 
     async def on_export(_: ft.ControlEvent) -> None:
         selected = [cb.label for cb in checkboxes if cb.value]
         if not selected:
             return
-        include_data = include_data_cb.value
+        include_data = bool(include_data_cb.value)
         page.pop_dialog()
         dir_path = await file_picker.get_directory_path(
             dialog_title=get_string("select_export_dir"),
@@ -58,8 +64,8 @@ def open_export_dialog(
 
     select_all_cb = ft.Checkbox(
         label=get_string("select_all"),
-        value=False,
-        tristate=False,
+        value=bool(checkboxes) and all(cb.value for cb in checkboxes),
+        tristate=any(cb.value for cb in checkboxes) and not all(cb.value for cb in checkboxes),
         shape=ft.CircleBorder(),
         on_change=toggle_all,
     )
@@ -69,11 +75,10 @@ def open_export_dialog(
         bgcolor=COLORS["card_bg"],
         title=ft.Text(get_string("export_profiles"), size=20, weight=ft.FontWeight.BOLD),
         content=ft.Container(
-            width=350,
+            width=380,
             content=ft.Column(
                 tight=True,
                 spacing=8,
-                scroll=ft.ScrollMode.AUTO,
                 controls=[
                     ft.Text(
                         get_string("choose_profiles_to_export"),
@@ -83,8 +88,13 @@ def open_export_dialog(
                     ft.Container(height=4),
                     select_all_cb,
                     ft.Divider(height=1),
-                    *checkboxes,
-                    ft.Container(height=8),
+                    ft.Column(
+                        spacing=4,
+                        height=min(260, max(90, len(checkboxes) * 34)),
+                        scroll=ft.ScrollMode.AUTO,
+                        controls=checkboxes,
+                    ),
+                    ft.Container(height=6),
                     include_data_cb,
                 ],
             ),

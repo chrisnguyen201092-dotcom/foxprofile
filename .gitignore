@@ -179,6 +179,9 @@ pyrightconfig.json
 camoufox_data/
 profiles.json
 custom_pages.json
+trash_profiles.json
+monitor_settings.json
+_backups/
 logs/
 
 # Tooling artefacts

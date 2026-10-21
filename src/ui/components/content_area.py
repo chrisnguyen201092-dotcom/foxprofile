@@ -316,6 +316,8 @@ def build_content_area(
     pages_bar: ft.Control | None = None,
     monitor_bar: ft.Control | None = None,
     check_proxy_btn: ft.Control | None = None,
+    cooldown_btn: ft.Control | None = None,
+    arrange_btn: ft.Control | None = None,
 ) -> ft.Container:
     """Main content: title, search, custom pages bar, then the profile sheet."""
     _ = (prev_btn, next_btn, page_label)
@@ -336,7 +338,9 @@ def build_content_area(
         ),
     )
     right_head_controls = [
-        c for c in (check_proxy_btn, sort_control, search_field) if c is not None
+        c
+        for c in (arrange_btn, cooldown_btn, check_proxy_btn, sort_control, search_field)
+        if c is not None
     ]
     return ft.Container(
         expand=True,

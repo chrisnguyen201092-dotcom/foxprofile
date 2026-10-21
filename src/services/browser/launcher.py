@@ -13,6 +13,7 @@ from ...core.strings import get_string
 from ...models.profile import Profile
 from .control import TOKEN_HEADER
 from .process import spawn_browser, terminate, wait_for_exit
+from .window_title import arrange_browser_windows, focus_browser_window
 
 logger = get_logger("browser.launcher")
 
@@ -249,6 +250,31 @@ class BrowserLauncher:
 
     def running_count(self) -> int:
         return len(self.running_profile_names())
+
+    def focus_profile(self, profile_name: str) -> bool:
+        with self._lock:
+            proc = self._active_sessions.get(profile_name)
+            pid = proc.pid if proc is not None and proc.poll() is None else None
+        return focus_browser_window(profile_name, pid)
+
+    def arrange_windows(self, profile_names: list[str] | None = None) -> int:
+        with self._lock:
+            names = (
+                profile_names
+                if profile_names is not None
+                else list(self._active_sessions.keys())
+            )
+            pairs = [
+                (
+                    n,
+                    self._active_sessions[n].pid
+                    if n in self._active_sessions and self._active_sessions[n].poll() is None
+                    else None,
+                )
+                for n in names
+                if n in self._active_sessions and self._active_sessions[n].poll() is None
+            ]
+        return arrange_browser_windows(pairs)
 
     def is_running(self, profile_name: str) -> bool:
         with self._lock:

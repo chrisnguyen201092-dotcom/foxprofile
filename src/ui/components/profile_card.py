@@ -105,6 +105,7 @@ def build_profile_card(
     on_save_proxy: Callable[[str, str], None] | None = None,
     on_check_proxy: Callable[[str], None] | None = None,
     on_clone: Callable[[str], None] | None = None,
+    on_focus_window: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -312,7 +313,13 @@ def build_profile_card(
                 _cell(
                     "geo",
                     _drag_wrap(
-                        _geo(profile, monitor_info, is_running=is_running, since=since)
+                        _geo(
+                            profile,
+                            monitor_info,
+                            is_running=is_running,
+                            since=since,
+                            on_focus_window=on_focus_window,
+                        )
                     ),
                 ),
                 _cell(
@@ -467,6 +474,9 @@ def _proxy(
             other, left = monitor_info.port_cooldown_by
             sub_label = get_string("proxy_cooldown_by", left=left, other=other)
             sub_color = COLORS["warning"]
+        elif monitor_info.proxy_port_changed:
+            sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
+            sub_color = COLORS["error"]
 
     host_text = _data(rest)
     host_text.tooltip = (
@@ -500,6 +510,7 @@ def _geo(
     *,
     is_running: bool = False,
     since: str = "",
+    on_focus_window: Callable[[str], None] | None = None,
 ) -> ft.Column:
     follow = get_string("follows_ip")
     tz = (
@@ -509,18 +520,39 @@ def _geo(
     )
     if is_running:
         run_label = f"● {get_string('stamp_live')}" + (f" · {since}" if since else "")
-        return _stack(
-            tz,
-            ft.Text(
-                run_label,
-                size=11.5,
-                font_family=FONT_DATA,
-                color=COLORS["success"],
-                no_wrap=True,
-                overflow=ft.TextOverflow.ELLIPSIS,
-                tooltip=run_label,
-            ),
+        run_text = ft.Text(
+            run_label,
+            size=11.5,
+            font_family=FONT_DATA,
+            color=COLORS["success"],
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=get_string("tooltip_focus_window") if on_focus_window else run_label,
         )
+        if on_focus_window is not None:
+            return _stack(
+                tz,
+                ft.Container(
+                    ink=True,
+                    border_radius=4,
+                    tooltip=get_string("tooltip_focus_window"),
+                    on_click=lambda _, n=profile.name: on_focus_window(n),
+                    content=ft.Row(
+                        spacing=4,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            run_text,
+                            ft.Icon(
+                                ft.Icons.OPEN_IN_NEW,
+                                size=11.5,
+                                color=COLORS["success"],
+                            ),
+                        ],
+                    ),
+                ),
+            )
+        return _stack(tz, run_text)
     if monitor_info is not None and monitor_info.last_closed is not None:
         cd = _format_cooldown(monitor_info.cooldown_mins)
         is_today = monitor_info.last_closed.date() == datetime.now().date()

@@ -2,14 +2,16 @@
 
 Provides mtime-cached inspection of:
 - Session history & cooldown time (`last_closed`, `cooldown_mins`, `today_minutes`)
-- Proxy port sharing, active proxy collisions, and 15-minute IP cooldown warnings
+- Proxy port sharing, active proxy collisions, and configurable IP cooldown warnings
 - Cookie/session readiness (`hatch_gw`, `hatch_sess`, `sess_exp`) via immutable read-only SQLite
 - Saved tab check (`/thread/` in `tabs.json`) and token refresh burst detection (`cache2/entries`)
+- Pre-launch 4-layer safety guard (`check_prelaunch` / `check_bulk_prelaunch`)
 - Disk free space (`free_gb`)
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -22,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.config import DATA_DIR, LOG_DIR
+from ..core.strings import get_string
 from ..models.profile import Profile
 
 PORT_COOLDOWN_MINUTES = 15
@@ -45,6 +48,13 @@ def extract_proxy_port(proxy_str: str | None) -> str:
 
 
 @dataclass
+class PreLaunchWarning:
+    code: str
+    level: str  # "critical" | "warning"
+    message: str
+
+
+@dataclass
 class ProfileMonitorInfo:
     name: str
     port: str = ""
@@ -60,6 +70,8 @@ class ProfileMonitorInfo:
     hatch_sess: bool = False
     sess_exp: str = "-"
     burst_10m: int = 0
+    last_used_port: str = ""
+    proxy_port_changed: bool = False
 
     @property
     def has_warning(self) -> bool:
@@ -67,6 +79,7 @@ class ProfileMonitorInfo:
             self.busy_by
             or self.port_cooldown_by is not None
             or self.burst_10m > 45
+            or self.proxy_port_changed
         )
 
 
@@ -99,9 +112,64 @@ class MonitorService:
         self._disk_cache: dict[str, dict[str, Any]] = {}
         self._last_free_gb_ts: float = 0.0
         self._free_gb: float = 0.0
+        self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
+        self._last_used_ports: dict[str, str] = {}
+        self._load_settings()
 
-    def record_started(self, profile_name: str) -> None:
+    def _settings_file(self) -> pathlib.Path:
+        return self._data_dir.parent / "monitor_settings.json"
+
+    def _load_settings(self) -> None:
+        path = self._settings_file()
+        if not path.exists():
+            return
+        with contextlib.suppress(Exception):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                cd = raw.get("cooldown_minutes")
+                if isinstance(cd, int) and 0 <= cd <= 1440:
+                    self._cooldown_minutes = cd
+                ports = raw.get("last_used_ports")
+                if isinstance(ports, dict):
+                    self._last_used_ports = {
+                        str(k): str(v) for k, v in ports.items() if isinstance(k, str) and v
+                    }
+
+    def _save_settings(self) -> None:
+        path = self._settings_file()
+        with contextlib.suppress(Exception):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            payload = {
+                "cooldown_minutes": self._cooldown_minutes,
+                "last_used_ports": self._last_used_ports,
+            }
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+
+    @property
+    def cooldown_minutes(self) -> int:
+        return self._cooldown_minutes
+
+    def set_cooldown_minutes(self, minutes: int) -> None:
+        self._cooldown_minutes = max(0, min(1440, int(minutes)))
+        self._save_settings()
+
+    def acknowledge_proxy_change(self, profile_name: str, proxy: str | None) -> None:
+        port = extract_proxy_port(proxy)
+        if port:
+            self._last_used_ports[profile_name] = port
+        else:
+            self._last_used_ports.pop(profile_name, None)
+        self._save_settings()
+
+    def record_started(self, profile_name: str, proxy: str | None = None) -> None:
         self._live_started_at[profile_name] = dt.datetime.now()
+        if proxy is not None:
+            port = extract_proxy_port(proxy)
+            if port and self._last_used_ports.get(profile_name) != port:
+                self._last_used_ports[profile_name] = port
+                self._save_settings()
 
     def record_stopped(self, profile_name: str) -> None:
         now = dt.datetime.now()
@@ -276,11 +344,11 @@ class MonitorService:
                 latest_exp = 0.0
                 for _host, cname, exp in rows:
                     cname_s = str(cname or "")
-                    if "cf_clearance" in cname_s or "__cf_bm" in cname_s:
+                    if "cf_clearance" in cname_s or "__cf_bm" in cname_s or "hatch_gw" in cname_s:
                         hatch_gw = True
                     elif any(
                         k in cname_s.lower()
-                        for k in ("session", "token", "auth", "user", "id", "clerk", "sb-")
+                        for k in ("session", "token", "auth", "user", "id", "clerk", "sb-", "hatch_sess")
                     ):
                         hatch_sess = True
                         if exp:
@@ -358,10 +426,20 @@ class MonitorService:
         disk_map: dict[str, dict[str, Any]] = {}
         last_closed_map: dict[str, dt.datetime | None] = {}
         today_mins_map: dict[str, int] = {}
+        ports_seeded = False
         for p in profiles:
             is_run = p.name in running_names
             disk = self._inspect_profile_disk(p.name, is_run)
             disk_map[p.name] = disk
+
+            port = extract_proxy_port(p.proxy)
+            if (
+                port
+                and (disk.get("hatch_gw") or disk.get("hatch_sess"))
+                and p.name not in self._last_used_ports
+            ):
+                self._last_used_ports[p.name] = port
+                ports_seeded = True
 
             h = hist.get(p.name, {})
             lc = h.get("last_closed")
@@ -382,6 +460,9 @@ class MonitorService:
                     secs += max(0.0, (now - start_dt).total_seconds())
             today_mins_map[p.name] = int(secs // 60)
 
+        if ports_seeded:
+            self._save_settings()
+
         snap = MonitorSnapshot(
             free_gb=self._free_gb,
             total_ports=len(port_to_profiles),
@@ -396,6 +477,7 @@ class MonitorService:
                 snap.proxy_collisions.append((port, running_on_port))
         snap.active_ports = len(active_ports_set)
 
+        cd_target = self._cooldown_minutes
         for p in profiles:
             is_run = p.name in running_names
             port = extract_proxy_port(p.proxy)
@@ -409,17 +491,17 @@ class MonitorService:
                 else None
             )
 
-            # Check if a sibling on the same proxy port closed < 15 minutes ago
+            # Check if a sibling on the same proxy port closed < cooldown_minutes ago
             port_cooldown_by: tuple[str, int] | None = None
-            if not is_run and not busy_by and len(siblings) > 1:
+            if cd_target > 0 and not is_run and not busy_by and len(siblings) > 1:
                 for sib in siblings:
                     if sib == p.name:
                         continue
                     sib_lc = last_closed_map.get(sib)
                     if sib_lc is not None:
                         ago = int((now - sib_lc).total_seconds() // 60)
-                        if 0 <= ago < PORT_COOLDOWN_MINUTES:
-                            left = PORT_COOLDOWN_MINUTES - ago
+                        if 0 <= ago < cd_target:
+                            left = cd_target - ago
                             if port_cooldown_by is None or left > port_cooldown_by[1]:
                                 port_cooldown_by = (sib, left)
 
@@ -430,6 +512,10 @@ class MonitorService:
                 snap.thread_ok_count += 1
             if disk["burst_10m"] > 45:
                 snap.token_bursts.append((p.name, disk["burst_10m"]))
+
+            last_port = self._last_used_ports.get(p.name, "")
+            has_sess = bool(disk["hatch_gw"] or disk["hatch_sess"])
+            proxy_port_changed = bool(has_sess and last_port and port != last_port)
 
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
@@ -446,6 +532,140 @@ class MonitorService:
                 hatch_sess=bool(disk["hatch_sess"]),
                 sess_exp=str(disk["sess_exp"]),
                 burst_10m=int(disk["burst_10m"]),
+                last_used_port=last_port,
+                proxy_port_changed=proxy_port_changed,
             )
 
         return snap
+
+    def check_prelaunch(
+        self,
+        profile: Profile,
+        all_profiles: list[Profile],
+        running_names: set[str],
+        loading_names: set[str] | None = None,
+        *,
+        snap: MonitorSnapshot | None = None,
+    ) -> list[PreLaunchWarning]:
+        """Evaluate the 4-layer pre-launch safety guard for a single profile."""
+        active_names = set(running_names) | set(loading_names or ())
+        if snap is None:
+            snap = self.snapshot(all_profiles, active_names)
+        info = snap.profiles.get(profile.name)
+        warnings: list[PreLaunchWarning] = []
+
+        proxy_str = (profile.proxy or "").strip()
+        # Layer 1: No proxy attached -> risks leaking real local IP
+        if not proxy_str:
+            warnings.append(
+                PreLaunchWarning(
+                    code="no_proxy",
+                    level="critical",
+                    message=get_string("guard_no_proxy"),
+                )
+            )
+        else:
+            # Layer 2a: Proxy port is currently busy on another running/starting profile
+            if info and info.busy_by:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="port_busy",
+                        level="critical",
+                        message=get_string(
+                            "guard_port_busy",
+                            port=info.port,
+                            others=", ".join(info.busy_by),
+                        ),
+                    )
+                )
+            # Layer 2b: Proxy port is still within the shift cooldown window
+            elif info and info.port_cooldown_by is not None and self._cooldown_minutes > 0:
+                other_name, left_mins = info.port_cooldown_by
+                warnings.append(
+                    PreLaunchWarning(
+                        code="port_cooldown",
+                        level="warning",
+                        message=get_string(
+                            "guard_port_cooldown",
+                            port=info.port,
+                            other=other_name,
+                            left=left_mins,
+                            cooldown=self._cooldown_minutes,
+                        ),
+                    )
+                )
+
+            # Layer 4: Proxy is set, but Timezone or Locale is missing (unpinned)
+            if not (profile.timezone or "").strip() or not (profile.locale or "").strip():
+                warnings.append(
+                    PreLaunchWarning(
+                        code="missing_geo",
+                        level="warning",
+                        message=get_string("guard_missing_geo"),
+                    )
+                )
+
+        # Layer 3: Profile has saved login cookies on a previous proxy port, and port changed
+        if info and info.proxy_port_changed:
+            warnings.append(
+                PreLaunchWarning(
+                    code="proxy_changed_with_session",
+                    level="critical",
+                    message=get_string(
+                        "guard_proxy_changed",
+                        old_port=info.last_used_port,
+                        new_port=info.port or get_string("direct_short"),
+                    ),
+                )
+            )
+
+        return warnings
+
+    def check_bulk_prelaunch(
+        self,
+        target_names: list[str],
+        all_profiles: list[Profile],
+        running_names: set[str],
+        loading_names: set[str] | None = None,
+    ) -> dict[str, list[PreLaunchWarning]]:
+        """Evaluate pre-launch safety for a batch of profiles, including intra-batch port collisions."""
+        active_names = set(running_names) | set(loading_names or ())
+        snap = self.snapshot(all_profiles, active_names)
+        by_name = {p.name: p for p in all_profiles}
+        seen_ports: dict[str, str] = {}
+        issues: dict[str, list[PreLaunchWarning]] = {}
+
+        for name in target_names:
+            if name in active_names:
+                continue
+            p = by_name.get(name)
+            if p is None:
+                continue
+            wlist = self.check_prelaunch(
+                p,
+                all_profiles,
+                running_names,
+                loading_names,
+                snap=snap,
+            )
+            port = extract_proxy_port(p.proxy)
+            if port:
+                if port in seen_ports:
+                    wlist.insert(
+                        0,
+                        PreLaunchWarning(
+                            code="batch_port_collision",
+                            level="critical",
+                            message=get_string(
+                                "guard_batch_collision",
+                                port=port,
+                                other=seen_ports[port],
+                            ),
+                        ),
+                    )
+                else:
+                    seen_ports[port] = name
+            if wlist:
+                issues[name] = wlist
+
+        return issues

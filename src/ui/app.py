@@ -62,6 +62,20 @@ class App:
             height=36,
             style=RAIL_STYLE,
         )
+        self._cooldown_btn = ft.OutlinedButton(
+            self._cooldown_btn_text(),
+            icon=ft.Icons.TIMER_OUTLINED,
+            height=40,
+            style=OUTLINE_STYLE,
+        )
+        self._arrange_btn = ft.OutlinedButton(
+            get_string("arrange_windows_btn"),
+            icon=ft.Icons.GRID_VIEW_ROUNDED,
+            height=40,
+            style=OUTLINE_STYLE,
+            visible=False,
+            tooltip=get_string("tooltip_arrange_windows"),
+        )
         c.event_bus.subscribe(self.state.schedule_refresh)
         self.h = AppHandlers(
             pm=self.pm,
@@ -73,6 +87,7 @@ class App:
             log_fn=self._log,
             refresh_fn=self._refresh_profiles,
             get_page_profiles=self._get_page_profiles,
+            monitor=self.monitor,
         )
 
     def run(self) -> None:
@@ -121,6 +136,22 @@ class App:
             style=RAIL_STYLE,
             on_click=lambda _: self.h.on_open_trash(),
         )
+        self._cooldown_btn = ft.OutlinedButton(
+            self._cooldown_btn_text(),
+            icon=ft.Icons.TIMER_OUTLINED,
+            height=40,
+            style=OUTLINE_STYLE,
+            on_click=lambda _: self.h.on_open_cooldown_settings(),
+        )
+        self._arrange_btn = ft.OutlinedButton(
+            get_string("arrange_windows_btn"),
+            icon=ft.Icons.GRID_VIEW_ROUNDED,
+            height=40,
+            style=OUTLINE_STYLE,
+            visible=False,
+            tooltip=get_string("tooltip_arrange_windows"),
+            on_click=lambda _: self.h.on_arrange_windows(),
+        )
         self.page.title = get_string("window_title")
         self.page.controls.clear()
         self.page.add(self._build_root_layout(self.refs))
@@ -147,6 +178,14 @@ class App:
         set_language(code)
         self.state.search_query = ""
         self._build_ui()
+
+    def _cooldown_btn_text(self) -> str:
+        mins = self.monitor.cooldown_minutes
+        return (
+            get_string("cooldown_btn_label", mins=mins)
+            if mins > 0
+            else get_string("cooldown_btn_off")
+        )
 
     def _build_root_layout(self, r: UIRefs) -> ft.Row:
         sidebar = build_sidebar(
@@ -186,6 +225,8 @@ class App:
             pages_bar=self._pages_bar_slot,
             monitor_bar=self._monitor_bar_slot,
             check_proxy_btn=check_proxy_btn,
+            cooldown_btn=self._cooldown_btn,
+            arrange_btn=self._arrange_btn,
         )
         return ft.Row(
             expand=True,
@@ -350,6 +391,34 @@ class App:
             all_profiles.sort(key=lambda p: (not self.bl.is_running(p.name), p.name.casefold()))
         elif sort_by == "proxy":
             all_profiles.sort(key=lambda p: (not bool(p.proxy), p.name.casefold()))
+        elif sort_by in ("cooldown_desc", "cooldown_asc"):
+            snap = self._last_monitor_snap or self.monitor.snapshot(
+                self.pm.list_profiles(),
+                self.bl.running_profile_names(),
+            )
+
+            def _cd_desc_key(p: object) -> tuple:
+                pname = getattr(p, "name", "")
+                if self.bl.is_running(pname):
+                    return (2, 0, pname.casefold())
+                info = snap.profiles.get(pname)
+                if info is not None and info.cooldown_mins is not None:
+                    port_busy = 1 if (info.busy_by or info.port_cooldown_by) else 0
+                    return (0, port_busy, -info.cooldown_mins, pname.casefold())
+                return (1, 0, 0, pname.casefold())
+
+            def _cd_asc_key(p: object) -> tuple:
+                pname = getattr(p, "name", "")
+                if self.bl.is_running(pname):
+                    return (0, 0, pname.casefold())
+                info = snap.profiles.get(pname)
+                if info is not None and info.cooldown_mins is not None:
+                    return (1, info.cooldown_mins, pname.casefold())
+                return (2, 0, pname.casefold())
+
+            all_profiles.sort(
+                key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key
+            )
 
         per_page = self.state.items_per_page
         if per_page <= 0:
@@ -375,7 +444,8 @@ class App:
         self.state.failed.intersection_update(all_names - running)
         for name in running - set(self._live_since):
             self._live_since[name] = time.strftime("%H:%M")
-            self.monitor.record_started(name)
+            p_live = self.pm.profiles.get(name)
+            self.monitor.record_started(name, p_live.proxy if p_live else None)
         for name in set(self._live_since) - running:
             del self._live_since[name]
             self.monitor.record_stopped(name)
@@ -386,6 +456,8 @@ class App:
         alert_bar = build_monitor_bar(snap, len(everything))
         self._monitor_bar_slot.content = alert_bar
         self._monitor_bar_slot.visible = alert_bar is not None
+        self._cooldown_btn.content = self._cooldown_btn_text()
+        self._arrange_btn.visible = len(running) >= 1
         if hasattr(self.pm, "list_trashed_profiles"):
             self._trash_btn.content = get_string(
                 "trash_button",
@@ -467,6 +539,7 @@ class App:
                     on_save_proxy=self.h.on_save_proxy,
                     on_check_proxy=self.h.on_quick_check_proxy if p.proxy else None,
                     on_clone=self.h.on_clone,
+                    on_focus_window=self.h.on_focus_window,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )
@@ -480,13 +553,15 @@ class App:
             self.state,
             page_profiles,
             {
-                "launch": self.h.on_launch if False else self.h.on_bulk_launch,
+                "launch": self.h.on_bulk_launch,
                 "stop": self.h.on_bulk_stop,
                 "delete": self.h.on_bulk_delete,
                 "select_range": self.h.on_bulk_select_range,
                 "set_group": self.h.on_bulk_set_group,
                 "set_color": self.h.on_bulk_set_color,
+                "set_proxy": self.h.on_bulk_set_proxy,
                 "check_proxy": self.h.on_bulk_check_proxy,
+                "export_zip": self.h.on_export_open,
                 "add_to_page": self._on_bulk_add_to_page,
                 "remove_from_page": self._on_bulk_remove_from_page,
                 "select_page": self.h.on_select_all_page,

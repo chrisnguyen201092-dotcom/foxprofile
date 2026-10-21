@@ -7,6 +7,7 @@ import flet as ft
 
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
+from ..services.monitor import MonitorService
 from ..utils.validation import validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
@@ -22,8 +23,12 @@ from .actions.transfer import export_profile, import_profile
 from .dialogs import (
     open_bulk_color_dialog,
     open_bulk_group_dialog,
+    open_bulk_prelaunch_guard_dialog,
+    open_bulk_proxy_dialog,
     open_clone_dialog,
+    open_cooldown_settings_dialog,
     open_log_dialog,
+    open_prelaunch_guard_dialog,
     open_trash_dialog,
 )
 from .refs import UIRefs
@@ -44,6 +49,7 @@ class AppHandlers:
         log_fn: Callable[[str], None],
         refresh_fn: Callable[[], None],
         get_page_profiles: Callable[[], tuple],
+        monitor: MonitorService | None = None,
     ) -> None:
         self._pm = pm
         self._bl = bl
@@ -54,9 +60,60 @@ class AppHandlers:
         self._log = log_fn
         self._refresh = refresh_fn
         self._get_page_profiles = get_page_profiles
+        self._monitor = monitor
 
     def on_launch(self, name: str) -> None:
+        if self._bl.is_running(name):
+            launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+            return
+        profile = self._pm.profiles.get(name)
+        if not profile:
+            return
+        page = self._get_page()
+        if self._monitor is not None and page is not None:
+            warnings = self._monitor.check_prelaunch(
+                profile,
+                self._pm.list_profiles(),
+                self._bl.running_profile_names(),
+                set(self._state.loading),
+            )
+            if warnings:
+                def _force() -> None:
+                    if self._monitor is not None:
+                        self._monitor.acknowledge_proxy_change(name, profile.proxy)
+                    launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+
+                open_prelaunch_guard_dialog(page, name, warnings, _force)
+                return
         launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+
+    def on_open_cooldown_settings(self) -> None:
+        page = self._get_page()
+        if page is None or self._monitor is None:
+            return
+
+        def _save(mins: int) -> None:
+            if self._monitor is not None:
+                self._monitor.set_cooldown_minutes(mins)
+                self._log(get_string("cooldown_saved_log", mins=mins))
+                self._refresh()
+
+        open_cooldown_settings_dialog(page, self._monitor.cooldown_minutes, _save)
+
+    def on_focus_window(self, name: str) -> None:
+        if hasattr(self._bl, "focus_profile"):
+            self._bl.focus_profile(name)
+
+    def on_arrange_windows(self) -> None:
+        if hasattr(self._bl, "arrange_windows"):
+            ordered = [
+                p.name
+                for p in self._pm.list_profiles()
+                if self._bl.is_running(p.name)
+            ]
+            cnt = self._bl.arrange_windows(ordered)
+            if cnt > 0:
+                self._log(get_string("arranged_windows_log", count=cnt))
 
     def on_delete(self, name: str) -> None:
         page = self._get_page()
@@ -235,7 +292,13 @@ class AppHandlers:
         page = self._get_page()
         refs = self._get_refs()
         assert page is not None and refs is not None
-        export_profile(page, refs.file_picker, self._pm, self._log)
+        export_profile(
+            page,
+            refs.file_picker,
+            self._pm,
+            self._log,
+            preselected_names=self._state.selected_names(),
+        )
 
     # --- Selection handlers ---
 
@@ -290,8 +353,47 @@ class AppHandlers:
             )
 
     def on_bulk_launch(self) -> None:
-        if names := list(self._state.selected_names()):
-            bulk_launch_profiles(names, self._pm, self._bl, self._state, self._log)
+        names = [
+            n
+            for n in self._state.selected_names()
+            if not self._bl.is_running(n) and not self._state.is_loading(n)
+        ]
+        if not names:
+            return
+        page = self._get_page()
+        if self._monitor is not None and page is not None:
+            issues = self._monitor.check_bulk_prelaunch(
+                names,
+                self._pm.list_profiles(),
+                self._bl.running_profile_names(),
+                set(self._state.loading),
+            )
+            if issues:
+                safe_names = [n for n in names if n not in issues]
+
+                def _launch_safe() -> None:
+                    if safe_names:
+                        bulk_launch_profiles(
+                            safe_names, self._pm, self._bl, self._state, self._log
+                        )
+
+                def _force_all() -> None:
+                    if self._monitor is not None:
+                        for n in names:
+                            p = self._pm.profiles.get(n)
+                            if p is not None:
+                                self._monitor.acknowledge_proxy_change(n, p.proxy)
+                    bulk_launch_profiles(names, self._pm, self._bl, self._state, self._log)
+
+                open_bulk_prelaunch_guard_dialog(
+                    page,
+                    safe_names,
+                    issues,
+                    _launch_safe,
+                    _force_all,
+                )
+                return
+        bulk_launch_profiles(names, self._pm, self._bl, self._state, self._log)
 
     def on_bulk_stop(self) -> None:
         if names := list(self._state.selected_names()):
@@ -330,6 +432,47 @@ class AppHandlers:
             self._refresh()
 
         open_bulk_color_dialog(page, len(selected), _apply)
+
+    def on_bulk_set_proxy(self) -> None:
+        page = self._get_page()
+        assert page is not None
+        selected_set = self._state.selected_names()
+        if not selected_set:
+            return
+        _, page_profiles, _ = self._get_page_profiles()
+        ordered: list[str] = [p.name for p in page_profiles if p.name in selected_set]
+        seen = set(ordered)
+        for p in self._pm.list_profiles():
+            if p.name in selected_set and p.name not in seen:
+                ordered.append(p.name)
+                seen.add(p.name)
+        current_proxies = {
+            n: self._pm.profiles[n].proxy for n in ordered if n in self._pm.profiles
+        }
+        session_ports: dict[str, str] = {}
+        if self._monitor is not None:
+            snap = self._monitor.snapshot(
+                self._pm.list_profiles(),
+                self._bl.running_profile_names(),
+            )
+            for n in ordered:
+                info = snap.profiles.get(n)
+                if info and (info.hatch_gw or info.hatch_sess) and info.last_used_port:
+                    session_ports[n] = info.last_used_port
+
+        def _apply(assignments: dict[str, str | None]) -> None:
+            cnt = self._pm.bulk_update_proxies(assignments)
+            self._log(get_string("bulk_proxy_updated", count=cnt))
+            self._state.clear_selection()
+            self._refresh()
+
+        open_bulk_proxy_dialog(
+            page,
+            ordered,
+            current_proxies,
+            _apply,
+            session_ports=session_ports,
+        )
 
     def on_bulk_check_proxy(self) -> None:
         page = self._get_page()

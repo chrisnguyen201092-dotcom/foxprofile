@@ -216,3 +216,188 @@ def test_monitor_service_collisions_and_cooldown(tmp_path):
     assert snap2.profiles["Acc 1"].has_thread_url is True
     assert snap2.profiles["Acc 21"].port_cooldown_by is not None
     assert snap2.profiles["Acc 21"].port_cooldown_by[0] == "Acc 1"
+
+
+def test_prelaunch_safety_guard_four_layers_and_cooldown_config(tmp_path):
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    # Create cookies.sqlite for Acc 1 so it has an active session on :44200
+    p1_dir = data_dir / "Acc 1"
+    p1_dir.mkdir()
+    db_file = p1_dir / "cookies.sqlite"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE moz_cookies (host TEXT, name TEXT, expiry INTEGER)")
+    conn.execute(
+        "INSERT INTO moz_cookies VALUES (?, ?, ?)",
+        (".muse.ai", "hatch_gw", int(time.time()) + 7200),
+    )
+    conn.commit()
+    conn.close()
+
+    p1 = Profile(
+        name="Acc 1",
+        proxy="http://u:p@1.2.3.4:44200",
+        os_type="windows",
+        timezone="America/Detroit",
+        locale="en-US",
+    )
+    p2 = Profile(
+        name="Acc 2",
+        proxy="http://u:p@1.2.3.4:44200",
+        os_type="windows",
+        timezone="America/Detroit",
+        locale="en-US",
+    )
+    p_no_proxy = Profile(name="Acc Direct", proxy=None, os_type="windows")
+    p_no_geo = Profile(name="Acc NoGeo", proxy="http://u:p@1.2.3.4:44300", os_type="windows")
+    all_profiles = [p1, p2, p_no_proxy, p_no_geo]
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon.cooldown_minutes == 15
+
+    # Seed last_used_ports via initial snapshot
+    mon.snapshot(all_profiles, set())
+
+    # 1. Clean profile (p1) when idle -> 0 warnings
+    assert mon.check_prelaunch(p1, all_profiles, set()) == []
+
+    # 2. Layer 1: No proxy -> critical no_proxy warning
+    w_noproxy = mon.check_prelaunch(p_no_proxy, all_profiles, set())
+    assert any(w.code == "no_proxy" and w.level == "critical" for w in w_noproxy)
+
+    # 3. Layer 2a: Port busy when Acc 1 is running and Acc 2 tries to launch
+    w_busy = mon.check_prelaunch(p2, all_profiles, {"Acc 1"})
+    assert any(w.code == "port_busy" and w.level == "critical" for w in w_busy)
+
+    # 4. Layer 2b: Port cooldown after Acc 1 stops, plus custom cooldown setting
+    mon.record_stopped("Acc 1")
+    w_cd = mon.check_prelaunch(p2, all_profiles, set())
+    assert any(w.code == "port_cooldown" for w in w_cd)
+
+    mon.set_cooldown_minutes(0)
+    assert mon.check_prelaunch(p2, all_profiles, set()) == []
+
+    # Reload MonitorService to verify settings persistence
+    mon2 = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon2.cooldown_minutes == 0
+    mon2.set_cooldown_minutes(25)
+
+    # 5. Layer 3: Changing proxy port on Acc 1 while it holds hatch_gw session cookies
+    p1.proxy = "http://u:p@1.2.3.4:44999"
+    w_changed = mon2.check_prelaunch(p1, all_profiles, set())
+    assert any(w.code == "proxy_changed_with_session" and w.level == "critical" for w in w_changed)
+
+    mon2.acknowledge_proxy_change("Acc 1", p1.proxy)
+    assert not any(
+        w.code == "proxy_changed_with_session"
+        for w in mon2.check_prelaunch(p1, all_profiles, set())
+    )
+
+    # 6. Layer 4: Missing timezone/locale on proxy profile
+    w_geo = mon2.check_prelaunch(p_no_geo, all_profiles, set())
+    assert any(w.code == "missing_geo" for w in w_geo)
+
+    # 7. Bulk prelaunch intra-batch port collision
+    p1.proxy = "http://u:p@1.2.3.4:44200"
+    mon2.acknowledge_proxy_change("Acc 1", p1.proxy)
+    mon2.set_cooldown_minutes(0)
+    bulk_issues = mon2.check_bulk_prelaunch(["Acc 1", "Acc 2"], all_profiles, set())
+    assert "Acc 1" not in bulk_issues
+    assert "Acc 2" in bulk_issues
+    assert any(w.code == "batch_port_collision" for w in bulk_issues["Acc 2"])
+
+
+def test_bulk_update_proxies_and_rotating_config_backups(isolated_pm):
+    isolated_pm.add_profile("P1", "", "windows")
+    isolated_pm.add_profile("P2", "", "windows")
+
+    cnt = isolated_pm.bulk_update_proxies(
+        {
+            "P1": "http://u:p@1.2.3.4:10199",
+            "P2": "not a valid proxy://::",
+        }
+    )
+    assert cnt == 1
+    assert isolated_pm.profiles["P1"].proxy == "http://u:p@1.2.3.4:10199"
+    assert isolated_pm.profiles["P2"].proxy is None
+
+    backups = isolated_pm.list_config_backups()
+    assert len(backups) >= 1
+    saved_data = json.loads(backups[-1].read_text(encoding="utf-8"))
+    assert "P1" in saved_data
+
+
+def test_window_focus_and_arrange_graceful_fallback():
+    from src.services.browser.window_title import arrange_browser_windows, focus_browser_window
+
+    assert focus_browser_window("__nonexistent_profile_xyz__", root_pid=99999999) is False
+    assert arrange_browser_windows([("__nonexistent_profile_xyz__", 99999999)]) == 0
+
+
+def test_ui_dialogs_and_profile_card_focus_render():
+    from src.services.monitor import PreLaunchWarning
+    from src.ui.components.profile_card import build_profile_card
+    from src.ui.dialogs import (
+        open_bulk_prelaunch_guard_dialog,
+        open_bulk_proxy_dialog,
+        open_cooldown_settings_dialog,
+        open_export_dialog,
+        open_prelaunch_guard_dialog,
+    )
+
+    p = Profile(
+        name="Kenji",
+        proxy="http://u:p@1.2.3.4:10199",
+        os_type="windows",
+        timezone="America/Detroit",
+        locale="en-US",
+    )
+    row = build_profile_card(
+        p,
+        False,
+        True,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        since="19:30",
+        on_focus_window=lambda _: None,
+    )
+    assert row is not None
+
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    page = DummyPage()
+    w = PreLaunchWarning(code="no_proxy", level="critical", message="No proxy")
+    open_prelaunch_guard_dialog(page, "Kenji", [w], lambda: None)
+    open_bulk_prelaunch_guard_dialog(page, ["Levi"], {"Kenji": [w]}, lambda: None, lambda: None)
+    open_cooldown_settings_dialog(page, 15, lambda _: None)
+    open_bulk_proxy_dialog(
+        page,
+        ["Kenji", "Levi"],
+        {"Kenji": p.proxy, "Levi": None},
+        lambda _: None,
+        session_ports={"Kenji": ":10199"},
+    )
+    open_export_dialog(
+        page,
+        None,  # type: ignore[arg-type]
+        [p],
+        lambda *_: None,
+        preselected_names={"Kenji"},
+    )
+    assert len(page.dialogs) == 5

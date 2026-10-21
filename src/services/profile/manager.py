@@ -16,6 +16,7 @@ from ...utils.validation import (
     validate_locale,
     validate_notes,
     validate_profile_name,
+    validate_proxy_format,
     validate_timezone,
 )
 from .transfer import export_to_zip, import_from_zip, read_profile_meta
@@ -61,6 +62,30 @@ class ProfileManager:
         self.custom_pages: list[str] = []
         self._load_profiles()
         pathlib.Path(DATA_DIR).mkdir(exist_ok=True, parents=True)
+
+    @staticmethod
+    def _backups_dir() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).parent / "_backups"
+
+    def list_config_backups(self) -> list[pathlib.Path]:
+        bdir = self._backups_dir()
+        if not bdir.exists():
+            return []
+        return sorted(bdir.glob("profiles_*.json"))
+
+    def _write_config_backup(self, serialized_profiles: str) -> None:
+        with contextlib.suppress(Exception):
+            bdir = self._backups_dir()
+            bdir.mkdir(parents=True, exist_ok=True)
+            day_tag = time.strftime("%Y%m%d")
+            target = bdir / f"profiles_{day_tag}.json"
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(serialized_profiles, encoding="utf-8")
+            _replace(tmp, target)
+            backups = sorted(bdir.glob("profiles_*.json"))
+            for old_bak in backups[:-10]:
+                with contextlib.suppress(OSError):
+                    old_bak.unlink(missing_ok=True)
 
     @staticmethod
     def _pages_file() -> pathlib.Path:
@@ -173,6 +198,8 @@ class ProfileManager:
                 )
                 _replace(pages_tmp, pages_path)
             logger.debug("Profiles saved")
+            if path.exists():
+                self._write_config_backup(path.read_text(encoding="utf-8"))
         except Exception as e:
             logger.exception("Error saving profiles: %s", e)
             with contextlib.suppress(OSError):
@@ -603,6 +630,22 @@ class ProfileManager:
                 if p is not None:
                     p.color = clean_color
                     count += 1
+            if count:
+                self.save_profiles()
+        return count
+
+    def bulk_update_proxies(self, assignments: dict[str, str | None]) -> int:
+        count = 0
+        with self._lock:
+            for name, raw_proxy in assignments.items():
+                p = self.profiles.get(name)
+                if p is None:
+                    continue
+                clean = (raw_proxy or "").strip()
+                if clean and not validate_proxy_format(clean)[0]:
+                    continue
+                p.proxy = clean or None
+                count += 1
             if count:
                 self.save_profiles()
         return count

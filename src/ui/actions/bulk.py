@@ -64,12 +64,15 @@ async def bulk_check_proxies(
     state: AppState | None = None,
 ) -> None:
     proxy_to_names: dict[str, list[str]] = {}
+    skip_count = 0
     for name in names:
         p = pm.profiles.get(name)
         if p is not None and p.proxy:
             proxy_to_names.setdefault(p.proxy, []).append(name)
             if state is not None:
                 state.proxy_status[name] = ("checking", f"⏳ {get_string('proxy_checking')}")
+        elif p is not None:
+            skip_count += 1
 
     if not proxy_to_names:
         return
@@ -99,7 +102,7 @@ async def bulk_check_proxies(
             state.schedule_refresh()
 
     await asyncio.gather(*(_one_unique(p, ms) for p, ms in proxy_to_names.items()))
-    log(get_string("bulk_proxy_summary", ok=ok_count, fail=fail_count))
+    log(get_string("bulk_proxy_summary", ok=ok_count, fail=fail_count, skip=skip_count))
 
 
 def bulk_launch_profiles(
