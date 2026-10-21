@@ -13,7 +13,7 @@ from camoufox.async_api import AsyncCamoufox
 from camoufox.virtdisplay import VirtualDisplay
 
 from src.core.config import DATA_DIR, HEADLESS, RESTORE_TABS
-from src.services.browser import control, session, window_title
+from src.services.browser import control, session
 from src.services.browser import display as xvfb
 from src.services.browser.fingerprint import load_or_create
 from src.services.proxy.geo_check import requests_proxy_url
@@ -216,13 +216,6 @@ async def run_browser(
                 if RESTORE_TABS
                 else None
             )
-            title_task = (
-                asyncio.create_task(
-                    window_title.keep_window_title_prefixed(profile_name, close_event)
-                )
-                if not HEADLESS
-                else None
-            )
             close_task = asyncio.create_task(close_event.wait())
             shutdown_task = asyncio.create_task(_shutdown.wait())
 
@@ -238,8 +231,6 @@ async def run_browser(
                 session.save(profile_dir, _open_urls(context))
             if snapshot_task:
                 snapshot_task.cancel()
-            if title_task:
-                title_task.cancel()
             await control_runner.cleanup()
 
             for task in pending:

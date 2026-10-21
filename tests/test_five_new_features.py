@@ -474,3 +474,176 @@ def test_app_handlers_on_launch_and_bulk_launch_with_monitor(isolated_pm, tmp_pa
     state.select_all(["DirectAcc"])
     h.on_bulk_launch()
     assert len(page.dialogs) == 2
+
+
+def test_token_burst_only_counts_running_hatch_token_files(tmp_path):
+    import os
+
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    entries_dir = data_dir / "AccTok" / "cache2" / "entries"
+    entries_dir.mkdir(parents=True)
+
+    now = time.time()
+    # Create 60 normal webpage cache files (should NEVER count as token burst)
+    for i in range(60):
+        f = entries_dir / f"static_{i}"
+        f.write_bytes(b"x" * 25_000 + b":https://muse.ai/static/app.js")
+        os.utime(f, (now - 10, now - 10))
+
+    # Create 13 genuine /api/hatch/token cache files (20KB..35KB, age >= 2s)
+    for i in range(13):
+        f = entries_dir / f"tok_{i}"
+        f.write_bytes(b":https://muse.ai/api/hatch/token\n" + b"a" * 24_000)
+        os.utime(f, (now - 15, now - 15))
+
+    p = Profile(name="AccTok", proxy="http://u:p@1.2.3.4:10001", os_type="windows")
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+
+    # When stopped, burst_10m is always 0 (never alerts on closed profiles)
+    snap_stopped = mon.snapshot([p], set())
+    assert snap_stopped.profiles["AccTok"].burst_10m == 0
+    assert snap_stopped.token_bursts == []
+
+    # When running, only the 13 actual /api/hatch/token files are counted
+    snap_running = mon.snapshot([p], {"AccTok"})
+    assert snap_running.profiles["AccTok"].burst_10m == 13
+    assert snap_running.token_bursts == [("AccTok", 13)]
+
+
+def test_full_app_ui_and_all_handlers_end_to_end(isolated_pm, tmp_path):
+    import flet as ft
+
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.ui.app import App
+
+    isolated_pm.add_profile(
+        "P1 (a@hotmail.com)",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Detroit",
+        locale="en-US",
+        color="#3B82F6",
+        group="G1",
+        notes="Note 1",
+        pages=["CustomPage1"],
+    )
+    isolated_pm.add_profile(
+        "P2 (b@hotmail.com)",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Detroit",
+        locale="en-US",
+    )
+
+    class FakeBL:
+        def __init__(self):
+            self.running = {"P1 (a@hotmail.com)"}
+
+        def is_running(self, name):
+            return name in self.running
+
+        def running_profile_names(self):
+            return set(self.running)
+
+        def running_count(self):
+            return len(self.running)
+
+        def start_thread(self, profile, log_callback, on_start=None, on_ready=None, on_stop=None):
+            self.running.add(profile.name)
+            return True
+
+        def stop_profile(self, name, timeout=2):
+            self.running.discard(name)
+            return True
+
+        def focus_profile(self, name):
+            return True
+
+        def arrange_windows(self, names=None):
+            return len(self.running)
+
+        def control(self, name, action, params=None, timeout=60):
+            return {"cookies": []}
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 1.2.3.4 (US)"
+
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+            self.services = []
+            self.dialogs = []
+            self.title = ""
+            self.theme_mode = None
+            self.padding = 0
+            self.bgcolor = ""
+            self.window = type("W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600})()
+            self.fonts = {}
+            self.theme = None
+            self.on_keyboard_event = None
+
+        def add(self, *ctrls):
+            self.controls.extend(ctrls)
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def run_task(self, coro_fn, *args):
+            pass
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+
+    app = App(c)
+    app.monitor = MonitorService(data_dir=str(tmp_path / "camoufox_data"), log_dir=str(tmp_path / "logs"))
+    app.h._monitor = app.monitor
+    fake_page = FakePage()
+    app.page = fake_page  # type: ignore[assignment]
+    app._file_picker = ft.FilePicker()
+    app.clipboard = ft.Clipboard()
+    fake_page.services.extend([app._file_picker, app.clipboard])
+    app._build_ui()
+
+    # Exercise all sort modes
+    for s_mode in ("custom", "cooldown_desc", "cooldown_asc", "name_asc", "name_desc", "group", "running", "proxy"):
+        app._on_sort(s_mode)
+
+    # Exercise all filters
+    for f_id in ("all", "running", "warnings", "proxy", "direct", "chrome", "group:G1"):
+        app._on_filter(f_id)
+    app._clear_filters()
+
+    # Exercise selection & bulk bar actions
+    app.h.on_select_all_page()
+    assert len(app.state.selected_names()) == 2
+    app.h.on_open_cooldown_settings()
+    app.h.on_focus_window("P1 (a@hotmail.com)")
+    app.h.on_arrange_windows()
+    app.h.on_start_edit_note("P1 (a@hotmail.com)")
+    app.h.on_save_note("P1 (a@hotmail.com)", "Updated note")
+    app.h.on_start_edit_proxy("P2 (b@hotmail.com)")
+    app.h.on_save_proxy("P2 (b@hotmail.com)", "http://u:p@1.2.3.4:10002")
+    app.h.on_bulk_set_group()
+    app.h.on_bulk_set_color()
+    app.h.on_bulk_set_proxy()
+    app.h.on_export_open()
+    app.h.on_clone("P1 (a@hotmail.com)")
+    app.h.on_cookies("P1 (a@hotmail.com)")
+    app.h.on_cookies("P2 (b@hotmail.com)")
+    app.h.on_open_trash()
+    app.h.open_log_fullscreen()
+    app.h.on_deselect_page()
+    assert len(app.state.selected_names()) == 0

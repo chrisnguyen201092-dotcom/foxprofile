@@ -123,6 +123,11 @@ class AppHandlers:
     def on_edit(self, name: str) -> None:
         page = self._get_page()
         assert page is not None
+
+        def _after_edit() -> None:
+            self._state.proxy_status.pop(name, None)
+            self._refresh()
+
         edit_profile(
             page,
             name,
@@ -130,7 +135,7 @@ class AppHandlers:
             self._bl,
             self._ps,
             self._log,
-            self._refresh,
+            _after_edit,
         )
 
     def on_cookies(self, name: str) -> None:
@@ -245,6 +250,7 @@ class AppHandlers:
                 p.notes,
                 p.pages,
             )
+            self._state.proxy_status.pop(name, None)
             self._log(get_string("quick_saved_proxy", name=name))
         self._refresh()
 
@@ -462,6 +468,8 @@ class AppHandlers:
 
         def _apply(assignments: dict[str, str | None]) -> None:
             cnt = self._pm.bulk_update_proxies(assignments)
+            for pname in assignments:
+                self._state.proxy_status.pop(pname, None)
             self._log(get_string("bulk_proxy_updated", count=cnt))
             self._state.clear_selection()
             self._refresh()

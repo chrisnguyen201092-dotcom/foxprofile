@@ -394,7 +394,7 @@ class App:
         elif sort_by in ("cooldown_desc", "cooldown_asc"):
             snap = self._last_monitor_snap or self.monitor.snapshot(
                 self.pm.list_profiles(),
-                self.bl.running_profile_names(),
+                self.bl.running_profile_names() | self.state.loading,
             )
 
             def _cd_desc_key(p: object) -> tuple:
@@ -451,7 +451,7 @@ class App:
             self.monitor.record_stopped(name)
 
         everything = self.pm.list_profiles()
-        snap = self.monitor.snapshot(everything, running)
+        snap = self.monitor.snapshot(everything, running | self.state.loading)
         self._last_monitor_snap = snap
         alert_bar = build_monitor_bar(snap, len(everything))
         self._monitor_bar_slot.content = alert_bar

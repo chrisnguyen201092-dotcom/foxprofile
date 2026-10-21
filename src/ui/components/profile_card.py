@@ -457,26 +457,24 @@ def _proxy(
     scheme, _, rest = server.partition("://")
     sub_label = scheme.upper()
     sub_color = COLORS["text_dim"]
-    if proxy_check_state is not None:
+    if proxy_check_state is not None and proxy_check_state[0] in ("checking", "fail"):
         st_kind, st_msg = proxy_check_state
         sub_label = st_msg
-        if st_kind == "checking":
-            sub_color = COLORS["accent"]
-        elif st_kind == "ok":
-            sub_color = COLORS["success"]
-        else:
-            sub_color = COLORS["error"]
-    elif monitor_info is not None:
-        if monitor_info.busy_by:
-            sub_label = get_string("proxy_busy_by", other=monitor_info.busy_by[0])
-            sub_color = COLORS["error"]
-        elif monitor_info.port_cooldown_by is not None:
-            other, left = monitor_info.port_cooldown_by
-            sub_label = get_string("proxy_cooldown_by", left=left, other=other)
-            sub_color = COLORS["warning"]
-        elif monitor_info.proxy_port_changed:
-            sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
-            sub_color = COLORS["error"]
+        sub_color = COLORS["accent"] if st_kind == "checking" else COLORS["error"]
+    elif monitor_info is not None and monitor_info.busy_by:
+        sub_label = get_string("proxy_busy_by", other=monitor_info.busy_by[0])
+        sub_color = COLORS["error"]
+    elif monitor_info is not None and monitor_info.port_cooldown_by is not None:
+        other, left = monitor_info.port_cooldown_by
+        sub_label = get_string("proxy_cooldown_by", left=left, other=other)
+        sub_color = COLORS["warning"]
+    elif monitor_info is not None and monitor_info.proxy_port_changed:
+        sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
+        sub_color = COLORS["error"]
+    elif proxy_check_state is not None:
+        _, st_msg = proxy_check_state
+        sub_label = st_msg
+        sub_color = COLORS["success"]
 
     host_text = _data(rest)
     host_text.tooltip = (

@@ -20,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -294,16 +295,25 @@ class MonitorService:
 
         if cached is not None:
             age = now_ts - cached.get("_ts", 0.0)
-            if (
-                cached.get("_tabs_mtime") == tabs_mtime
-                and (is_running or cached.get("_cookies_mtime") == cookies_mtime)
-                and age < 30.0
+            if not is_running:
+                if (
+                    cached.get("_tabs_mtime") == tabs_mtime
+                    and cached.get("_cookies_mtime") == cookies_mtime
+                ):
+                    cached["burst_10m"] = 0
+                    cached["last_active_ts"] = last_active_ts
+                    return cached
+            elif (
+                cached.get("_is_running") is True
+                and cached.get("_tabs_mtime") == tabs_mtime
+                and age < 15.0
             ):
                 cached["last_active_ts"] = last_active_ts
                 return cached
 
         result: dict[str, Any] = {
             "_ts": now_ts,
+            "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
             "_cookies_mtime": -1.0 if is_running else cookies_mtime,
             "has_thread_url": False,
@@ -311,7 +321,7 @@ class MonitorService:
             "hatch_gw": cached.get("hatch_gw", False) if cached else False,
             "hatch_sess": cached.get("hatch_sess", False) if cached else False,
             "sess_exp": cached.get("sess_exp", "-") if cached else "-",
-            "burst_10m": cached.get("burst_10m", 0) if cached else 0,
+            "burst_10m": 0,
             "last_active_ts": last_active_ts,
         }
 
@@ -332,7 +342,8 @@ class MonitorService:
         # Only read cookies.sqlite when the profile's browser is NOT running
         if not is_running and cookies_mtime > 0:
             try:
-                uri = f"file:{cookies_db.as_posix()}?mode=ro&immutable=1"
+                db_posix = cookies_db.resolve().as_posix()
+                uri = f"file:///{urllib.parse.quote(db_posix, safe=':/')}?mode=ro&immutable=1"
                 conn = sqlite3.connect(uri, uri=True, timeout=0.3)
                 try:
                     cur = conn.cursor()
@@ -355,7 +366,7 @@ class MonitorService:
                         hatch_sess = True
                         if exp:
                             exp_val = float(exp)
-                            if exp_val > 10_000_000_000:
+                            while exp_val > 10_000_000_000:
                                 exp_val /= 1000.0
                             latest_exp = max(latest_exp, exp_val)
                 if rows and not hatch_sess and len(rows) > 1:
@@ -379,42 +390,44 @@ class MonitorService:
             except Exception:
                 pass
 
-        # Cache2 token burst check (only counts actual /api/hatch/token entries in last 10m)
-        entries_dir = pdir / "cache2" / "entries"
-        if entries_dir.exists():
-            burst_10m = 0
-            try:
-                with os.scandir(entries_dir) as it:
-                    for entry in it:
-                        try:
-                            st = entry.stat()
-                            mtime = st.st_mtime
-                            fsize = st.st_size
-                            if (now_ts - mtime) > 600 or fsize < 20_000 or fsize > 35_000:
-                                continue
-                            fp = entry.path
-                            memo = self._token_entry_memo.get(fp)
-                            if memo is not None and memo[0] == mtime:
-                                is_tok = memo[1]
-                            else:
-                                is_tok = False
-                                with contextlib.suppress(OSError), open(fp, "rb") as cf:
-                                    head = cf.read(4096)
-                                    if b":https://muse.ai/api/hatch/token" in head:
-                                        is_tok = True
-                                    elif fsize > 4096:
-                                        cf.seek(max(0, fsize - 2048))
-                                        tail = cf.read(2048)
-                                        if b":https://muse.ai/api/hatch/token" in tail:
+        # Only check live token bursts for currently running profiles (never for closed profiles)
+        if is_running:
+            entries_dir = pdir / "cache2" / "entries"
+            if entries_dir.exists():
+                burst_10m = 0
+                try:
+                    with os.scandir(entries_dir) as it:
+                        for entry in it:
+                            try:
+                                st = entry.stat()
+                                mtime = st.st_mtime
+                                fsize = st.st_size
+                                age_s = now_ts - mtime
+                                if age_s < 2.0 or age_s > 600 or fsize < 20_000 or fsize > 35_000:
+                                    continue
+                                fp = entry.path
+                                memo = self._token_entry_memo.get(fp)
+                                if memo is not None and memo[0] == mtime:
+                                    is_tok = memo[1]
+                                else:
+                                    is_tok = False
+                                    with contextlib.suppress(OSError), open(fp, "rb") as cf:
+                                        head = cf.read(4096)
+                                        if b":https://muse.ai/api/hatch/token" in head:
                                             is_tok = True
-                                self._token_entry_memo[fp] = (mtime, is_tok)
-                            if is_tok:
-                                burst_10m += 1
-                        except OSError:
-                            continue
-            except OSError:
-                pass
-            result["burst_10m"] = burst_10m
+                                        elif fsize > 4096:
+                                            cf.seek(max(0, fsize - 2048))
+                                            tail = cf.read(2048)
+                                            if b":https://muse.ai/api/hatch/token" in tail:
+                                                is_tok = True
+                                    self._token_entry_memo[fp] = (mtime, is_tok)
+                                if is_tok:
+                                    burst_10m += 1
+                            except OSError:
+                                continue
+                except OSError:
+                    pass
+                result["burst_10m"] = burst_10m
 
         self._disk_cache[name] = result
         return result

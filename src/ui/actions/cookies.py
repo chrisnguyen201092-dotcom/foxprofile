@@ -16,11 +16,19 @@ from ..dialogs import open_confirm_dialog, open_cookie_dialog
 _EXTENSIONS = {"json": "json", "netscape": "txt"}
 
 
+def _page_clipboard(page: ft.Page) -> ft.Clipboard:
+    existing = next((s for s in getattr(page, "services", []) if isinstance(s, ft.Clipboard)), None)
+    if existing is not None:
+        return existing
+    clip = ft.Clipboard()
+    page.services.append(clip)
+    page.update()
+    return clip
+
+
 async def _set_clipboard_text(page: ft.Page, text: str) -> None:
     with contextlib.suppress(Exception):
-        clip = ft.Clipboard()
-        page.services.append(clip)
-        page.update()
+        clip = _page_clipboard(page)
         await clip.set(text)
         return
     with contextlib.suppress(Exception):
@@ -36,9 +44,7 @@ async def _set_clipboard_text(page: ft.Page, text: str) -> None:
 
 async def _get_clipboard_text(page: ft.Page) -> str:
     with contextlib.suppress(Exception):
-        clip = ft.Clipboard()
-        page.services.append(clip)
-        page.update()
+        clip = _page_clipboard(page)
         val = await clip.get()
         if val:
             return val
@@ -176,10 +182,10 @@ def manage_cookies(
         else get_string("fingerprint_none")
     )
 
-    live_cookies = None
+    live_cookies: list[dict] | None = [] if is_running else None
     if is_running:
         with contextlib.suppress(Exception):
-            res = bl.control(name, "cookies_export", timeout=3)
+            res = bl.control(name, "cookies_export", timeout=1.5)
             live_cookies = res.get("cookies", [])
 
     summary = cookies.inspect_cookie_summary(name, live_cookies=live_cookies)

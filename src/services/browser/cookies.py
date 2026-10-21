@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.parse
 from typing import Any
 
 from ...core.config import DATA_DIR
@@ -268,7 +269,8 @@ def read_cookies_sqlite_readonly(profile_name: str) -> list[dict[str, Any]] | No
     if not db_path.exists():
         return None
     try:
-        uri = f"file:{db_path.as_posix()}?mode=ro&immutable=1"
+        db_posix = db_path.resolve().as_posix()
+        uri = f"file:///{urllib.parse.quote(db_posix, safe=':/')}?mode=ro&immutable=1"
         conn = sqlite3.connect(uri, uri=True, timeout=0.5)
         try:
             cur = conn.cursor()
@@ -285,7 +287,7 @@ def read_cookies_sqlite_readonly(profile_name: str) -> list[dict[str, Any]] | No
     out: list[dict[str, Any]] = []
     for name, value, host, path, expiry, is_secure, is_http_only, same_site in rows:
         exp_val = float(expiry or -1)
-        if exp_val > 10_000_000_000:
+        while exp_val > 10_000_000_000:
             exp_val = exp_val / 1000.0
         out.append(
             {
