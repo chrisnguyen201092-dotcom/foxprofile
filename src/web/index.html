@@ -883,7 +883,27 @@ function renderPagesBar() {
   if (!bar) return;
   const makeTab = (id, label, count, editable = false) => {
     const isAct = activePage === id;
-    return h("div", { class: "page-tab" + (isAct ? " active" : "") },
+    const dragProps = customPages.length > 1 ? {
+      draggable: editable ? "true" : undefined,
+      style: editable ? "cursor:grab" : undefined,
+      ondragstart: editable ? (e) => { e.dataTransfer.setData("text/plain", id); } : undefined,
+      ondragover: (e) => { e.preventDefault(); },
+      ondrop: async (e) => {
+        e.preventDefault();
+        const src = e.dataTransfer.getData("text/plain");
+        if (!src || src === id) return;
+        const next = [...customPages];
+        const sIdx = next.findIndex((x) => x.toLowerCase() === src.toLowerCase());
+        if (sIdx < 0) return;
+        const [moved] = next.splice(sIdx, 1);
+        const tIdx = id === "__all__" ? 0 : customPages.findIndex((x) => x.toLowerCase() === id.toLowerCase());
+        next.splice(tIdx < 0 ? 0 : tIdx, 0, moved);
+        customPages = next;
+        renderPagesBar();
+        try { await api("/profiles/pages/reorder", { method: "PUT", body: JSON.stringify({ ordered_pages: next }) }); await refresh(); } catch (err) { toast(err.message, "err"); }
+      }
+    } : {};
+    return h("div", { class: "page-tab" + (isAct ? " active" : ""), ...dragProps },
       h("button", { type: "button", class: "page-tab-btn", onclick: () => { activePage = id; render(); } },
         h("span", {}, label),
         h("span", { class: "page-tab-cnt" }, String(count))),

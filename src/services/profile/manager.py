@@ -362,6 +362,23 @@ class ProfileManager:
             self.save_profiles()
             return True
 
+    def reorder_custom_pages(self, ordered_pages: list[str]) -> bool:
+        """Reorder custom pages according to *ordered_pages*; unlisted pages stay at the end."""
+        with self._lock:
+            seen: set[str] = set()
+            new_order: list[str] = []
+            for raw in ordered_pages:
+                match = self._find_page_by_casefold(raw.strip())
+                if match is not None and match.casefold() not in seen:
+                    seen.add(match.casefold())
+                    new_order.append(match)
+            for pg in self.custom_pages:
+                if pg.casefold() not in seen:
+                    new_order.append(pg)
+            self.custom_pages = new_order
+            self.save_profiles()
+            return True
+
     def move_profile(self, name: str, direction: int) -> bool:
         """Move a profile up (direction < 0) or down (direction > 0) in custom order."""
         with self._lock:

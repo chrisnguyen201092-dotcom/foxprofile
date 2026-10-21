@@ -29,6 +29,7 @@ from ..schemas.profiles import (
     CookieImportRequest,
     CookieImportResponse,
     CustomPageMembersRequest,
+    CustomPageOrderRequest,
     CustomPageRequest,
     DataDirResponse,
     ExportRequest,
@@ -120,6 +121,17 @@ def save_custom_page(
         raise HTTPException(status_code=409, detail="Page name already exists or invalid")
     bus.emit()
     return SuccessResponse(message=f"Saved page '{body.name.strip()}'")
+
+
+@router.put("/pages/reorder", response_model=SuccessResponse)
+def reorder_custom_pages(
+    body: CustomPageOrderRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> SuccessResponse:
+    pm.reorder_custom_pages(body.ordered_pages)
+    bus.emit()
+    return SuccessResponse(message="Reordered custom pages")
 
 
 @router.delete("/pages/{page_name}", response_model=SuccessResponse)

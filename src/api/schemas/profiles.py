@@ -45,6 +45,10 @@ class CustomPageRequest(BaseModel):
     original_name: str | None = None
 
 
+class CustomPageOrderRequest(BaseModel):
+    ordered_pages: list[str]
+
+
 class CustomPageMembersRequest(BaseModel):
     profile_names: list[str]
 

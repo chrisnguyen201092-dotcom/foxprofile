@@ -13,24 +13,44 @@ def build_pages_bar(
     on_select_page: Callable[[str], None],
     on_add_page: Callable[[], None],
     on_edit_page: Callable[[str], None],
+    on_reorder_page: Callable[[str, str], None] | None = None,
 ) -> ft.Row:
     """Horizontal custom pages bar placed right above the profile table."""
+    can_drag = len(page_counts) > 1 and on_reorder_page is not None
 
     def _tab(
         page_id: str,
         label: str,
         count: int,
         editable: bool = False,
-    ) -> ft.Container:
+    ) -> ft.Control:
         is_active = active_page == page_id
         bg = COLORS["sidebar"] if is_active else COLORS["card_bg"]
         border_col = COLORS["sidebar"] if is_active else COLORS["rule_strong"]
         text_col = COLORS["cover_ink"] if is_active else COLORS["text_main"]
         count_col = COLORS["cover_muted"] if is_active else COLORS["text_dim"]
 
-        row_controls: list[ft.Control] = [
+        row_controls: list[ft.Control] = []
+        if editable and can_drag:
+            row_controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(left=7, right=0, top=6, bottom=6),
+                    tooltip=get_string("tooltip_drag_page"),
+                    content=ft.Icon(
+                        ft.Icons.DRAG_INDICATOR,
+                        size=13,
+                        color=COLORS["cover_muted"] if is_active else COLORS["text_dim"],
+                    ),
+                )
+            )
+        row_controls.append(
             ft.Container(
-                padding=ft.Padding.only(left=12, right=6 if editable else 12, top=6, bottom=6),
+                padding=ft.Padding.only(
+                    left=5 if (editable and can_drag) else 12,
+                    right=6 if editable else 12,
+                    top=6,
+                    bottom=6,
+                ),
                 on_click=lambda _, pid=page_id: on_select_page(pid),
                 content=ft.Row(
                     spacing=6,
@@ -51,8 +71,8 @@ def build_pages_bar(
                         ),
                     ],
                 ),
-            ),
-        ]
+            )
+        )
         if editable:
             row_controls.append(
                 ft.Container(
@@ -66,7 +86,7 @@ def build_pages_bar(
                     ),
                 )
             )
-        return ft.Container(
+        tab_box = ft.Container(
             height=34,
             border_radius=8,
             bgcolor=bg,
@@ -76,6 +96,104 @@ def build_pages_bar(
                 tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=row_controls,
+            ),
+        )
+        if not can_drag:
+            return tab_box
+
+        def _on_will_accept(e: ft.DragWillAcceptEvent, box: ft.Container = tab_box) -> None:
+            box.border = ft.Border.all(1.5, COLORS["accent"])
+            if box.page is not None:
+                box.update()
+
+        def _on_leave(
+            e: ft.DragTargetLeaveEvent,
+            box: ft.Container = tab_box,
+            default_border: str = border_col,
+        ) -> None:
+            box.border = ft.Border.all(1, default_border)
+            if box.page is not None:
+                box.update()
+
+        def _on_accept(
+            e: ft.DragTargetEvent,
+            target_id: str = page_id,
+            box: ft.Container = tab_box,
+            default_border: str = border_col,
+        ) -> None:
+            box.border = ft.Border.all(1, default_border)
+            src_ctrl = getattr(e, "src", None)
+            src_id = getattr(src_ctrl, "data", None)
+            if (
+                isinstance(src_id, str)
+                and src_id
+                and src_id != target_id
+                and on_reorder_page is not None
+            ):
+                on_reorder_page(src_id, target_id)
+
+        if not editable:
+            # Allow dropping onto "All" to move a custom page to the first position
+            return ft.DragTarget(
+                group="custom_pages",
+                data=page_id,
+                on_will_accept=_on_will_accept,
+                on_leave=_on_leave,
+                on_accept=_on_accept,
+                content=tab_box,
+            )
+
+        feedback_box = ft.Container(
+            height=34,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            border_radius=8,
+            bgcolor=COLORS["sidebar"],
+            border=ft.Border.all(1.5, COLORS["accent"]),
+            content=ft.Row(
+                spacing=6,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text(
+                        label,
+                        size=13,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["cover_ink"],
+                    ),
+                    ft.Text(
+                        str(count),
+                        size=11.5,
+                        font_family=FONT_DATA,
+                        color=COLORS["cover_muted"],
+                    ),
+                ],
+            ),
+        )
+        ghost_box = ft.Container(
+            height=34,
+            border_radius=8,
+            bgcolor=bg,
+            opacity=0.4,
+            border=ft.Border.all(1, COLORS["accent"]),
+            content=ft.Row(
+                spacing=0,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=row_controls,
+            ),
+        )
+        return ft.DragTarget(
+            group="custom_pages",
+            data=page_id,
+            on_will_accept=_on_will_accept,
+            on_leave=_on_leave,
+            on_accept=_on_accept,
+            content=ft.Draggable(
+                group="custom_pages",
+                data=page_id,
+                content=tab_box,
+                content_feedback=feedback_box,
+                content_when_dragging=ghost_box,
             ),
         )
 

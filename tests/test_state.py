@@ -153,6 +153,8 @@ def test_custom_pages_crud(tmp_path, monkeypatch):
     # Reload from disk and verify custom pages + profile memberships persist
     pm2 = ProfileManager()
     assert pm2.list_custom_pages() == ["Lỗi Mạng", "Chạy Ads"]
+    assert pm2.reorder_custom_pages(["Chạy Ads", "Lỗi Mạng"])
+    assert pm2.list_custom_pages() == ["Chạy Ads", "Lỗi Mạng"]
     assert pm2.profiles["p1"].pages == ["Lỗi Mạng"]
     assert pm2.profiles["p2"].pages == ["Chạy Ads"]
 

@@ -235,6 +235,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "or_create_new_page": "Or enter a new page name",
         "add_btn": "Add",
         "tooltip_edit_page": "Edit page",
+        "tooltip_drag_page": "Drag to reorder page",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -470,6 +471,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "or_create_new_page": "Hoặc nhập tên trang mới",
         "add_btn": "Thêm",
         "tooltip_edit_page": "Sửa trang",
+        "tooltip_drag_page": "Kéo thả để đổi vị trí trang",
     },
 }
 

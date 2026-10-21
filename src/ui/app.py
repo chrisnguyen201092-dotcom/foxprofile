@@ -218,6 +218,28 @@ class App:
             self.state.clear_selection()
             self._refresh_profiles()
 
+    def _on_reorder_custom_page(self, src_page: str, target_page: str) -> None:
+        pages = self.pm.list_custom_pages()
+        src_idx = next(
+            (i for i, pg in enumerate(pages) if pg.casefold() == src_page.casefold()),
+            None,
+        )
+        if src_idx is None:
+            return
+        if target_page == "__all__":
+            target_idx = 0
+        else:
+            target_idx = next(
+                (i for i, pg in enumerate(pages) if pg.casefold() == target_page.casefold()),
+                None,
+            )
+            if target_idx is None or target_idx == src_idx:
+                return
+        moved = pages.pop(src_idx)
+        pages.insert(target_idx, moved)
+        if self.pm.reorder_custom_pages(pages):
+            self._refresh_profiles()
+
     def _on_reorder(self, old_index: int, new_index: int) -> None:
         if self.state.sort_by != "custom" or old_index == new_index:
             return
@@ -336,6 +358,7 @@ class App:
             self._on_select_custom_page,
             self._on_add_custom_page,
             self._on_edit_custom_page,
+            self._on_reorder_custom_page,
         )
 
         tests = self._filter_tests()
