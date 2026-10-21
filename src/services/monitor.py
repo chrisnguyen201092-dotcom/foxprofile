@@ -28,6 +28,7 @@ from ..core.strings import get_string
 from ..models.profile import Profile
 
 PORT_COOLDOWN_MINUTES = 15
+TOKEN_BURST_THRESHOLD = 12
 
 _RE_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
 _RE_LOG_LINE = re.compile(
@@ -78,7 +79,7 @@ class ProfileMonitorInfo:
         return bool(
             self.busy_by
             or self.port_cooldown_by is not None
-            or self.burst_10m > 45
+            or self.burst_10m >= TOKEN_BURST_THRESHOLD
             or self.proxy_port_changed
         )
 
@@ -114,6 +115,7 @@ class MonitorService:
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
         self._last_used_ports: dict[str, str] = {}
+        self._token_entry_memo: dict[str, tuple[float, bool]] = {}
         self._load_settings()
 
     def _settings_file(self) -> pathlib.Path:
@@ -377,7 +379,7 @@ class MonitorService:
             except Exception:
                 pass
 
-        # Cache2 token burst check (at most once every 30s)
+        # Cache2 token burst check (only counts actual /api/hatch/token entries in last 10m)
         entries_dir = pdir / "cache2" / "entries"
         if entries_dir.exists():
             burst_10m = 0
@@ -386,7 +388,27 @@ class MonitorService:
                     for entry in it:
                         try:
                             st = entry.stat()
-                            if (now_ts - st.st_mtime) <= 600:
+                            mtime = st.st_mtime
+                            fsize = st.st_size
+                            if (now_ts - mtime) > 600 or fsize < 20_000 or fsize > 35_000:
+                                continue
+                            fp = entry.path
+                            memo = self._token_entry_memo.get(fp)
+                            if memo is not None and memo[0] == mtime:
+                                is_tok = memo[1]
+                            else:
+                                is_tok = False
+                                with contextlib.suppress(OSError), open(fp, "rb") as cf:
+                                    head = cf.read(4096)
+                                    if b":https://muse.ai/api/hatch/token" in head:
+                                        is_tok = True
+                                    elif fsize > 4096:
+                                        cf.seek(max(0, fsize - 2048))
+                                        tail = cf.read(2048)
+                                        if b":https://muse.ai/api/hatch/token" in tail:
+                                            is_tok = True
+                                self._token_entry_memo[fp] = (mtime, is_tok)
+                            if is_tok:
                                 burst_10m += 1
                         except OSError:
                             continue
@@ -510,7 +532,7 @@ class MonitorService:
                 snap.gw_ready_count += 1
             if disk["has_thread_url"]:
                 snap.thread_ok_count += 1
-            if disk["burst_10m"] > 45:
+            if disk["burst_10m"] >= TOKEN_BURST_THRESHOLD:
                 snap.token_bursts.append((p.name, disk["burst_10m"]))
 
             last_port = self._last_used_ports.get(p.name, "")
