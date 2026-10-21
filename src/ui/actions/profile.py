@@ -89,6 +89,7 @@ def add_profile(
     ps: IProxyService,
     log: Callable[[str], None],
     refresh: Callable[[], None],
+    on_batch_create: Callable[[], None] | None = None,
 ) -> None:
     def on_save(
         name: str,
@@ -111,4 +112,10 @@ def add_profile(
             return None
         return get_string("profile_exists")
 
-    open_profile_dialog(page, ps, on_save, existing_groups=_existing_groups(pm))
+    open_profile_dialog(
+        page,
+        ps,
+        on_save,
+        existing_groups=_existing_groups(pm),
+        on_batch_create=on_batch_create,
+    )

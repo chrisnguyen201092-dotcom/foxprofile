@@ -28,6 +28,7 @@ def open_profile_dialog(
     on_save: Callable[..., str | None],
     profile: Profile | None = None,
     existing_groups: list[str] | None = None,
+    on_batch_create: Callable[[], None] | None = None,
 ) -> None:
     is_edit = profile is not None
     title = get_string("edit_profile") if is_edit else get_string("create_new_profile")
@@ -437,6 +438,11 @@ def open_profile_dialog(
         # Text fields keep Material's 48px height so rows of fields and
         # dropdowns (which cannot go below 48px) line up.
         dropdown.text_size = 14
+    def _switch_to_batch(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_batch_create is not None:
+            on_batch_create()
+
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
@@ -448,7 +454,26 @@ def open_profile_dialog(
             spacing=4,
             tight=True,
             controls=[
-                ft.Text(title, size=19, font_family=FONT_BOLD, color=COLORS["text_main"]),
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(title, size=19, font_family=FONT_BOLD, color=COLORS["text_main"]),
+                        *(
+                            [
+                                ft.OutlinedButton(
+                                    get_string("batch_create_btn"),
+                                    icon=ft.Icons.PLAYLIST_ADD,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    on_click=_switch_to_batch,
+                                )
+                            ]
+                            if not is_edit and on_batch_create is not None
+                            else []
+                        ),
+                    ],
+                ),
                 ft.Text(subtitle, size=13.5, color=COLORS["text_sub"]),
             ],
         ),

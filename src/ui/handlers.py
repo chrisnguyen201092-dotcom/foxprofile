@@ -184,6 +184,7 @@ class AppHandlers:
             _restore,
             _del_forever,
             _empty_all,
+            on_open_backups=self.on_open_backups,
         )
 
     def on_open_batch_create(self, active_page: str = "__all__") -> None:
@@ -239,6 +240,7 @@ class AppHandlers:
             page,
             set(self._pm.profiles.keys()),
             _do_batch,
+            on_switch_single=lambda: self.open_add_dialog(active_page),
         )
 
     def on_open_backups(self) -> None:
@@ -397,10 +399,17 @@ class AppHandlers:
 
         page.run_task(_check)
 
-    def open_add_dialog(self) -> None:
+    def open_add_dialog(self, active_page: str = "__all__") -> None:
         page = self._get_page()
         assert page is not None
-        add_profile(page, self._pm, self._ps, self._log, self._refresh)
+        add_profile(
+            page,
+            self._pm,
+            self._ps,
+            self._log,
+            self._refresh,
+            on_batch_create=lambda: self.on_open_batch_create(active_page),
+        )
 
     def on_move(self, name: str, direction: int) -> None:
         if self._pm.move_profile(name, direction):

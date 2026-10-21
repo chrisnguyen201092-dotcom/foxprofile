@@ -15,6 +15,7 @@ def open_trash_dialog(
     on_restore: Callable[[str], None],
     on_delete_forever: Callable[[str], None],
     on_empty_all: Callable[[], None],
+    on_open_backups: Callable[[], None] | None = None,
 ) -> None:
     """Trash Bin dialog to restore or permanently delete soft-deleted profiles."""
     list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=320)
@@ -120,14 +121,42 @@ def open_trash_dialog(
         _rebuild_rows()
         page.update()
 
+    def _switch_to_backups(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_open_backups is not None:
+            on_open_backups()
+
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
-        title=ft.Text(
-            get_string("trash_title"),
-            size=20,
-            weight=ft.FontWeight.BOLD,
-            color=COLORS["text_main"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
+        title=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    get_string("trash_title"),
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                    color=COLORS["text_main"],
+                ),
+                *(
+                    [
+                        ft.OutlinedButton(
+                            get_string("backup_btn"),
+                            icon=ft.Icons.HISTORY_ROUNDED,
+                            height=32,
+                            style=OUTLINE_STYLE,
+                            on_click=_switch_to_backups,
+                        )
+                    ]
+                    if on_open_backups is not None
+                    else []
+                ),
+            ],
         ),
         content=ft.Container(
             width=540,

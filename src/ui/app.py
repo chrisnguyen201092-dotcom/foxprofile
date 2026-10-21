@@ -62,13 +62,6 @@ class App:
             height=36,
             style=RAIL_STYLE,
         )
-        self._backup_btn = ft.OutlinedButton(
-            get_string("backup_btn"),
-            icon=ft.Icons.HISTORY_ROUNDED,
-            width=208,
-            height=36,
-            style=RAIL_STYLE,
-        )
         self._cooldown_btn = ft.OutlinedButton(
             self._cooldown_btn_text(),
             icon=ft.Icons.TIMER_OUTLINED,
@@ -138,7 +131,7 @@ class App:
             ):
                 self.page.run_task(self.refs.search_field.focus)
         elif ctrl and key == "n":
-            self.h.open_add_dialog()
+            self.h.open_add_dialog(self.active_page)
         elif no_mod and key == "escape":
             if self.state.editing_note is not None or self.state.editing_proxy is not None:
                 self.state.editing_note = None
@@ -175,14 +168,6 @@ class App:
             height=36,
             style=RAIL_STYLE,
             on_click=lambda _: self.h.on_open_trash(),
-        )
-        self._backup_btn = ft.OutlinedButton(
-            get_string("backup_btn"),
-            icon=ft.Icons.HISTORY_ROUNDED,
-            width=208,
-            height=36,
-            style=RAIL_STYLE,
-            on_click=lambda _: self.h.on_open_backups(),
         )
         self._cooldown_btn = ft.OutlinedButton(
             self._cooldown_btn_text(),
@@ -242,8 +227,7 @@ class App:
             r.log_text,
             r.log_column,
             r.log_toggle_btn,
-            on_new_profile=lambda _: self.h.open_add_dialog(),
-            on_batch_create=lambda _: self.h.on_open_batch_create(self.active_page),
+            on_new_profile=lambda _: self.h.open_add_dialog(self.active_page),
             on_import=self.h.on_import,
             on_export=lambda _: self.h.on_export_open(),
             on_mcp=lambda _: open_mcp_guide(self.page, self.clipboard),
@@ -253,7 +237,6 @@ class App:
             language=current_language(),
             on_language=self._set_language,
             trash_btn=self._trash_btn,
-            backup_btn=self._backup_btn,
         )
         check_proxy_btn = ft.OutlinedButton(
             get_string("bulk_check_proxy"),

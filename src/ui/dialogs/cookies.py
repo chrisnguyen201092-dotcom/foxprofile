@@ -70,7 +70,6 @@ def open_cookie_dialog(
         await on_import()
 
     paste_field = ft.TextField(
-        label=get_string("cookie_paste_box_label"),
         hint_text=get_string("cookie_paste_box_hint"),
         multiline=True,
         min_lines=2,
@@ -166,17 +165,29 @@ def open_cookie_dialog(
 
     if on_import_text is not None:
         controls.append(
-            ft.Row(
-                spacing=10,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ft.Column(
+                spacing=5,
+                tight=True,
                 controls=[
-                    ft.Container(content=paste_field, expand=True),
-                    ft.Button(
-                        get_string("cookie_paste_import_btn"),
-                        icon=ft.Icons.DOWNLOAD_DONE,
-                        height=40,
-                        style=ACCENT_STYLE,
-                        on_click=do_import_text,
+                    ft.Text(
+                        get_string("cookie_paste_box_label"),
+                        size=12.5,
+                        weight=ft.FontWeight.W_600,
+                        color=COLORS["text_sub"],
+                    ),
+                    ft.Row(
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(content=paste_field, expand=True),
+                            ft.Button(
+                                get_string("cookie_paste_import_btn"),
+                                icon=ft.Icons.DOWNLOAD_DONE,
+                                height=40,
+                                style=ACCENT_STYLE,
+                                on_click=do_import_text,
+                            ),
+                        ],
                     ),
                 ],
             )
@@ -199,6 +210,10 @@ def open_cookie_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("cookie_dialog_title"),
             size=20,

@@ -7,69 +7,78 @@ import flet as ft
 from ...core.strings import get_string
 from ...utils.proxy_parser import mask_proxy
 from ...utils.validation import validate_profile_name, validate_proxy_format
-from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_SEMIBOLD
+from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_os_dropdown
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
+
+_DATA = ft.TextStyle(font_family=FONT_DATA, size=12.5)
+
+
+def _field(label: str, control: ft.Control) -> ft.Column:
+    """Label placed cleanly above its input control (never floating inside the box)."""
+    return ft.Column(
+        spacing=5,
+        tight=True,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Text(label, size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"]),
+            control,
+        ],
+    )
 
 
 def open_batch_create_dialog(
     page: ft.Page,
     existing_names: set[str],
     on_create: Callable[[list[tuple[str, str | None]], str, str, str, str, bool], None],
+    on_switch_single: Callable[[], None] | None = None,
 ) -> None:
     """Modal dialog to batch-create profiles by pasting names and proxies."""
     lower_existing = {n.casefold() for n in existing_names}
 
     names_box = ft.TextField(
-        label=get_string("batch_names_label"),
         hint_text=get_string("batch_names_hint"),
         multiline=True,
         min_lines=5,
         max_lines=6,
-        text_size=12.5,
-        expand=1,
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
     proxies_box = ft.TextField(
-        label=get_string("batch_proxies_label"),
         hint_text=get_string("batch_proxies_hint"),
         multiline=True,
         min_lines=5,
         max_lines=6,
-        text_size=12.5,
-        expand=1,
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
     repeat_cb = ft.Checkbox(
         label=get_string("batch_repeat_proxy_cb"),
         value=False,
+        label_style=ft.TextStyle(size=12.5, font_family=FONT_MEDIUM, color=COLORS["text_main"]),
     )
     auto_geo_cb = ft.Checkbox(
         label=get_string("batch_auto_geo_cb"),
         value=True,
+        label_style=ft.TextStyle(size=12.5, font_family=FONT_MEDIUM, color=COLORS["text_main"]),
     )
     os_dropdown = build_os_dropdown("windows")
-    os_dropdown.width = 135
+    os_dropdown.label = None
+    os_dropdown.text_size = 14
+    os_dropdown.expand = True
 
     group_field = ft.TextField(
-        label=get_string("group_optional"),
         hint_text=get_string("group_hint"),
-        text_size=12.5,
-        expand=1,
         **DLG_FIELD_KWARGS,
     )
     tz_field = ft.TextField(
-        label=get_string("timezone_optional"),
         hint_text="America/Detroit",
-        text_size=12.5,
-        expand=1,
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
     loc_field = ft.TextField(
-        label=get_string("locale_optional"),
         hint_text="en-US",
-        text_size=12.5,
-        expand=1,
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
 
@@ -81,8 +90,9 @@ def open_batch_create_dialog(
     )
     preview_col = ft.Column(
         spacing=4,
-        height=145,
+        height=120,
         scroll=ft.ScrollMode.AUTO,
+        visible=False,
     )
 
     def _compute() -> tuple[list[tuple[str, str | None]], int, list[ft.Control]]:
@@ -133,8 +143,8 @@ def open_batch_create_dialog(
 
             rows.append(
                 ft.Container(
-                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-                    border_radius=5,
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=6,
                     bgcolor=COLORS["input_bg"],
                     content=ft.Row(
                         spacing=8,
@@ -145,7 +155,7 @@ def open_batch_create_dialog(
                                 size=12,
                                 font_family=FONT_SEMIBOLD,
                                 color=COLORS["text_main"],
-                                width=220,
+                                width=210,
                                 no_wrap=True,
                                 overflow=ft.TextOverflow.ELLIPSIS,
                             ),
@@ -173,6 +183,7 @@ def open_batch_create_dialog(
             skipped=skipped,
         )
         preview_col.controls = rows
+        preview_col.visible = bool(rows)
         if preview_col.page is not None:
             page.update()
 
@@ -196,38 +207,111 @@ def open_batch_create_dialog(
             bool(auto_geo_cb.value),
         )
 
+    def _switch_to_single(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_switch_single is not None:
+            on_switch_single()
+
+    header_row = ft.Row(
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        controls=[
+            ft.Text(
+                get_string("batch_create_title"),
+                size=19,
+                font_family=FONT_BOLD,
+                color=COLORS["text_main"],
+            ),
+            *(
+                [
+                    ft.OutlinedButton(
+                        get_string("create_new_profile"),
+                        icon=ft.Icons.PERSON_ADD_ALT_1_OUTLINED,
+                        height=32,
+                        style=OUTLINE_STYLE,
+                        on_click=_switch_to_single,
+                    )
+                ]
+                if on_switch_single is not None
+                else []
+            ),
+        ],
+    )
+
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
-        title=ft.Text(
-            get_string("batch_create_title"),
-            size=19,
-            font_family=FONT_BOLD,
-            color=COLORS["text_main"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
+        title=ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                header_row,
+                ft.Text(
+                    get_string("batch_create_subtitle"),
+                    size=13,
+                    color=COLORS["text_sub"],
+                ),
+            ],
         ),
         content=ft.Container(
-            width=620,
+            width=560,
             content=ft.Column(
-                spacing=8,
+                spacing=10,
                 tight=True,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
-                    ft.Text(
-                        get_string("batch_create_subtitle"),
-                        size=12.5,
-                        color=COLORS["text_sub"],
-                    ),
                     ft.Row(
-                        spacing=10,
+                        spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.START,
-                        controls=[names_box, proxies_box],
+                        controls=[
+                            ft.Container(
+                                expand=1,
+                                content=_field(get_string("batch_names_label"), names_box),
+                            ),
+                            ft.Container(
+                                expand=1,
+                                content=_field(get_string("batch_proxies_label"), proxies_box),
+                            ),
+                        ],
                     ),
                     ft.Row(
-                        spacing=10,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[os_dropdown, group_field, tz_field, loc_field],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Container(
+                                expand=2,
+                                content=_field(get_string("operating_system"), os_dropdown),
+                            ),
+                            ft.Container(
+                                expand=3,
+                                content=_field(get_string("group_optional"), group_field),
+                            ),
+                        ],
                     ),
-                    repeat_cb,
-                    auto_geo_cb,
+                    ft.Row(
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Container(
+                                expand=1,
+                                content=_field(get_string("timezone_optional"), tz_field),
+                            ),
+                            ft.Container(
+                                expand=1,
+                                content=_field(get_string("locale_optional"), loc_field),
+                            ),
+                        ],
+                    ),
+                    ft.Column(
+                        spacing=2,
+                        tight=True,
+                        controls=[repeat_cb, auto_geo_cb],
+                    ),
                     summary_text,
                     preview_col,
                 ],
@@ -354,6 +438,10 @@ def open_backup_restore_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("backup_dialog_title"),
             size=19,

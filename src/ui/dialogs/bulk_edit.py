@@ -7,8 +7,10 @@ from ...models.profile import PROFILE_COLORS
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import mask_proxy
 from ...utils.validation import validate_proxy_format
-from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_SEMIBOLD
+from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
+
+_DATA = ft.TextStyle(font_family=FONT_DATA, size=12.5)
 
 
 def open_bulk_group_dialog(
@@ -19,7 +21,6 @@ def open_bulk_group_dialog(
 ) -> None:
     """Dialog to assign or clear a group for all selected profiles."""
     group_field = ft.TextField(
-        label=get_string("group_optional"),
         hint_text=get_string("group_hint"),
         **DLG_FIELD_KWARGS,
     )
@@ -51,18 +52,29 @@ def open_bulk_group_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("bulk_group_title", count=count),
             size=19,
-            weight=ft.FontWeight.BOLD,
+            font_family=FONT_BOLD,
             color=COLORS["text_main"],
         ),
         content=ft.Container(
             width=440,
             content=ft.Column(
                 tight=True,
-                spacing=12,
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
+                    ft.Text(
+                        get_string("group_optional"),
+                        size=12.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_sub"],
+                    ),
                     group_field,
                     ft.Row(wrap=True, spacing=8, run_spacing=8, controls=chips),
                 ],
@@ -128,10 +140,14 @@ def open_bulk_color_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("bulk_color_title", count=count),
             size=19,
-            weight=ft.FontWeight.BOLD,
+            font_family=FONT_BOLD,
             color=COLORS["text_main"],
         ),
         content=ft.Container(
@@ -165,21 +181,22 @@ def open_bulk_proxy_dialog(
     """Dialog to paste a list of proxies and map them 1-to-1 (or cyclic) to selected profiles."""
     sess_map = session_ports or {}
     proxy_box = ft.TextField(
-        label=get_string("bulk_proxy_input_label", count=len(profile_names)),
         hint_text=get_string("bulk_proxy_input_hint"),
         multiline=True,
         min_lines=5,
         max_lines=7,
-        text_size=12.5,
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
     repeat_cb = ft.Checkbox(
         label=get_string("bulk_proxy_repeat_cb"),
         value=False,
+        label_style=ft.TextStyle(size=12.5, font_family=FONT_MEDIUM, color=COLORS["text_main"]),
     )
     auto_geo_cb = ft.Checkbox(
         label=get_string("auto_pin_geo_cb"),
         value=True,
+        label_style=ft.TextStyle(size=12.5, font_family=FONT_MEDIUM, color=COLORS["text_main"]),
     )
     preview_col = ft.Column(
         spacing=4,
@@ -295,6 +312,10 @@ def open_bulk_proxy_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("bulk_proxy_title", count=len(profile_names)),
             size=18,
@@ -304,12 +325,18 @@ def open_bulk_proxy_dialog(
         content=ft.Container(
             width=500,
             content=ft.Column(
-                spacing=10,
+                spacing=8,
                 tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
+                    ft.Text(
+                        get_string("bulk_proxy_input_label", count=len(profile_names)),
+                        size=12.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_sub"],
+                    ),
                     proxy_box,
-                    repeat_cb,
-                    auto_geo_cb,
+                    ft.Column(spacing=2, tight=True, controls=[repeat_cb, auto_geo_cb]),
                     ft.Text(
                         get_string("bulk_proxy_preview_label"),
                         size=12,

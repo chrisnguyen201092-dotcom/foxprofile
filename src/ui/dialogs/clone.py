@@ -23,7 +23,6 @@ def open_clone_dialog(
         default_name = f"{source_name} - Copy {idx}"
 
     name_field = ft.TextField(
-        label=get_string("clone_new_name_label"),
         value=default_name,
         **DLG_FIELD_KWARGS,
     )
@@ -55,6 +54,10 @@ def open_clone_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("clone_profile_title"),
             size=20,
@@ -65,11 +68,18 @@ def open_clone_dialog(
             width=440,
             content=ft.Column(
                 tight=True,
-                spacing=12,
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
                     ft.Text(
                         get_string("clone_profile_subtitle", name=source_name),
                         size=13,
+                        color=COLORS["text_sub"],
+                    ),
+                    ft.Text(
+                        get_string("clone_new_name_label"),
+                        size=12.5,
+                        weight=ft.FontWeight.W_600,
                         color=COLORS["text_sub"],
                     ),
                     name_field,

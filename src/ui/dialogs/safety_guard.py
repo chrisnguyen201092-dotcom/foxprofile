@@ -217,7 +217,6 @@ def open_cooldown_settings_dialog(
 ) -> None:
     """Dialog to customize the proxy port cooldown duration (in minutes)."""
     tf = ft.TextField(
-        label=get_string("cooldown_setting_input_label"),
         value=str(current_minutes),
         keyboard_type=ft.KeyboardType.NUMBER,
         text_size=13.5,
@@ -275,6 +274,10 @@ def open_cooldown_settings_dialog(
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Text(
             get_string("cooldown_setting_title"),
             size=17,
@@ -284,8 +287,9 @@ def open_cooldown_settings_dialog(
         content=ft.Container(
             width=400,
             content=ft.Column(
-                spacing=12,
+                spacing=10,
                 tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
                     ft.Text(
                         get_string("cooldown_setting_desc"),
@@ -293,6 +297,12 @@ def open_cooldown_settings_dialog(
                         color=COLORS["text_sub"],
                     ),
                     preset_row,
+                    ft.Text(
+                        get_string("cooldown_setting_input_label"),
+                        size=12.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_sub"],
+                    ),
                     tf,
                 ],
             ),

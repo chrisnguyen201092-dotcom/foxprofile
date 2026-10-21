@@ -96,24 +96,9 @@ def build_sidebar(
     language: str = "en",
     on_language: Callable[[str], None] | None = None,
     trash_btn: ft.Control | None = None,
-    on_batch_create: Callable | None = None,
-    backup_btn: ft.Control | None = None,
 ) -> ft.Container:
     log_toggle_btn.on_click = on_toggle_log
-    bottom_tools: list[ft.Control] = []
-    if trash_btn is not None and backup_btn is not None:
-        trash_btn.width = None
-        trash_btn.expand = True
-        backup_btn.width = None
-        backup_btn.expand = True
-        bottom_tools = [
-            ft.Container(height=8),
-            ft.Row(spacing=6, controls=[trash_btn, backup_btn]),
-        ]
-    elif trash_btn is not None:
-        bottom_tools = [ft.Container(height=8), trash_btn]
-    elif backup_btn is not None:
-        bottom_tools = [ft.Container(height=8), backup_btn]
+    bottom_tools: list[ft.Control] = [ft.Container(height=8), trash_btn] if trash_btn is not None else []
     return ft.Container(
         width=240,
         bgcolor=COLORS["sidebar"],
@@ -159,21 +144,6 @@ def build_sidebar(
                     height=42,
                     style=ACCENT_STYLE,
                     on_click=on_new_profile,
-                ),
-                *(
-                    [
-                        ft.Container(height=6),
-                        ft.OutlinedButton(
-                            get_string("batch_create_btn"),
-                            icon=ft.Icons.PLAYLIST_ADD,
-                            width=208,
-                            height=36,
-                            style=RAIL_STYLE,
-                            on_click=on_batch_create,
-                        ),
-                    ]
-                    if on_batch_create is not None
-                    else []
                 ),
                 ft.Container(height=8),
                 ft.Row(
