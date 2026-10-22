@@ -127,8 +127,13 @@ class App:
         elif ctrl and key == "n":
             self.h.open_add_dialog(self.active_page)
         elif no_mod and key == "escape":
-            if self.state.editing_note is not None or self.state.editing_proxy is not None:
+            if (
+                self.state.editing_note is not None
+                or self.state.editing_email is not None
+                or self.state.editing_proxy is not None
+            ):
                 self.state.editing_note = None
+                self.state.editing_email = None
                 self.state.editing_proxy = None
                 self._refresh_profiles()
             elif self.state.selected_names():
@@ -408,6 +413,7 @@ class App:
                 p
                 for p in all_profiles
                 if q in p.name.lower()
+                or q in (getattr(p, "email", None) or "").lower()
                 or q in (p.proxy or "").lower()
                 or q in (p.group or "").lower()
                 or q in (p.status or "").lower()
@@ -577,6 +583,9 @@ class App:
                     editing_note=self.state.editing_note == p.name,
                     on_start_edit_note=self.h.on_start_edit_note,
                     on_save_note=self.h.on_save_note,
+                    editing_email=self.state.editing_email == p.name,
+                    on_start_edit_email=self.h.on_start_edit_email,
+                    on_save_email=self.h.on_save_email,
                     editing_proxy=self.state.editing_proxy == p.name,
                     on_start_edit_proxy=self.h.on_start_edit_proxy,
                     on_save_proxy=self.h.on_save_proxy,
@@ -745,6 +754,7 @@ class App:
                     and bool(running_now or self.pm.profiles)
                     and not self._has_open_dialog()
                     and self.state.editing_note is None
+                    and self.state.editing_email is None
                     and self.state.editing_proxy is None
                 )
                 if changed or self.state.consume_refresh() or minute_elapsed:

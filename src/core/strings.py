@@ -460,6 +460,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "running_just_now": "<1m",
         "running_minutes": "{mins}m",
         "running_hours": "{hours}h {mins}m",
+        "email_optional": "Email (optional)",
+        "email_hint": "user@example.com",
+        "tooltip_quick_edit_email": "Click to edit email",
+        "quick_saved_email": "Updated email for '{name}'",
+        "validation_email_too_long": "Email must be 120 characters or fewer",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -920,6 +925,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "running_just_now": "<1p",
         "running_minutes": "{mins}p",
         "running_hours": "{hours}h {mins}p",
+        "email_optional": "Email",
+        "email_hint": "Nhập email (VD: user@gmail.com)",
+        "tooltip_quick_edit_email": "Bấm để sửa nhanh email",
+        "quick_saved_email": "Đã lưu email cho '{name}'",
+        "validation_email_too_long": "Email tối đa 120 ký tự",
     },
 }
 

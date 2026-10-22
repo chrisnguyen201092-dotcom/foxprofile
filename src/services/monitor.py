@@ -256,6 +256,28 @@ class MonitorService:
         if self._ip_history.pop(profile_name, None) is not None:
             self._save_settings()
 
+    def rename_profile(self, old_name: str, new_name: str) -> None:
+        """Migrate monitor metadata when a profile is renamed."""
+        if not old_name or not new_name or old_name == new_name:
+            return
+        changed = False
+        if old_name in self._last_used_ports:
+            self._last_used_ports[new_name] = self._last_used_ports.pop(old_name)
+            changed = True
+        if old_name in self._ip_history:
+            self._ip_history[new_name] = self._ip_history.pop(old_name)
+            changed = True
+        if old_name in self._live_started_at:
+            self._live_started_at[new_name] = self._live_started_at.pop(old_name)
+        if old_name in self._live_stopped_at:
+            self._live_stopped_at[new_name] = self._live_stopped_at.pop(old_name)
+        if old_name in self._live_sessions:
+            self._live_sessions[new_name] = self._live_sessions.pop(old_name)
+        if old_name in self._disk_cache:
+            self._disk_cache[new_name] = self._disk_cache.pop(old_name)
+        if changed:
+            self._save_settings()
+
     def record_started(self, profile_name: str, proxy: str | None = None) -> None:
         self._live_started_at[profile_name] = dt.datetime.now()
         if proxy is not None:

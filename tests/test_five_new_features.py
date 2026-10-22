@@ -1484,3 +1484,58 @@ def test_account_age_and_ban_days_tracking_and_dialog(isolated_pm):
     save_btn.on_click(None)
     assert len(applied) == 1
     assert applied[0] == (ten_days_ago, four_days_ago)
+
+
+def test_profile_email_inline_and_monitor_rename(isolated_pm, tmp_path):
+    """Test profile email persistence, inline quick-edit, card rendering, and MonitorService rename."""
+    from src.services.monitor import MonitorService
+    from src.ui.components.profile_card import build_profile_card
+
+    isolated_pm.add_profile(
+        "Monica",
+        "http://1.2.3.4:10783",
+        "windows",
+        email="vnacc2@gmail.com",
+    )
+    p = isolated_pm.profiles["Monica"]
+    assert p.email == "vnacc2@gmail.com"
+
+    # Update email via update_profile_email
+    assert isolated_pm.update_profile_email("Monica", "monica.new@gmail.com") is True
+    assert p.email == "monica.new@gmail.com"
+
+    # Render card in normal and editing_email modes
+    card_normal = build_profile_card(
+        p,
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        on_start_edit_email=lambda _: None,
+        on_save_email=lambda _n, _v: None,
+    )
+    assert card_normal is not None
+
+    card_editing = build_profile_card(
+        p,
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        editing_email=True,
+        on_start_edit_email=lambda _: None,
+        on_save_email=lambda _n, _v: None,
+    )
+    assert card_editing is not None
+
+    # MonitorService.rename_profile migrates port & IP history
+    mon = MonitorService(data_dir=str(tmp_path))
+    mon.record_exit_ip(
+        "Monica", "1.2.3.4", country="US", tz="America/Detroit", proxy="http://1.2.3.4:10783"
+    )
+    assert len(mon.get_ip_history("Monica")) == 1
+    mon.rename_profile("Monica", "Monica2")
+    assert len(mon.get_ip_history("Monica")) == 0
+    assert len(mon.get_ip_history("Monica2")) == 1

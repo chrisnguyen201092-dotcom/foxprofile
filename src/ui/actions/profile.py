@@ -51,6 +51,7 @@ def edit_profile(
     ps: IProxyService,
     log: Callable[[str], None],
     refresh: Callable[[], None],
+    monitor: object = None,
 ) -> None:
     profile = pm.profiles.get(name)
     if not profile:
@@ -68,6 +69,7 @@ def edit_profile(
         group: str | None = None,
         notes: str | None = None,
         status: str | None = None,
+        email: str | None = None,
     ) -> str | None:
         if new_name != original and bl.is_running(original):
             return get_string("stop_before_rename")
@@ -82,7 +84,10 @@ def edit_profile(
             group,
             notes,
             new_status=status,
+            new_email=email,
         ):
+            if new_name != original and monitor is not None and hasattr(monitor, "rename_profile"):
+                monitor.rename_profile(original, new_name)
             log(get_string("updated_profile", old=original, new=new_name))
             refresh()
             return None
@@ -118,6 +123,7 @@ def add_profile(
         group: str | None = None,
         notes: str | None = None,
         status: str | None = None,
+        email: str | None = None,
     ) -> str | None:
         if engine == "chrome" and (reason := chrome_prefetch.unsupported_reason()):
             return get_string("chrome_engine_unsupported", reason=reason)
@@ -134,6 +140,7 @@ def add_profile(
             notes,
             pages=init_pages,
             status=status,
+            email=email,
         ):
             log(get_string("created_profile", name=name))
             if engine == "chrome":

@@ -30,6 +30,7 @@ class AppState:
         self.last_selected_name: str | None = None
         self.shift_down: bool = False
         self.editing_note: str | None = None
+        self.editing_email: str | None = None
         self.editing_proxy: str | None = None
         # profile_name -> ("checking" | "ok" | "fail", short_label)
         self.proxy_status: dict[str, tuple[str, str]] = {}

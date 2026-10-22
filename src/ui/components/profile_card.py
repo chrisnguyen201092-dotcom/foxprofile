@@ -199,6 +199,9 @@ def build_profile_card(
     editing_note: bool = False,
     on_start_edit_note: Callable[[str], None] | None = None,
     on_save_note: Callable[[str, str], None] | None = None,
+    editing_email: bool = False,
+    on_start_edit_email: Callable[[str], None] | None = None,
+    on_save_email: Callable[[str, str], None] | None = None,
     editing_proxy: bool = False,
     on_start_edit_proxy: Callable[[str], None] | None = None,
     on_save_proxy: Callable[[str, str], None] | None = None,
@@ -234,9 +237,13 @@ def build_profile_card(
     status_disp = resolve_status_display(profile.status, get_string)
     is_pinned = bool(getattr(profile, "pinned", False))
     has_badges = bool(is_pinned or profile.group or show_failed or status_disp is not None)
+    primary_quick_edit = on_start_edit_email or on_start_edit_note
+    quick_edit_tip_key = (
+        "tooltip_quick_edit_email" if on_start_edit_email is not None else "tooltip_quick_edit_note"
+    )
     name_tooltip = (
-        f"{profile.name}\n({get_string('tooltip_quick_edit_note')})"
-        if on_start_edit_note is not None
+        f"{profile.name}\n({get_string(quick_edit_tip_key)})"
+        if primary_quick_edit is not None
         else profile.name
     )
     name_text = ft.Text(
@@ -252,10 +259,10 @@ def build_profile_card(
         ft.Container(
             expand=has_badges,
             expand_loose=has_badges,
-            on_click=lambda _, n=profile.name: on_start_edit_note(n),
+            on_click=lambda _, n=profile.name, fn=primary_quick_edit: fn(n),
             content=name_text,
         )
-        if on_start_edit_note is not None
+        if primary_quick_edit is not None
         else (
             ft.Container(expand=True, expand_loose=True, content=name_text)
             if has_badges
@@ -356,7 +363,23 @@ def build_profile_card(
         else name_control
     )
 
-    if editing_note and on_save_note is not None:
+    email_val = (getattr(profile, "email", None) or "").strip()
+    if editing_email and on_save_email is not None:
+        email_input = ft.TextField(
+            value=email_val,
+            hint_text=get_string("email_hint"),
+            text_size=11.5,
+            height=26,
+            content_padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            bgcolor=COLORS["input_bg"],
+            border_color=COLORS["accent"],
+            border_radius=4,
+            autofocus=True,
+            on_submit=lambda e, n=profile.name: on_save_email(n, e.control.value or ""),
+            on_blur=lambda e, n=profile.name: on_save_email(n, e.control.value or ""),
+        )
+        text_block: ft.Control = _stack(top_line, email_input)
+    elif editing_note and on_save_note is not None:
         note_input = ft.TextField(
             value=profile.notes or "",
             hint_text=get_string("notes_hint"),
@@ -370,27 +393,61 @@ def build_profile_card(
             on_submit=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
             on_blur=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
         )
-        text_block: ft.Control = _stack(top_line, note_input)
-    elif profile.notes:
-        single_line_note = " ".join(profile.notes.splitlines()).strip()
-        note_widget: ft.Control = ft.Text(
-            single_line_note,
-            size=11.5,
-            color=COLORS["text_dim"],
-            no_wrap=True,
-            overflow=ft.TextOverflow.ELLIPSIS,
-            tooltip=(
-                f"{profile.notes}\n({get_string('tooltip_quick_edit_note')})"
-                if on_start_edit_note
-                else profile.notes
-            ),
-        )
-        if on_start_edit_note is not None:
-            note_widget = ft.Container(
-                on_click=lambda _, n=profile.name: on_start_edit_note(n),
-                content=note_widget,
+        text_block = _stack(top_line, note_input)
+    elif email_val or profile.notes:
+        sub_parts: list[ft.Control] = []
+        if email_val:
+            email_widget: ft.Control = ft.Text(
+                email_val,
+                size=11.5,
+                font_family=FONT_DATA,
+                color=COLORS["text_dim"],
+                no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=(
+                    f"{email_val}\n({get_string('tooltip_quick_edit_email')})"
+                    if on_start_edit_email
+                    else email_val
+                ),
             )
-        text_block = _stack(top_line, note_widget)
+            if on_start_edit_email is not None:
+                email_widget = ft.Container(
+                    on_click=lambda _, n=profile.name: on_start_edit_email(n),
+                    content=email_widget,
+                )
+            sub_parts.append(email_widget)
+        if profile.notes:
+            single_line_note = " ".join(profile.notes.splitlines()).strip()
+            note_widget: ft.Control = ft.Text(
+                single_line_note,
+                size=11.5,
+                color=COLORS["text_dim"],
+                no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                tooltip=(
+                    f"{profile.notes}\n({get_string('tooltip_quick_edit_note')})"
+                    if on_start_edit_note
+                    else profile.notes
+                ),
+            )
+            if on_start_edit_note is not None:
+                note_widget = ft.Container(
+                    on_click=lambda _, n=profile.name: on_start_edit_note(n),
+                    content=note_widget,
+                )
+            if sub_parts:
+                sub_parts.append(ft.Text("·", size=11.5, color=COLORS["text_dim"]))
+            sub_parts.append(note_widget)
+        sub_line: ft.Control = (
+            sub_parts[0]
+            if len(sub_parts) == 1
+            else ft.Row(
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=sub_parts,
+            )
+        )
+        text_block = _stack(top_line, sub_line)
     else:
         text_block = top_line
 

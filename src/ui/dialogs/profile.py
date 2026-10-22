@@ -13,6 +13,7 @@ from ...services.proxy.geo_check import GeoCheckResult, check_geo
 from ...utils.proxy_parser import mask_proxy
 from ...utils.validation import (
     validate_color,
+    validate_email,
     validate_group,
     validate_locale,
     validate_notes,
@@ -47,6 +48,12 @@ def open_profile_dialog(
     name_field = ft.TextField(
         value=profile.name if profile is not None else "",
         hint_text="" if profile is not None else get_string("enter_profile_name"),
+        **DLG_FIELD_KWARGS,
+    )
+    email_field = ft.TextField(
+        value=(getattr(profile, "email", None) or "") if profile is not None else "",
+        hint_text=get_string("email_hint"),
+        text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
     group_field = ft.TextField(
@@ -423,6 +430,7 @@ def open_profile_dialog(
 
     def on_submit(_: ft.ControlEvent) -> None:
         name = (name_field.value or "").strip()
+        email = (email_field.value or "").strip()
         group = (group_field.value or "").strip()
         notes = (notes_field.value or "").strip()
         proxy = (proxy_field.value or "").strip()
@@ -439,7 +447,11 @@ def open_profile_dialog(
             page.update()
             return
 
-        for validate_meta, meta_val in ((validate_group, group), (validate_notes, notes)):
+        for validate_meta, meta_val in (
+            (validate_email, email),
+            (validate_group, group),
+            (validate_notes, notes),
+        ):
             valid_meta, meta_err = validate_meta(meta_val)
             if not valid_meta:
                 name_error.value = meta_err
@@ -466,7 +478,21 @@ def open_profile_dialog(
         has_varargs = any(
             p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
         )
-        if has_varargs or len(sig.parameters) >= 10:
+        if has_varargs or len(sig.parameters) >= 11:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+                email or None,
+            )
+        elif len(sig.parameters) >= 10:
             error = on_save(
                 name,
                 proxy,
@@ -568,6 +594,7 @@ def open_profile_dialog(
                     ),
                     *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
+                    _field(get_string("email_optional"), email_field),
                     _field(get_string("notes_optional"), notes_field),
                     _field(get_string("profile_color"), color_section),
                     ft.Row(

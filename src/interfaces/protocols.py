@@ -23,6 +23,7 @@ class IProfileManager(Protocol):
         pages: list[str] | None = None,
         status: str | None = None,
         pinned: bool = False,
+        email: str | None = None,
     ) -> bool: ...
 
     def update_profile(
@@ -39,6 +40,7 @@ class IProfileManager(Protocol):
         new_pages: list[str] | None = None,
         new_status: Any = ...,
         new_pinned: bool | None = None,
+        new_email: Any = ...,
     ) -> bool: ...
 
     def move_profile(self, name: str, direction: int) -> bool: ...
@@ -93,6 +95,8 @@ class IProfileManager(Protocol):
         created_at: str | None,
         banned_at: str | None,
     ) -> bool: ...
+
+    def update_profile_email(self, name: str, email: str | None) -> bool: ...
 
     def toggle_pin_profile(self, name: str) -> bool | None: ...
 

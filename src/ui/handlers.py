@@ -9,7 +9,7 @@ from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.monitor import MonitorService
 from ..services.proxy.geo_check import derive_ip_metadata, extract_ip_from_check_detail
-from ..utils.validation import validate_notes, validate_proxy_format
+from ..utils.validation import validate_email, validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
     bulk_check_proxies,
@@ -140,6 +140,7 @@ class AppHandlers:
             self._ps,
             self._log,
             _after_edit,
+            monitor=self._monitor,
         )
 
     def on_cookies(self, name: str) -> None:
@@ -447,6 +448,7 @@ class AppHandlers:
 
     def on_start_edit_note(self, name: str) -> None:
         self._state.editing_proxy = None
+        self._state.editing_email = None
         self._state.editing_note = name
         self._refresh()
 
@@ -478,8 +480,35 @@ class AppHandlers:
             self._log(get_string("quick_saved_notes", name=name))
         self._refresh()
 
+    def on_start_edit_email(self, name: str) -> None:
+        self._state.editing_proxy = None
+        self._state.editing_note = None
+        self._state.editing_email = name
+        self._refresh()
+
+    def on_save_email(self, name: str, raw_email: str) -> None:
+        if self._state.editing_email != name:
+            return
+        self._state.editing_email = None
+        p = self._pm.profiles.get(name)
+        if p is None:
+            self._refresh()
+            return
+        clean = raw_email.strip()
+        if clean and not validate_email(clean)[0]:
+            self._refresh()
+            return
+        if (clean or None) != getattr(p, "email", None):
+            if hasattr(self._pm, "update_profile_email"):
+                self._pm.update_profile_email(name, clean or None)
+            else:
+                p.email = clean or None
+            self._log(get_string("quick_saved_email", name=name))
+        self._refresh()
+
     def on_start_edit_proxy(self, name: str) -> None:
         self._state.editing_note = None
+        self._state.editing_email = None
         self._state.editing_proxy = name
         self._refresh()
 
