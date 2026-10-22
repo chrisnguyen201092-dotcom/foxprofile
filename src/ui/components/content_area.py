@@ -99,9 +99,10 @@ def build_pages_bar(
     on_add_page: Callable[[], None],
     on_edit_page: Callable[[str], None],
     on_reorder_page: Callable[[str, str], None] | None = None,
+    all_tab_index: int = 0,
 ) -> ft.Row:
     """Horizontal custom pages bar placed right above the profile table."""
-    can_drag = len(page_counts) > 1 and on_reorder_page is not None
+    can_drag = len(page_counts) >= 1 and on_reorder_page is not None
 
     def _tab(
         page_id: str,
@@ -204,17 +205,6 @@ def build_pages_bar(
             ):
                 on_reorder_page(src_id, target_id)
 
-        if not editable:
-            # Allow dropping onto "All" to move a custom page to the first position
-            return ft.DragTarget(
-                group="custom_pages",
-                data=page_id,
-                on_will_accept=_on_will_accept,
-                on_leave=_on_leave,
-                on_accept=_on_accept,
-                content=tab_box,
-            )
-
         feedback_box = ft.Container(
             height=34,
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
@@ -269,9 +259,11 @@ def build_pages_bar(
             ),
         )
 
+    custom_tabs = [_tab(pg, pg, cnt, editable=True) for pg, cnt in page_counts]
+    idx = max(0, min(all_tab_index, len(custom_tabs)))
+    custom_tabs.insert(idx, _tab("__all__", get_string("page_all"), total_count, editable=False))
     tabs: list[ft.Control] = [
-        _tab("__all__", get_string("page_all"), total_count, editable=False),
-        *[_tab(pg, pg, cnt, editable=True) for pg, cnt in page_counts],
+        *custom_tabs,
         ft.Container(
             height=34,
             padding=ft.Padding.symmetric(horizontal=11),

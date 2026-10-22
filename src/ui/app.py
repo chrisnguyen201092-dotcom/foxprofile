@@ -30,7 +30,7 @@ from .refs import UIRefs
 from .state import AppState
 from .theme import COLORS, configure_page
 from .theme.colors import FONT_SEMIBOLD
-from .theme.page import ASSETS_DIR
+from .theme.page import ASSETS_DIR, setup_windows_taskbar_icon
 from .theme.styles import OUTLINE_STYLE, RAIL_STYLE
 
 logger = get_logger("app")
@@ -47,7 +47,10 @@ class App:
         self._reconcile_started = False
         self.refs: UIRefs | None = None
         self.filter = "all"
-        self.active_page = "__all__"
+        init_pages = self.pm.list_custom_pages()
+        self.active_page = (
+            init_pages[0] if getattr(self.pm, "all_page_index", 0) > 0 and init_pages else "__all__"
+        )
         self._live_since: dict[str, str] = {}
         self.monitor = MonitorService()
         self._last_monitor_snap: MonitorSnapshot | None = None
@@ -85,6 +88,7 @@ class App:
         )
 
     def run(self) -> None:
+        setup_windows_taskbar_icon()
         ft.run(self._main, assets_dir=ASSETS_DIR)
 
     def _main(self, page: ft.Page) -> None:
@@ -310,24 +314,21 @@ class App:
 
     def _on_reorder_custom_page(self, src_page: str, target_page: str) -> None:
         pages = self.pm.list_custom_pages()
+        all_idx = max(0, min(getattr(self.pm, "all_page_index", 0), len(pages)))
+        tabs_order = [*pages[:all_idx], "__all__", *pages[all_idx:]]
         src_idx = next(
-            (i for i, pg in enumerate(pages) if pg.casefold() == src_page.casefold()),
+            (i for i, pg in enumerate(tabs_order) if pg.casefold() == src_page.casefold()),
             None,
         )
-        if src_idx is None:
+        target_idx = next(
+            (i for i, pg in enumerate(tabs_order) if pg.casefold() == target_page.casefold()),
+            None,
+        )
+        if src_idx is None or target_idx is None or src_idx == target_idx:
             return
-        if target_page == "__all__":
-            target_idx = 0
-        else:
-            target_idx = next(
-                (i for i, pg in enumerate(pages) if pg.casefold() == target_page.casefold()),
-                None,
-            )
-            if target_idx is None or target_idx == src_idx:
-                return
-        moved = pages.pop(src_idx)
-        pages.insert(target_idx, moved)
-        if self.pm.reorder_custom_pages(pages):
+        moved = tabs_order.pop(src_idx)
+        tabs_order.insert(target_idx, moved)
+        if self.pm.reorder_custom_pages(tabs_order):
             self._refresh_profiles()
 
     def _on_reorder(self, old_index: int, new_index: int) -> None:
@@ -527,6 +528,7 @@ class App:
             self._on_add_custom_page,
             self._on_edit_custom_page,
             self._on_reorder_custom_page,
+            all_tab_index=getattr(self.pm, "all_page_index", 0),
         )
 
         tests = self._filter_tests()

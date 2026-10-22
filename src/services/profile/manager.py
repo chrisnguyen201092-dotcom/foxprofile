@@ -76,6 +76,7 @@ class ProfileManager:
         self._lock = threading.RLock()
         self.profiles: dict[str, Profile] = {}
         self.custom_pages: list[str] = []
+        self.all_page_index: int = 0
         self.proxy_pool: list[str] = []
         self.status_tags: list[dict[str, str]] = default_status_tags()
         set_active_status_tags(self.status_tags)
@@ -240,7 +241,22 @@ class ProfileManager:
         if pages_path.exists():
             with contextlib.suppress(Exception):
                 raw_pages = json.loads(pages_path.read_text(encoding="utf-8"))
-                self.custom_pages = _clean_pages(raw_pages)
+                if isinstance(raw_pages, list):
+                    cleaned: list[str] = []
+                    all_idx = 0
+                    for item in raw_pages:
+                        if isinstance(item, str) and item.strip() == "__all__":
+                            all_idx = len(cleaned)
+                        elif isinstance(item, str):
+                            s = item.strip()
+                            if (
+                                s
+                                and validate_group(s)[0]
+                                and not any(c.casefold() == s.casefold() for c in cleaned)
+                            ):
+                                cleaned.append(s)
+                    self.custom_pages = cleaned
+                    self.all_page_index = all_idx
 
         pool_path = self._proxy_pool_file()
         if pool_path.exists():
@@ -340,10 +356,16 @@ class ProfileManager:
             )
             _replace(tmp, path)
             pages_path = self._pages_file()
-            if self.custom_pages or pages_path.exists():
+            if self.custom_pages or self.all_page_index > 0 or pages_path.exists():
+                idx = max(0, min(self.all_page_index, len(self.custom_pages)))
+                serialized_pages = (
+                    [*self.custom_pages[:idx], "__all__", *self.custom_pages[idx:]]
+                    if idx > 0
+                    else list(self.custom_pages)
+                )
                 pages_tmp = pages_path.with_suffix(".json.tmp")
                 pages_tmp.write_text(
-                    json.dumps(self.custom_pages, indent=2),
+                    json.dumps(serialized_pages, indent=2),
                     encoding="utf-8",
                 )
                 _replace(pages_tmp, pages_path)
@@ -610,12 +632,18 @@ class ProfileManager:
             return True
 
     def reorder_custom_pages(self, ordered_pages: list[str]) -> bool:
-        """Reorder custom pages according to *ordered_pages*; unlisted pages stay at the end."""
+        """Reorder custom pages (and optional '__all__' slot) according to *ordered_pages*."""
         with self._lock:
             seen: set[str] = set()
             new_order: list[str] = []
+            new_all_idx: int | None = None
             for raw in ordered_pages:
-                match = self._find_page_by_casefold(raw.strip())
+                s = raw.strip()
+                if s == "__all__":
+                    if new_all_idx is None:
+                        new_all_idx = len(new_order)
+                    continue
+                match = self._find_page_by_casefold(s)
                 if match is not None and match.casefold() not in seen:
                     seen.add(match.casefold())
                     new_order.append(match)
@@ -623,6 +651,10 @@ class ProfileManager:
                 if pg.casefold() not in seen:
                     new_order.append(pg)
             self.custom_pages = new_order
+            if new_all_idx is not None:
+                self.all_page_index = max(0, min(new_all_idx, len(self.custom_pages)))
+            else:
+                self.all_page_index = max(0, min(self.all_page_index, len(self.custom_pages)))
             self.save_profiles()
             return True
 
