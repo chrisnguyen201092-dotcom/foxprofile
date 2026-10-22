@@ -63,6 +63,7 @@ class ProfileMonitorInfo:
     shared_count: int = 1
     last_closed: dt.datetime | None = None
     cooldown_mins: int | None = None
+    running_mins: int | None = None
     today_minutes: int = 0
     busy_by: list[str] = field(default_factory=list)
     port_cooldown_by: tuple[str, int] | None = None  # (other_profile_name, minutes_left)
@@ -687,6 +688,16 @@ class MonitorService:
                 if (lc is not None and not is_run)
                 else None
             )
+            running_mins: int | None = None
+            if is_run:
+                start_dt = self._live_started_at.get(p.name) or hist.get(p.name, {}).get(
+                    "_open_start"
+                )
+                running_mins = (
+                    max(0, int((now - start_dt).total_seconds() // 60))
+                    if start_dt is not None
+                    else 0
+                )
 
             # Check if a sibling on the same proxy port closed < cooldown_minutes ago
             port_cooldown_by: tuple[str, int] | None = None
@@ -737,6 +748,7 @@ class MonitorService:
                 shared_count=len(siblings),
                 last_closed=lc,
                 cooldown_mins=cooldown_mins,
+                running_mins=running_mins,
                 today_minutes=today_mins_map.get(p.name, 0),
                 busy_by=busy_by,
                 port_cooldown_by=port_cooldown_by,

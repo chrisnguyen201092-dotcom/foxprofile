@@ -1,4 +1,6 @@
+import re
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 
 # Browser engines a profile can run on. A profile keeps its engine for life:
 # the two keep incompatible browser data in the same directory.
@@ -126,6 +128,112 @@ def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, st
     return clean, "#0284C7"
 
 
+_BAN_KEYWORDS = frozenset(
+    {
+        "hold",
+        "ban",
+        "banned",
+        "bị ban",
+        "bi ban",
+        "tạm ngưng",
+        "tam ngung",
+        "die",
+        "dead",
+        "khóa",
+        "khoa",
+        "locked",
+        "suspended",
+        "suspend",
+        "disconnect",
+        "disconnected",
+        "disabled",
+    }
+)
+_DAYS_RE = re.compile(r"^(\d{1,4})\s*(?:d|days?|ngay|ngày)?$", re.IGNORECASE)
+_YMD_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$")
+_DMY_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$")
+
+
+def today_ymd() -> str:
+    return date.today().isoformat()
+
+
+def parse_flexible_date(raw: object, today: date | None = None) -> str | None:
+    """Parse YYYY-MM-DD, DD/MM/YYYY, or integer days ago ('12' -> today - 12d) into YYYY-MM-DD."""
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    ref = today or date.today()
+    m_days = _DAYS_RE.match(s)
+    if m_days:
+        days = int(m_days.group(1))
+        if 0 <= days <= 3650:
+            return (ref - timedelta(days=days)).isoformat()
+        return None
+    m_ymd = _YMD_RE.match(s)
+    if m_ymd:
+        try:
+            dt = date(int(m_ymd.group(1)), int(m_ymd.group(2)), int(m_ymd.group(3)))
+            if 2000 <= dt.year <= 2100:
+                return dt.isoformat()
+        except ValueError:
+            return None
+    m_dmy = _DMY_RE.match(s)
+    if m_dmy:
+        try:
+            dt = date(int(m_dmy.group(3)), int(m_dmy.group(2)), int(m_dmy.group(1)))
+            if 2000 <= dt.year <= 2100:
+                return dt.isoformat()
+        except ValueError:
+            return None
+    return None
+
+
+def compute_days_since(ymd: str | None, today: date | None = None) -> int | None:
+    norm = parse_flexible_date(ymd, today=today)
+    if not norm:
+        return None
+    try:
+        dt = date.fromisoformat(norm)
+    except ValueError:
+        return None
+    ref = today or date.today()
+    return max(0, (ref - dt).days)
+
+
+def format_date_dmy(ymd: str | None) -> str:
+    norm = parse_flexible_date(ymd)
+    if not norm:
+        return ""
+    try:
+        dt = date.fromisoformat(norm)
+        return dt.strftime("%d/%m/%Y")
+    except ValueError:
+        return norm
+
+
+def is_ban_status(status: str | None, get_str_fn=None) -> bool:
+    if not status or not status.strip():
+        return False
+    low = status.strip().casefold()
+    if low in _BAN_KEYWORDS:
+        return True
+    disp = resolve_status_display(status, get_str_fn)
+    return bool(disp is not None and disp[0].strip().casefold() in _BAN_KEYWORDS)
+
+
+def is_ban_page(page_name: str | None) -> bool:
+    if not page_name or not page_name.strip():
+        return False
+    return page_name.strip().casefold() in _BAN_KEYWORDS
+
+
+def has_ban_page(pages: list[str] | None) -> bool:
+    return any(is_ban_page(pg) for pg in (pages or []))
+
+
 @dataclass
 class Profile:
     name: str
@@ -141,6 +249,8 @@ class Profile:
     pages: list[str] = field(default_factory=list)
     status: str | None = None
     pinned: bool = False
+    created_at: str | None = None
+    banned_at: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

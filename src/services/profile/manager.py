@@ -6,6 +6,7 @@ import pathlib
 import shutil
 import threading
 import time
+from datetime import datetime
 
 from ...core.config import DATA_DIR, PROFILES_FILE
 from ...core.logging import get_logger
@@ -13,7 +14,11 @@ from ...models.profile import (
     ENGINES,
     Profile,
     default_status_tags,
+    has_ban_page,
+    is_ban_status,
+    parse_flexible_date,
     set_active_status_tags,
+    today_ymd,
 )
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
@@ -181,6 +186,54 @@ class ProfileManager:
     def _data_path(self, name: str) -> str:
         return os.path.join(DATA_DIR, name)
 
+    def _infer_created_at(self, name: str) -> str:
+        pdir = pathlib.Path(self._data_path(name))
+        if pdir.exists():
+            with contextlib.suppress(OSError, ValueError):
+                st = pdir.stat()
+                ts = (
+                    min(st.st_ctime, st.st_mtime)
+                    if st.st_ctime and st.st_mtime
+                    else (st.st_ctime or st.st_mtime)
+                )
+                if ts and ts > 0:
+                    return datetime.fromtimestamp(ts).date().isoformat()
+        return today_ymd()
+
+    def _infer_banned_at(self, name: str) -> str:
+        pdir = pathlib.Path(self._data_path(name))
+        if pdir.exists():
+            latest_ts = 0.0
+            for sub in ("prefs.js", "places.sqlite"):
+                f = pdir / sub
+                with contextlib.suppress(OSError):
+                    if f.exists():
+                        latest_ts = max(latest_ts, f.stat().st_mtime)
+            if latest_ts <= 0:
+                with contextlib.suppress(OSError):
+                    latest_ts = pdir.stat().st_mtime
+            if latest_ts > 0:
+                with contextlib.suppress(OSError, ValueError):
+                    return datetime.fromtimestamp(latest_ts).date().isoformat()
+        return today_ymd()
+
+    @staticmethod
+    def _is_profile_banned(p: Profile) -> bool:
+        return is_ban_status(p.status) or has_ban_page(p.pages)
+
+    def _sync_ban_state(
+        self,
+        p: Profile,
+        *,
+        was_banned: bool = False,
+        infer_from_disk: bool = False,
+    ) -> None:
+        now_banned = self._is_profile_banned(p)
+        if now_banned and not p.banned_at:
+            p.banned_at = self._infer_banned_at(p.name) if infer_from_disk else today_ymd()
+        elif was_banned and not now_banned:
+            p.banned_at = None
+
     def _load_profiles(self) -> None:
         pages_path = self._pages_file()
         if pages_path.exists():
@@ -237,6 +290,16 @@ class ProfileManager:
                         for pg in pages:
                             if self._find_page_by_casefold(pg) is None:
                                 self.custom_pages.append(pg)
+                        canon_pages = [self._find_page_by_casefold(pg) or pg for pg in pages]
+                        status_val = valid_or_none(p_data.get("status"), validate_status)
+                        created_val = parse_flexible_date(p_data.get("created_at"))
+                        if not created_val:
+                            created_val = self._infer_created_at(name)
+                        banned_val = parse_flexible_date(p_data.get("banned_at"))
+                        if not banned_val and (
+                            is_ban_status(status_val) or has_ban_page(canon_pages)
+                        ):
+                            banned_val = self._infer_banned_at(name)
                         clean_data = {
                             "name": p_data.get("name"),
                             "proxy": p_data.get("proxy"),
@@ -250,9 +313,11 @@ class ProfileManager:
                             "color": valid_or_none(p_data.get("color"), validate_color),
                             "group": valid_or_none(p_data.get("group"), validate_group),
                             "notes": valid_or_none(p_data.get("notes"), validate_notes),
-                            "pages": [self._find_page_by_casefold(pg) or pg for pg in pages],
-                            "status": valid_or_none(p_data.get("status"), validate_status),
+                            "pages": canon_pages,
+                            "status": status_val,
                             "pinned": bool(p_data.get("pinned", False)),
+                            "created_at": created_val,
+                            "banned_at": banned_val,
                         }
                         self.profiles[name] = Profile(**clean_data)
                 logger.info("Loaded %d profiles", len(self.profiles))
@@ -325,6 +390,9 @@ class ProfileManager:
             except OSError as e:
                 logger.warning("Could not create data dir for %s: %s", name, e)
                 return False
+            canon_pages = self._register_pages(pages)
+            clean_status = valid_or_none(status, validate_status)
+            now_ymd = today_ymd()
             self.profiles[name] = Profile(
                 name=name,
                 proxy=proxy or None,
@@ -335,9 +403,13 @@ class ProfileManager:
                 color=color or None,
                 group=group or None,
                 notes=notes or None,
-                pages=self._register_pages(pages),
-                status=valid_or_none(status, validate_status),
+                pages=canon_pages,
+                status=clean_status,
                 pinned=bool(pinned),
+                created_at=now_ymd,
+                banned_at=now_ymd
+                if (is_ban_status(clean_status) or has_ban_page(canon_pages))
+                else None,
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -400,6 +472,7 @@ class ProfileManager:
                         return False
 
             profile = self.profiles[original_name]
+            was_banned = self._is_profile_banned(profile)
             profile.name = new_name
             profile.proxy = new_proxy or None
             profile.os_type = new_os
@@ -417,6 +490,9 @@ class ProfileManager:
                 )
             if new_pinned is not None:
                 profile.pinned = bool(new_pinned)
+            if not profile.created_at:
+                profile.created_at = self._infer_created_at(new_name)
+            self._sync_ban_state(profile, was_banned=was_banned)
 
             if new_name != original_name:
                 self.profiles = {
@@ -465,11 +541,14 @@ class ProfileManager:
             if profile_names is not None:
                 chosen = set(profile_names)
                 for p in self.profiles.values():
+                    was_banned = self._is_profile_banned(p)
                     has_page = any(pg.casefold() == target_page.casefold() for pg in p.pages)
                     if p.name in chosen and not has_page:
                         p.pages.append(target_page)
+                        self._sync_ban_state(p, was_banned=was_banned)
                     elif p.name not in chosen and has_page:
                         p.pages = [pg for pg in p.pages if pg.casefold() != target_page.casefold()]
+                        self._sync_ban_state(p, was_banned=was_banned)
 
             self.save_profiles()
             return True
@@ -481,7 +560,9 @@ class ProfileManager:
                 return False
             self.custom_pages = [pg for pg in self.custom_pages if pg != match]
             for p in self.profiles.values():
+                was_banned = self._is_profile_banned(p)
                 p.pages = [pg for pg in p.pages if pg.casefold() != match.casefold()]
+                self._sync_ban_state(p, was_banned=was_banned)
             self.save_profiles()
             return True
 
@@ -497,7 +578,9 @@ class ProfileManager:
             for name in profile_names:
                 p = self.profiles.get(name)
                 if p is not None and not any(pg.casefold() == target.casefold() for pg in p.pages):
+                    was_banned = self._is_profile_banned(p)
                     p.pages.append(target)
+                    self._sync_ban_state(p, was_banned=was_banned)
             self.save_profiles()
             return True
 
@@ -510,7 +593,9 @@ class ProfileManager:
             for name in profile_names:
                 p = self.profiles.get(name)
                 if p is not None:
+                    was_banned = self._is_profile_banned(p)
                     p.pages = [pg for pg in p.pages if pg.casefold() != target.casefold()]
+                    self._sync_ban_state(p, was_banned=was_banned)
             self.save_profiles()
             return True
 
@@ -663,6 +748,13 @@ class ProfileManager:
                 dst_dir.mkdir(exist_ok=True, parents=True)
 
             pages = self._register_pages(p_data.get("pages"))
+            status_val = valid_or_none(p_data.get("status"), validate_status)
+            created_val = parse_flexible_date(p_data.get("created_at")) or self._infer_created_at(
+                target_name
+            )
+            banned_val = parse_flexible_date(p_data.get("banned_at"))
+            if not banned_val and (is_ban_status(status_val) or has_ban_page(pages)):
+                banned_val = self._infer_banned_at(target_name)
             self.profiles[target_name] = Profile(
                 name=target_name,
                 proxy=p_data.get("proxy") or None,
@@ -674,8 +766,10 @@ class ProfileManager:
                 group=valid_or_none(p_data.get("group"), validate_group),
                 notes=valid_or_none(p_data.get("notes"), validate_notes),
                 pages=pages,
-                status=valid_or_none(p_data.get("status"), validate_status),
+                status=status_val,
                 pinned=bool(p_data.get("pinned", False)),
+                created_at=created_val,
+                banned_at=banned_val,
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -749,11 +843,36 @@ class ProfileManager:
             for name in names:
                 p = self.profiles.get(name)
                 if p is not None:
+                    was_banned = self._is_profile_banned(p)
                     p.status = clean_status
+                    self._sync_ban_state(p, was_banned=was_banned)
                     count += 1
             if count:
                 self.save_profiles()
         return count
+
+    def update_profile_dates(
+        self,
+        name: str,
+        created_at: str | None,
+        banned_at: str | None,
+    ) -> bool:
+        raw_created = (created_at or "").strip()
+        raw_banned = (banned_at or "").strip()
+        parsed_created = parse_flexible_date(raw_created) if raw_created else None
+        if raw_created and parsed_created is None:
+            return False
+        parsed_banned = parse_flexible_date(raw_banned) if raw_banned else None
+        if raw_banned and parsed_banned is None:
+            return False
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            p.created_at = parsed_created or p.created_at or self._infer_created_at(name)
+            p.banned_at = parsed_banned
+            self.save_profiles()
+            return True
 
     def toggle_pin_profile(self, name: str) -> bool | None:
         with self._lock:
@@ -998,6 +1117,8 @@ class ProfileManager:
             "color",
             "notes",
             "pinned",
+            "created_at",
+            "banned_at",
         ]
         with self._lock:
             selected_set = set(names) if names is not None else None
@@ -1023,6 +1144,8 @@ class ProfileManager:
                         "locale": p.locale or "",
                         "color": p.color or "",
                         "notes": p.notes or "",
+                        "created_at": p.created_at or "",
+                        "banned_at": p.banned_at or "",
                     }
                 )
         return len(rows)
@@ -1081,12 +1204,18 @@ class ProfileManager:
                 )
                 canonical_pages = self._register_pages(page_list)
 
+                has_created_col = "created_at" in row and row.get("created_at") is not None
+                created_val = parse_flexible_date(row.get("created_at"))
+                has_banned_col = "banned_at" in row and row.get("banned_at") is not None
+                banned_val = parse_flexible_date(row.get("banned_at"))
+
                 existing_key = self._find_by_casefold(raw_name)
                 if existing_key is not None:
                     if existing_key in active:
                         skipped += 1
                         continue
                     cur = self.profiles[existing_key]
+                    was_banned = self._is_profile_banned(cur)
                     cur.proxy = raw_proxy or None
                     cur.os_type = os_val
                     cur.timezone = tz_val
@@ -1099,6 +1228,12 @@ class ProfileManager:
                         cur.pinned = pinned_val
                     if canonical_pages:
                         cur.pages = canonical_pages
+                    if has_created_col and created_val:
+                        cur.created_at = created_val
+                    if has_banned_col:
+                        cur.banned_at = banned_val
+                    else:
+                        self._sync_ban_state(cur, was_banned=was_banned)
                     updated += 1
                 else:
                     try:
@@ -1106,6 +1241,7 @@ class ProfileManager:
                     except OSError:
                         skipped += 1
                         continue
+                    now_ymd = today_ymd()
                     self.profiles[raw_name] = Profile(
                         name=raw_name,
                         proxy=raw_proxy or None,
@@ -1119,6 +1255,13 @@ class ProfileManager:
                         pages=canonical_pages,
                         status=st_val,
                         pinned=pinned_val,
+                        created_at=created_val or now_ymd,
+                        banned_at=banned_val
+                        or (
+                            now_ymd
+                            if (is_ban_status(st_val) or has_ban_page(canonical_pages))
+                            else None
+                        ),
                     )
                     created += 1
             if created or updated:
@@ -1206,6 +1349,7 @@ class ProfileManager:
                 except OSError:
                     skipped.append(name)
                     continue
+                now_ymd = today_ymd()
                 self.profiles[name] = Profile(
                     name=name,
                     proxy=proxy_clean or None,
@@ -1217,6 +1361,8 @@ class ProfileManager:
                     group=clean_grp,
                     notes=None,
                     pages=list(canonical_pages),
+                    created_at=now_ymd,
+                    banned_at=now_ymd if has_ban_page(canonical_pages) else None,
                 )
                 created.append(name)
             if created:
@@ -1301,6 +1447,17 @@ class ProfileManager:
                 with contextlib.suppress(OSError):
                     pathlib.Path(self._data_path(canonical_name)).mkdir(exist_ok=True, parents=True)
                 pages = self._register_pages(p_data.get("pages"))
+                status_val = valid_or_none(p_data.get("status"), validate_status)
+                created_val = parse_flexible_date(p_data.get("created_at"))
+                if not created_val:
+                    created_val = (
+                        self.profiles[existing_key].created_at
+                        if existing_key is not None and self.profiles[existing_key].created_at
+                        else self._infer_created_at(canonical_name)
+                    )
+                banned_val = parse_flexible_date(p_data.get("banned_at"))
+                if not banned_val and (is_ban_status(status_val) or has_ban_page(pages)):
+                    banned_val = self._infer_banned_at(canonical_name)
                 prof = Profile(
                     name=canonical_name,
                     proxy=p_data.get("proxy") or None,
@@ -1315,8 +1472,10 @@ class ProfileManager:
                     group=valid_or_none(p_data.get("group"), validate_group),
                     notes=valid_or_none(p_data.get("notes"), validate_notes),
                     pages=pages,
-                    status=valid_or_none(p_data.get("status"), validate_status),
+                    status=status_val,
                     pinned=bool(p_data.get("pinned", False)),
+                    created_at=created_val,
+                    banned_at=banned_val,
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1
@@ -1376,6 +1535,9 @@ class ProfileManager:
 
             profile = result
             profile.pages = self._register_pages(profile.pages)
+            if not profile.created_at:
+                profile.created_at = self._infer_created_at(profile.name)
+            self._sync_ban_state(profile, infer_from_disk=True)
 
             # An overwrite under a different case replaces the old entry rather
             # than leaving two names for one data directory.

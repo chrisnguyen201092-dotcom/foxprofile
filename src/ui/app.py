@@ -587,6 +587,7 @@ class App:
                     on_session_history=self.h.on_open_session_history,
                     on_ip_history=self.h.on_open_ip_history,
                     on_toggle_pin=self.h.on_toggle_pin,
+                    on_edit_dates=self.h.on_edit_dates,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )
@@ -731,13 +732,23 @@ class App:
             logger.error("Error updating UI: %s", e)
 
     async def _ui_reconcile_loop(self) -> None:
+        last_minute_tick = time.monotonic()
         while self.page:
             try:
                 running_now = self.bl.running_profile_names()
                 changed = running_now != self.state._last_running_snapshot
                 if changed:
                     self.state._last_running_snapshot = running_now
-                if changed or self.state.consume_refresh():
+                now_mono = time.monotonic()
+                minute_elapsed = (
+                    (now_mono - last_minute_tick) >= 30.0
+                    and bool(running_now or self.pm.profiles)
+                    and not self._has_open_dialog()
+                    and self.state.editing_note is None
+                    and self.state.editing_proxy is None
+                )
+                if changed or self.state.consume_refresh() or minute_elapsed:
+                    last_minute_tick = now_mono
                     self._refresh_profiles()
             except Exception as e:
                 logger.error("Error in UI reconcile loop: %s", e)

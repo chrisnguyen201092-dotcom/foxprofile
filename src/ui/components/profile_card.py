@@ -1,10 +1,16 @@
+import contextlib
 from collections.abc import Callable
 from datetime import datetime
 
 import flet as ft
 
 from ...core.strings import get_string
-from ...models.profile import Profile, resolve_status_display
+from ...models.profile import (
+    Profile,
+    compute_days_since,
+    format_date_dmy,
+    resolve_status_display,
+)
 from ...services.monitor import ProfileMonitorInfo
 from ...utils.proxy_parser import mask_proxy
 from ..theme.colors import COLORS, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
@@ -156,6 +162,25 @@ def _format_cooldown(mins: int | None) -> str:
     return get_string("cooldown_days", days=mins // 1440)
 
 
+def _format_running(mins: int | None, since: str = "") -> str:
+    if mins is None and since and ":" in since:
+        with contextlib.suppress(ValueError):
+            hh, mm = (int(x) for x in since.split(":", 1))
+            now = datetime.now()
+            start_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            diff_m = int((now - start_dt).total_seconds() // 60)
+            if diff_m < 0:
+                diff_m += 1440
+            mins = max(0, diff_m)
+    if mins is None:
+        return ""
+    if mins < 1:
+        return get_string("running_just_now")
+    if mins < 60:
+        return get_string("running_minutes", mins=mins)
+    return get_string("running_hours", hours=mins // 60, mins=mins % 60)
+
+
 def build_profile_card(
     profile: Profile,
     is_loading: bool,
@@ -184,6 +209,7 @@ def build_profile_card(
     on_session_history: Callable[[str], None] | None = None,
     on_ip_history: Callable[[str], None] | None = None,
     on_toggle_pin: Callable[[str], None] | None = None,
+    on_edit_dates: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -432,7 +458,10 @@ def build_profile_card(
                     ),
                 ),
                 _cell("name", _drag_wrap(name_cell_content, disable_drag=editing_note)),
-                _cell("device", _drag_wrap(_device(profile, device))),
+                _cell(
+                    "device",
+                    _drag_wrap(_device(profile, device, on_edit_dates=on_edit_dates)),
+                ),
                 _cell(
                     "proxy",
                     _drag_wrap(
@@ -515,14 +544,57 @@ def _stack(*lines: ft.Control) -> ft.Column:
     return ft.Column(spacing=1, alignment=ft.MainAxisAlignment.CENTER, controls=list(lines))
 
 
-def _device(profile: Profile, device: str) -> ft.Row:
+def _device(
+    profile: Profile,
+    device: str,
+    *,
+    on_edit_dates: Callable[[str], None] | None = None,
+) -> ft.Row:
     chrome = profile.engine == "chrome"
-    engine = ft.Text(
-        "Chrome" if chrome else "Camoufox",
-        size=13,
-        font_family=FONT_SEMIBOLD if chrome else None,
-        color=COLORS["sidebar"] if chrome else COLORS["text_main"],
-    )
+    engine_name = "Chrome" if chrome else "Camoufox"
+    age_days = compute_days_since(getattr(profile, "created_at", None))
+    ban_days = compute_days_since(getattr(profile, "banned_at", None))
+
+    if age_days is not None or ban_days is not None:
+        c_date_str = format_date_dmy(profile.created_at) or "—"
+        age_str = get_string("age_days_badge", days=age_days if age_days is not None else 0)
+        if ban_days is not None:
+            b_date_str = format_date_dmy(profile.banned_at) or "—"
+            ban_str = get_string("ban_days_badge", days=ban_days)
+            label_str = f"{age_str} · {ban_str}"
+            tip = get_string(
+                "tooltip_banned_date",
+                c_date=c_date_str,
+                b_date=b_date_str,
+                days=ban_days,
+            )
+        else:
+            label_str = age_str
+            tip = get_string("tooltip_created_date", date=c_date_str, days=age_days)
+
+        line1: ft.Control = ft.Container(
+            on_click=(
+                (lambda _, n=profile.name: on_edit_dates(n)) if on_edit_dates is not None else None
+            ),
+            tooltip=tip,
+            content=ft.Text(
+                label_str,
+                size=11.5,
+                font_family=FONT_DATA,
+                color=COLORS["text_sub"],
+                no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+        )
+    else:
+        line1 = ft.Text(
+            engine_name,
+            size=12.5,
+            font_family=FONT_SEMIBOLD if chrome else None,
+            color=COLORS["sidebar"] if chrome else COLORS["text_main"],
+            no_wrap=True,
+        )
+
     return ft.Row(
         spacing=8,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -533,7 +605,7 @@ def _device(profile: Profile, device: str) -> ft.Row:
                 border_radius=4,
                 border=ft.Border.all(1, COLORS["text_sub"]),
                 alignment=ft.Alignment(0, 0),
-                tooltip=profile.os_type,
+                tooltip=f"{profile.os_type} · {engine_name}",
                 content=ft.Text(
                     _OS_LABELS.get(profile.os_type, "OS"),
                     size=11,
@@ -546,7 +618,7 @@ def _device(profile: Profile, device: str) -> ft.Row:
                 expand=True,
                 # Every row keeps two lines, so heights and baselines match.
                 content=_stack(
-                    engine,
+                    line1,
                     _minor(device, data=True)
                     if device
                     else _minor(get_string("no_fingerprint_short")),
@@ -698,7 +770,10 @@ def _geo(
         else ft.Text(follow, size=12.5, color=COLORS["text_dim"])
     )
     if is_running:
-        run_label = f"● {get_string('stamp_live')}" + (f" · {since}" if since else "")
+        run_mins = monitor_info.running_mins if monitor_info is not None else None
+        dur = _format_running(run_mins, since)
+        head = f"● {get_string('stamp_live')} {dur}" if dur else f"● {get_string('stamp_live')}"
+        run_label = f"{head} · {since}" if since else head
         run_text = ft.Text(
             run_label,
             size=11.5,

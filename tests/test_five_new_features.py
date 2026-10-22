@@ -1381,3 +1381,106 @@ def test_pin_profiles_and_smart_operational_filters(isolated_pm, tmp_path):
     app.state.select_all(["Alpha", "Beta", "GammaDirect"])
     app.h.on_bulk_toggle_pin()
     assert isolated_pm.profiles["Beta"].pinned is False
+
+
+def test_account_age_and_ban_days_tracking_and_dialog(isolated_pm):
+    from datetime import date, timedelta
+
+    from src.models.profile import (
+        compute_days_since,
+        format_date_dmy,
+        has_ban_page,
+        is_ban_page,
+        is_ban_status,
+        parse_flexible_date,
+        today_ymd,
+    )
+    from src.ui.components.profile_card import build_profile_card
+    from src.ui.dialogs import open_profile_dates_dialog
+
+    ref_today = date(2026, 10, 22)
+    assert parse_flexible_date("2026-10-10", today=ref_today) == "2026-10-10"
+    assert parse_flexible_date("10/10/2026", today=ref_today) == "2026-10-10"
+    assert parse_flexible_date("12", today=ref_today) == "2026-10-10"
+    assert parse_flexible_date("invalid-date", today=ref_today) is None
+    assert compute_days_since("2026-10-10", today=ref_today) == 12
+    assert format_date_dmy("2026-10-10") == "10/10/2026"
+    assert is_ban_status("hold") is True
+    assert is_ban_status("Banned") is True
+    assert is_ban_status("ready") is False
+    assert is_ban_page("Disconnected") is True
+    assert has_ban_page(["Live", "Disconnected"]) is True
+    assert has_ban_page(["Live"]) is False
+
+    # 1. New profile defaults created_at to today, banned_at to None
+    isolated_pm.add_profile("AccAge1", "http://1.2.3.4:8080", "windows", pages=["Live"])
+    p = isolated_pm.profiles["AccAge1"]
+    assert p.created_at == today_ymd()
+    assert p.banned_at is None
+
+    # 2. Moving to Disconnected page automatically records banned_at
+    isolated_pm.add_profiles_to_page("Disconnected", ["AccAge1"])
+    isolated_pm.remove_profiles_from_page("Live", ["AccAge1"])
+    assert p.banned_at == today_ymd()
+
+    # 3. Removing from Disconnected page clears banned_at
+    isolated_pm.remove_profiles_from_page("Disconnected", ["AccAge1"])
+    assert p.banned_at is None
+
+    # 4. Setting status to 'hold' sets banned_at; setting to 'ready' clears it
+    isolated_pm.bulk_update_status(["AccAge1"], "hold")
+    assert p.banned_at == today_ymd()
+    isolated_pm.bulk_update_status(["AccAge1"], "ready")
+    assert p.banned_at is None
+
+    # 5. Manual update via update_profile_dates (accepts days or DD/MM/YYYY)
+    ten_days_ago = (date.today() - timedelta(days=10)).isoformat()
+    four_days_ago = (date.today() - timedelta(days=4)).isoformat()
+    assert isolated_pm.update_profile_dates("AccAge1", "10", format_date_dmy(four_days_ago)) is True
+    assert p.created_at == ten_days_ago
+    assert p.banned_at == four_days_ago
+
+    # 6. Build profile card and verify age and ban badges render without error
+    clicked: list[str] = []
+    card = build_profile_card(
+        p,
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        device="1920x1080 · 8 CPU",
+        on_edit_dates=lambda n: clicked.append(n),
+    )
+    assert card is not None
+
+    # 7. Test open_profile_dates_dialog interaction
+    class FakePage:
+        def __init__(self):
+            self.dialogs = []
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+    fp = FakePage()
+    applied: list[tuple[str | None, str | None]] = []
+    open_profile_dates_dialog(
+        fp,  # type: ignore[arg-type]
+        profile_name="AccAge1",
+        created_at=p.created_at,
+        banned_at=p.banned_at,
+        on_apply=lambda c_ymd, b_ymd: applied.append((c_ymd, b_ymd)),
+    )
+    assert len(fp.dialogs) == 1
+    dlg = fp.dialogs[0]
+    save_btn = dlg.actions[1]
+    save_btn.on_click(None)
+    assert len(applied) == 1
+    assert applied[0] == (ten_days_ago, four_days_ago)

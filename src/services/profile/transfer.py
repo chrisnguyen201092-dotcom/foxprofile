@@ -6,7 +6,7 @@ from datetime import datetime
 
 from ...core.config import FINGERPRINT_FILE
 from ...core.logging import get_logger
-from ...models.profile import ENGINES, Profile
+from ...models.profile import ENGINES, Profile, parse_flexible_date
 from ...utils.validation import (
     valid_or_none,
     validate_color,
@@ -114,6 +114,8 @@ def import_from_zip(
                 else [],
                 status=valid_or_none(profile_data.get("status"), validate_status),
                 pinned=bool(profile_data.get("pinned", False)),
+                created_at=parse_flexible_date(profile_data.get("created_at")),
+                banned_at=parse_flexible_date(profile_data.get("banned_at")),
             )
 
             data_files = [f for f in zipf.namelist() if f.startswith("data/")]

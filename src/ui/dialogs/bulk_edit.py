@@ -7,8 +7,12 @@ import flet as ft
 from ...core.strings import get_string
 from ...models.profile import (
     PROFILE_COLORS,
+    compute_days_since,
+    format_date_dmy,
     get_active_status_tags,
+    parse_flexible_date,
     resolve_tag_label,
+    today_ymd,
 )
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import mask_proxy
@@ -739,6 +743,174 @@ def open_status_dialog(
                 icon=ft.Icons.CHECK,
                 style=ACCENT_STYLE,
                 on_click=lambda _: _pick((status_field.value or "").strip() or None),
+            ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+def open_profile_dates_dialog(
+    page: ft.Page,
+    profile_name: str,
+    created_at: str | None,
+    banned_at: str | None,
+    on_apply: Callable[[str | None, str | None], None],
+) -> None:
+    """Dialog to view/edit account creation date (age) and ban date."""
+    created_field = ft.TextField(
+        value=format_date_dmy(created_at) if created_at else format_date_dmy(today_ymd()),
+        hint_text=get_string("dates_hint_created"),
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    banned_field = ft.TextField(
+        value=format_date_dmy(banned_at) if banned_at else "",
+        hint_text=get_string("dates_hint_banned"),
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    created_preview = ft.Text("", size=11.5, font_family=FONT_MEDIUM, color=COLORS["text_sub"])
+    banned_preview = ft.Text("", size=11.5, font_family=FONT_MEDIUM, color=COLORS["error"])
+
+    def _update_previews(_: ft.ControlEvent | None = None) -> None:
+        created_field.error = None
+        banned_field.error = None
+        c_ymd = parse_flexible_date(created_field.value)
+        if c_ymd:
+            c_days = compute_days_since(c_ymd) or 0
+            created_preview.value = (
+                f"{get_string('age_days_badge', days=c_days)} ({format_date_dmy(c_ymd)})"
+            )
+            created_preview.color = COLORS["accent"]
+        else:
+            created_preview.value = ""
+
+        raw_b = (banned_field.value or "").strip()
+        b_ymd = parse_flexible_date(raw_b) if raw_b else None
+        if b_ymd:
+            b_days = compute_days_since(b_ymd) or 0
+            banned_preview.value = (
+                f"{get_string('ban_days_badge', days=b_days)} ({format_date_dmy(b_ymd)})"
+            )
+            banned_preview.color = COLORS["text_sub"]
+        else:
+            banned_preview.value = ""
+        with contextlib.suppress(Exception):
+            page.update()
+
+    created_field.on_change = _update_previews
+    banned_field.on_change = _update_previews
+    _update_previews()
+
+    def _set_banned_today(_: ft.ControlEvent) -> None:
+        banned_field.value = format_date_dmy(today_ymd())
+        _update_previews()
+
+    def _clear_banned(_: ft.ControlEvent) -> None:
+        banned_field.value = ""
+        _update_previews()
+
+    def _save(_: ft.ControlEvent) -> None:
+        raw_c = (created_field.value or "").strip()
+        c_ymd = parse_flexible_date(raw_c) if raw_c else today_ymd()
+        if raw_c and c_ymd is None:
+            created_field.error = get_string("validation_invalid_date")
+            page.update()
+            return
+        raw_b = (banned_field.value or "").strip()
+        b_ymd = parse_flexible_date(raw_b) if raw_b else None
+        if raw_b and b_ymd is None:
+            banned_field.error = get_string("validation_invalid_date")
+            page.update()
+            return
+        page.pop_dialog()
+        on_apply(c_ymd, b_ymd)
+
+    created_field.on_submit = _save
+    banned_field.on_submit = _save
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=12, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
+        title=ft.Text(
+            get_string("dates_dialog_title", name=profile_name),
+            size=18,
+            font_family=FONT_BOLD,
+            color=COLORS["text_main"],
+        ),
+        content=ft.Container(
+            width=440,
+            content=ft.Column(
+                spacing=8,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                get_string("created_date_label"),
+                                size=12.5,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_sub"],
+                            ),
+                            created_preview,
+                        ],
+                    ),
+                    created_field,
+                    ft.Container(height=4),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                get_string("banned_date_label"),
+                                size=12.5,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_sub"],
+                            ),
+                            banned_preview,
+                        ],
+                    ),
+                    banned_field,
+                    ft.Row(
+                        spacing=8,
+                        controls=[
+                            ft.OutlinedButton(
+                                get_string("mark_banned_today_btn"),
+                                icon=ft.Icons.BLOCK,
+                                height=32,
+                                style=OUTLINE_STYLE,
+                                on_click=_set_banned_today,
+                            ),
+                            ft.OutlinedButton(
+                                get_string("clear_banned_btn"),
+                                icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+                                height=32,
+                                style=OUTLINE_STYLE,
+                                on_click=_clear_banned,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ),
+        actions=[
+            ft.TextButton(
+                get_string("cancel"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            ft.Button(
+                get_string("save_changes"),
+                icon=ft.Icons.CHECK,
+                style=ACCENT_STYLE,
+                on_click=_save,
             ),
         ],
     )

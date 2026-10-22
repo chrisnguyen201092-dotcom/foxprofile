@@ -32,6 +32,7 @@ from .dialogs import (
     open_cooldown_settings_dialog,
     open_log_dialog,
     open_prelaunch_guard_dialog,
+    open_profile_dates_dialog,
     open_proxy_pool_dialog,
     open_session_history_dialog,
     open_status_dialog,
@@ -891,3 +892,23 @@ class AppHandlers:
         page = self._get_page()
         assert page is not None
         open_log_dialog(page, self._state.get_all_log_lines())
+
+    def on_edit_dates(self, name: str) -> None:
+        page = self._get_page()
+        assert page is not None
+        p = self._pm.profiles.get(name)
+        if p is None:
+            return
+
+        def _apply(created_at: str | None, banned_at: str | None) -> None:
+            if self._pm.update_profile_dates(name, created_at, banned_at):
+                self._log(get_string("dates_updated_log", name=name))
+                self._refresh()
+
+        open_profile_dates_dialog(
+            page,
+            profile_name=name,
+            created_at=getattr(p, "created_at", None),
+            banned_at=getattr(p, "banned_at", None),
+            on_apply=_apply,
+        )

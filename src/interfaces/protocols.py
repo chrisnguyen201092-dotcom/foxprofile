@@ -87,6 +87,13 @@ class IProfileManager(Protocol):
 
     def bulk_update_status(self, names: list[str], status: str | None) -> int: ...
 
+    def update_profile_dates(
+        self,
+        name: str,
+        created_at: str | None,
+        banned_at: str | None,
+    ) -> bool: ...
+
     def toggle_pin_profile(self, name: str) -> bool | None: ...
 
     def bulk_update_pinned(self, names: list[str], pinned: bool) -> int: ...
