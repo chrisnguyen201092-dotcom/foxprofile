@@ -66,6 +66,8 @@ def manage_cookies(
     pm: IProfileManager,
     bl: IBrowserLauncher,
     log: Callable[[str], None],
+    *,
+    on_session_history: Callable[[], None] | None = None,
 ) -> None:
     profile = pm.profiles.get(name)
     if not profile:
@@ -213,4 +215,5 @@ def manage_cookies(
         on_copy_clipboard=on_copy_clipboard,
         on_paste_clipboard=on_paste_clipboard,
         on_import_text=on_import_text,
+        on_session_history=on_session_history,
     )

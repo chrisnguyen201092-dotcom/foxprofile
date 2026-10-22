@@ -3,10 +3,14 @@ from collections.abc import Callable
 import flet as ft
 
 from ...core.strings import get_string
-from ...models.profile import PROFILE_COLORS
+from ...models.profile import (
+    PROFILE_COLORS,
+    get_active_status_tags,
+    resolve_tag_label,
+)
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import mask_proxy
-from ...utils.validation import validate_proxy_format
+from ...utils.validation import validate_proxy_format, validate_status
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
 
@@ -364,6 +368,381 @@ def open_bulk_proxy_dialog(
                 icon=ft.Icons.CHECK,
                 style=ACCENT_STYLE,
                 on_click=_save,
+            ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+_STATUS_PALETTE = (
+    "#16A34A",
+    "#2563EB",
+    "#7C3AED",
+    "#D97706",
+    "#DC2626",
+    "#06B6D4",
+    "#EC4899",
+    "#475569",
+)
+
+
+def open_status_dialog(
+    page: ft.Page,
+    title_text: str,
+    current_status: str | None,
+    on_apply: Callable[[str | None], None],
+    *,
+    on_save_tag: Callable[[str, str, str], bool] | None = None,
+    on_delete_tag: Callable[[str], bool] | None = None,
+    on_reset_tags: Callable[[], list[dict[str, str]]] | None = None,
+) -> None:
+    """Quick 1-click status picker + editable/deletable status tag manager."""
+    manage_mode: list[bool] = [False]
+    new_color: list[str] = [_STATUS_PALETTE[1]]
+
+    tags_now = get_active_status_tags()
+    known_codes = {
+        s.casefold()
+        for t in tags_now
+        for s in (t.get("code") or "", resolve_tag_label(t, get_string))
+        if s
+    }
+    init_custom = (
+        current_status
+        if current_status and current_status.strip().casefold() not in known_codes
+        else ""
+    )
+    status_field = ft.TextField(
+        value=init_custom,
+        hint_text=get_string("status_hint"),
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    err_text = ft.Text("", size=12, color=COLORS["error"], visible=False)
+    body_col = ft.Column(
+        spacing=10,
+        tight=True,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    manage_btn = ft.OutlinedButton(
+        get_string("status_manage_btn"),
+        icon=ft.Icons.EDIT_NOTE,
+        height=32,
+        style=OUTLINE_STYLE,
+    )
+
+    def _pick(val: str | None) -> None:
+        if val is not None:
+            ok, err = validate_status(val)
+            if not ok:
+                err_text.value = err
+                err_text.visible = True
+                page.update()
+                return
+            if on_save_tag is not None:
+                cur_tags = get_active_status_tags()
+                exists = any(
+                    val.casefold()
+                    in {
+                        (t.get("code") or "").casefold(),
+                        resolve_tag_label(t, get_string).casefold(),
+                    }
+                    for t in cur_tags
+                )
+                if not exists:
+                    on_save_tag("", val, new_color[0])
+        page.pop_dialog()
+        on_apply(val)
+
+    status_field.on_submit = lambda _: _pick((status_field.value or "").strip() or None)
+
+    def _cycle_new_color(_: ft.ControlEvent) -> None:
+        idx = (
+            _STATUS_PALETTE.index(new_color[0])
+            if new_color[0] in _STATUS_PALETTE
+            else 0
+        )
+        new_color[0] = _STATUS_PALETTE[(idx + 1) % len(_STATUS_PALETTE)]
+        _rebuild_body()
+        page.update()
+
+    def _toggle_manage(_: ft.ControlEvent) -> None:
+        manage_mode[0] = not manage_mode[0]
+        err_text.visible = False
+        manage_btn.content = ft.Text(
+            get_string("status_done_manage_btn")
+            if manage_mode[0]
+            else get_string("status_manage_btn")
+        )
+        _rebuild_body()
+        page.update()
+
+    manage_btn.on_click = _toggle_manage
+
+    def _rebuild_body() -> None:
+        active_tags = get_active_status_tags()
+        body_col.controls.clear()
+
+        if manage_mode[0]:
+            edit_rows: list[ft.Control] = []
+            for t in active_tags:
+                t_code = t.get("code") or ""
+                t_lbl = resolve_tag_label(t, get_string)
+                t_col = t.get("color") or "#0284C7"
+                row_color: list[str] = [t_col]
+                tf = ft.TextField(
+                    value=t_lbl,
+                    expand=True,
+                    **DLG_FIELD_KWARGS,
+                )
+
+                def _make_cycle_col(
+                    code_val: str = t_code,
+                    tf_ctrl: ft.TextField = tf,
+                    col_ref: list[str] = row_color,
+                ) -> Callable[[ft.ControlEvent], None]:
+                    def _cb(_: ft.ControlEvent) -> None:
+                        idx = (
+                            _STATUS_PALETTE.index(col_ref[0])
+                            if col_ref[0] in _STATUS_PALETTE
+                            else 0
+                        )
+                        col_ref[0] = _STATUS_PALETTE[(idx + 1) % len(_STATUS_PALETTE)]
+                        if on_save_tag is not None:
+                            on_save_tag(
+                                code_val,
+                                (tf_ctrl.value or "").strip() or code_val,
+                                col_ref[0],
+                            )
+                        _rebuild_body()
+                        page.update()
+
+                    return _cb
+
+                def _make_save_tag(
+                    code_val: str = t_code,
+                    tf_ctrl: ft.TextField = tf,
+                    col_ref: list[str] = row_color,
+                ) -> Callable[[ft.ControlEvent], None]:
+                    def _cb(_: ft.ControlEvent) -> None:
+                        new_lbl = (tf_ctrl.value or "").strip()
+                        ok, err = validate_status(new_lbl)
+                        if not new_lbl or not ok:
+                            err_text.value = err or get_string("validation_status_too_long")
+                            err_text.visible = True
+                            page.update()
+                            return
+                        if on_save_tag is not None:
+                            on_save_tag(code_val, new_lbl, col_ref[0])
+                        err_text.visible = False
+                        _rebuild_body()
+                        page.update()
+
+                    return _cb
+
+                def _make_del_tag(code_val: str = t_code) -> Callable[[ft.ControlEvent], None]:
+                    def _cb(_: ft.ControlEvent) -> None:
+                        if on_delete_tag is not None:
+                            on_delete_tag(code_val)
+                        _rebuild_body()
+                        page.update()
+
+                    return _cb
+
+                tf.on_submit = _make_save_tag()
+                edit_rows.append(
+                    ft.Row(
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                width=24,
+                                height=24,
+                                border_radius=12,
+                                bgcolor=row_color[0],
+                                ink=True,
+                                tooltip=get_string("bulk_set_color"),
+                                on_click=_make_cycle_col(),
+                            ),
+                            tf,
+                            ft.IconButton(
+                                icon=ft.Icons.CHECK,
+                                icon_size=18,
+                                width=32,
+                                height=32,
+                                padding=0,
+                                icon_color=COLORS["success"],
+                                tooltip=get_string("status_save_tooltip"),
+                                on_click=_make_save_tag(),
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                icon_size=18,
+                                width=32,
+                                height=32,
+                                padding=0,
+                                icon_color=COLORS["error"],
+                                tooltip=get_string("status_delete_tooltip"),
+                                on_click=_make_del_tag(),
+                            ),
+                        ],
+                    )
+                )
+
+            def _do_reset(_: ft.ControlEvent) -> None:
+                if on_reset_tags is not None:
+                    on_reset_tags()
+                _rebuild_body()
+                page.update()
+
+            body_col.controls.extend(
+                [
+                    ft.Column(
+                        spacing=8,
+                        height=min(260, max(90, len(edit_rows) * 52)),
+                        scroll=ft.ScrollMode.AUTO,
+                        controls=edit_rows,
+                    ),
+                    *(
+                        [
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.START,
+                                controls=[
+                                    ft.OutlinedButton(
+                                        get_string("status_reset_defaults"),
+                                        icon=ft.Icons.RESTORE,
+                                        height=32,
+                                        style=OUTLINE_STYLE,
+                                        on_click=_do_reset,
+                                    )
+                                ],
+                            )
+                        ]
+                        if on_reset_tags is not None
+                        else []
+                    ),
+                    err_text,
+                ]
+            )
+            return
+
+        preset_pills: list[ft.Control] = []
+        cur_low = (current_status or "").strip().casefold()
+        for t in active_tags:
+            code = t.get("code") or ""
+            lbl = resolve_tag_label(t, get_string)
+            hex_col = t.get("color") or "#0284C7"
+            is_active = bool(
+                cur_low and cur_low in {code.casefold(), lbl.casefold()}
+            )
+            preset_pills.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.14, hex_col)
+                    if is_active
+                    else COLORS["input_bg"],
+                    border=ft.Border.all(1.5 if is_active else 1, hex_col),
+                    ink=True,
+                    on_click=lambda _, c=code: _pick(c),
+                    content=ft.Row(
+                        spacing=6,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                width=8,
+                                height=8,
+                                border_radius=4,
+                                bgcolor=hex_col,
+                            ),
+                            ft.Text(
+                                lbl,
+                                size=12.5,
+                                font_family=FONT_SEMIBOLD,
+                                color=hex_col,
+                            ),
+                        ],
+                    ),
+                )
+            )
+
+        preset_pills.append(
+            ft.OutlinedButton(
+                get_string("status_clear"),
+                icon=ft.Icons.CLEAR,
+                height=34,
+                style=OUTLINE_STYLE,
+                on_click=lambda _: _pick(None),
+            )
+        )
+
+        body_col.controls.extend(
+            [
+                ft.Row(wrap=True, spacing=8, run_spacing=8, controls=preset_pills),
+                ft.Text(
+                    get_string("status_add_new_label"),
+                    size=12.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_sub"],
+                ),
+                ft.Row(
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            width=26,
+                            height=26,
+                            border_radius=13,
+                            bgcolor=new_color[0],
+                            ink=True,
+                            tooltip=get_string("bulk_set_color"),
+                            on_click=_cycle_new_color,
+                        ),
+                        status_field,
+                    ],
+                ),
+                err_text,
+            ]
+        )
+
+    _rebuild_body()
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
+        title=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    title_text,
+                    size=19,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                manage_btn,
+            ],
+        ),
+        content=ft.Container(
+            width=460,
+            content=body_col,
+        ),
+        actions=[
+            ft.TextButton(
+                get_string("cancel"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            ft.Button(
+                get_string("save_changes"),
+                icon=ft.Icons.CHECK,
+                style=ACCENT_STYLE,
+                on_click=lambda _: _pick((status_field.value or "").strip() or None),
             ),
         ],
     )

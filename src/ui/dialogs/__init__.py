@@ -1,11 +1,14 @@
 from .batch_and_backup import (
     open_backup_restore_dialog,
     open_batch_create_dialog,
+    open_proxy_pool_dialog,
+    open_session_history_dialog,
 )
 from .bulk_edit import (
     open_bulk_color_dialog,
     open_bulk_group_dialog,
     open_bulk_proxy_dialog,
+    open_status_dialog,
 )
 from .clone import open_clone_dialog
 from .confirm import open_confirm_dialog
@@ -38,5 +41,8 @@ __all__ = [
     "open_log_dialog",
     "open_prelaunch_guard_dialog",
     "open_profile_dialog",
+    "open_proxy_pool_dialog",
+    "open_session_history_dialog",
+    "open_status_dialog",
     "open_trash_dialog",
 ]

@@ -37,6 +37,12 @@ def _existing_groups(pm: IProfileManager) -> list[str]:
     return sorted({p.group for p in pm.profiles.values() if p.group}, key=str.casefold)
 
 
+def _unassigned_proxies(pm: IProfileManager) -> list[str]:
+    if hasattr(pm, "list_unassigned_proxies"):
+        return pm.list_unassigned_proxies()
+    return []
+
+
 def edit_profile(
     page: ft.Page,
     name: str,
@@ -61,6 +67,7 @@ def edit_profile(
         color: str | None = None,
         group: str | None = None,
         notes: str | None = None,
+        status: str | None = None,
     ) -> str | None:
         if new_name != original and bl.is_running(original):
             return get_string("stop_before_rename")
@@ -74,13 +81,21 @@ def edit_profile(
             color,
             group,
             notes,
+            new_status=status,
         ):
             log(get_string("updated_profile", old=original, new=new_name))
             refresh()
             return None
         return get_string("update_failed")
 
-    open_profile_dialog(page, ps, on_save, profile, existing_groups=_existing_groups(pm))
+    open_profile_dialog(
+        page,
+        ps,
+        on_save,
+        profile,
+        existing_groups=_existing_groups(pm),
+        unassigned_proxies=_unassigned_proxies(pm),
+    )
 
 
 def add_profile(
@@ -101,10 +116,22 @@ def add_profile(
         color: str | None = None,
         group: str | None = None,
         notes: str | None = None,
+        status: str | None = None,
     ) -> str | None:
         if engine == "chrome" and (reason := chrome_prefetch.unsupported_reason()):
             return get_string("chrome_engine_unsupported", reason=reason)
-        if pm.add_profile(name, proxy, os_type, timezone, locale, engine, color, group, notes):
+        if pm.add_profile(
+            name,
+            proxy,
+            os_type,
+            timezone,
+            locale,
+            engine,
+            color,
+            group,
+            notes,
+            status=status,
+        ):
             log(get_string("created_profile", name=name))
             if engine == "chrome":
                 chrome_prefetch.start(log)
@@ -118,4 +145,5 @@ def add_profile(
         on_save,
         existing_groups=_existing_groups(pm),
         on_batch_create=on_batch_create,
+        unassigned_proxies=_unassigned_proxies(pm),
     )

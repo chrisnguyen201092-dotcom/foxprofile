@@ -111,6 +111,7 @@ class MonitorService:
         self._log_history: dict[str, dict[str, Any]] = {}
         self._live_started_at: dict[str, dt.datetime] = {}
         self._live_stopped_at: dict[str, dt.datetime] = {}
+        self._live_sessions: dict[str, list[dict[str, Any]]] = {}
         self._disk_cache: dict[str, dict[str, Any]] = {}
         self._last_free_gb_ts: float = 0.0
         self._free_gb: float = 0.0
@@ -177,7 +178,51 @@ class MonitorService:
     def record_stopped(self, profile_name: str) -> None:
         now = dt.datetime.now()
         self._live_stopped_at[profile_name] = now
-        self._live_started_at.pop(profile_name, None)
+        start_dt = self._live_started_at.pop(profile_name, None)
+        if start_dt is not None:
+            dur = max(0.0, (now - start_dt).total_seconds())
+            self._live_sessions.setdefault(profile_name, []).append(
+                {
+                    "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                    "port": self._last_used_ports.get(profile_name, ""),
+                    "is_live": False,
+                }
+            )
+
+    def get_profile_sessions(self, profile_name: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Return recent browser sessions for `profile_name` (newest first)."""
+        hist = self._refresh_log_history()
+        h = hist.get(profile_name, {})
+        port = self._last_used_ports.get(profile_name, "")
+        merged: list[dict[str, Any]] = []
+        seen_starts: set[str] = set()
+        for s in list(h.get("sessions", [])) + list(self._live_sessions.get(profile_name, [])):
+            st = str(s.get("start", ""))
+            if st and st not in seen_starts:
+                seen_starts.add(st)
+                entry = dict(s)
+                if not entry.get("port") and port:
+                    entry["port"] = port
+                merged.append(entry)
+        merged.sort(key=lambda item: str(item.get("start", "")), reverse=True)
+
+        live_start = self._live_started_at.get(profile_name) or h.get("_open_start")
+        if live_start is not None and profile_name in self._live_started_at:
+            now = dt.datetime.now()
+            mins = max(0, int((now - live_start).total_seconds() // 60))
+            merged.insert(
+                0,
+                {
+                    "start": live_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end": "",
+                    "duration_mins": mins,
+                    "port": port,
+                    "is_live": True,
+                },
+            )
+        return merged[:limit]
 
     def _refresh_log_history(self) -> dict[str, dict[str, Any]]:
         if not self._log_dir.exists():
@@ -203,6 +248,7 @@ class MonitorService:
                     "last_closed": None,
                     "today_seconds": 0.0,
                     "_open_start": None,
+                    "sessions": [],
                 }
             return hist[pname]
 
@@ -235,8 +281,19 @@ class MonitorService:
                     ):
                         start_ts = h["_open_start"]
                         if start_ts is not None:
+                            dur = max(0.0, (ts - start_ts).total_seconds())
                             if ts_str.startswith(today_str):
-                                h["today_seconds"] += max(0.0, (ts - start_ts).total_seconds())
+                                h["today_seconds"] += dur
+                            if rest == "BROWSER_CLOSED":
+                                h["sessions"].append(
+                                    {
+                                        "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                        "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                        "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                                        "port": self._last_used_ports.get(pname, ""),
+                                        "is_live": False,
+                                    }
+                                )
                             h["_open_start"] = None
                         if rest == "BROWSER_CLOSED":
                             h["last_closed"] = ts
@@ -252,8 +309,18 @@ class MonitorService:
                     h = _ensure(pname)
                     start_ts = h["_open_start"]
                     if start_ts is not None:
+                        dur = max(0.0, (ts - start_ts).total_seconds())
                         if ts_str.startswith(today_str):
-                            h["today_seconds"] += max(0.0, (ts - start_ts).total_seconds())
+                            h["today_seconds"] += dur
+                        h["sessions"].append(
+                            {
+                                "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                                "port": self._last_used_ports.get(pname, ""),
+                                "is_live": False,
+                            }
+                        )
                         h["_open_start"] = None
                     h["last_closed"] = ts
 

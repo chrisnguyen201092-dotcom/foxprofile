@@ -10,7 +10,7 @@ from ..theme.colors import COLORS, FONT_MEDIUM, FONT_SEMIBOLD
 BulkCallbacks = dict[str, Callable[[], None]]
 
 _BULK_SHAPE = ft.RoundedRectangleBorder(radius=8)
-_BULK_PAD = ft.Padding.symmetric(horizontal=12, vertical=0)
+_BULK_PAD = ft.Padding.symmetric(horizontal=10, vertical=0)
 
 _BULK_PRIMARY_STYLE = ft.ButtonStyle(
     shape=_BULK_SHAPE,
@@ -21,7 +21,7 @@ _BULK_PRIMARY_STYLE = ft.ButtonStyle(
     },
     color="#FFFFFF",
     icon_color="#FFFFFF",
-    text_style=ft.TextStyle(font_family=FONT_SEMIBOLD, size=13),
+    text_style=ft.TextStyle(font_family=FONT_SEMIBOLD, size=12.5),
     padding=_BULK_PAD,
     elevation=0,
 )
@@ -32,7 +32,7 @@ _BULK_OUTLINE_STYLE = ft.ButtonStyle(
     bgcolor=COLORS["card_bg"],
     color=COLORS["text_main"],
     icon_color=COLORS["text_main"],
-    text_style=ft.TextStyle(font_family=FONT_MEDIUM, size=13),
+    text_style=ft.TextStyle(font_family=FONT_MEDIUM, size=12.5),
     padding=_BULK_PAD,
     elevation=0,
 )
@@ -88,6 +88,14 @@ def _build_container(
                 get_string("bulk_select_range", count=range_count),
                 ft.Icons.LOW_PRIORITY,
                 "select_range",
+            )
+        )
+    if "set_status" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_set_status"),
+                ft.Icons.LABEL_OUTLINE,
+                "set_status",
             )
         )
     if "set_group" in cbs:
@@ -150,7 +158,7 @@ def _build_container(
     return ft.Container(
         expand=True,
         bgcolor=COLORS["paper_sunk"],
-        padding=ft.Padding.symmetric(horizontal=14, vertical=9),
+        padding=ft.Padding.symmetric(horizontal=14, vertical=8),
         border=ft.Border.only(bottom=ft.BorderSide(1, COLORS["card_border"])),
         content=ft.Row(
             spacing=8,
@@ -158,16 +166,23 @@ def _build_container(
             controls=[
                 ft.Text(
                     get_string("selected_count", count=count),
-                    size=13.5,
+                    size=13,
                     font_family=FONT_SEMIBOLD,
                     color=COLORS["text_main"],
                 ),
-                ft.Container(width=6),
-                btn(get_string("launch"), ft.Icons.PLAY_ARROW_ROUNDED, "launch", primary=True),
-                btn(get_string("stop"), ft.Icons.STOP_ROUNDED, "stop"),
-                btn(get_string("delete"), ft.Icons.DELETE_OUTLINE, "delete"),
-                *extra_btns,
-                ft.Container(expand=True),
+                ft.Container(width=4),
+                ft.Row(
+                    spacing=6,
+                    expand=True,
+                    scroll=ft.ScrollMode.AUTO,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        btn(get_string("launch"), ft.Icons.PLAY_ARROW_ROUNDED, "launch", primary=True),
+                        btn(get_string("stop"), ft.Icons.STOP_ROUNDED, "stop"),
+                        btn(get_string("delete"), ft.Icons.DELETE_OUTLINE, "delete"),
+                        *extra_btns,
+                    ],
+                ),
                 ft.TextButton(
                     get_string("clear"),
                     on_click=lambda _: cbs["clear"](),

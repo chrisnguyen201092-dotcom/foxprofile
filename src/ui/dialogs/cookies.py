@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 import flet as ft
 
 from ...core.strings import get_string
-from ..theme.colors import COLORS
+from ..theme.colors import COLORS, FONT_BOLD, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
 
 
@@ -20,6 +20,7 @@ def open_cookie_dialog(
     on_copy_clipboard: Callable[[], Awaitable[None]] | None = None,
     on_paste_clipboard: Callable[[], Awaitable[None]] | None = None,
     on_import_text: Callable[[str], Awaitable[None]] | None = None,
+    on_session_history: Callable[[], None] | None = None,
 ) -> None:
     """Dialog for cookie export/import (live or offline), clipboard paste, and fingerprint reset."""
 
@@ -89,6 +90,11 @@ def open_cookie_dialog(
     def reset_fp(_: ft.ControlEvent) -> None:
         page.pop_dialog()
         on_reset_fingerprint()
+
+    def _open_hist(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_session_history is not None:
+            on_session_history()
 
     hint_key = "cookie_dialog_live_hint" if is_running else "cookie_dialog_hint"
     controls: list[ft.Control] = [
@@ -172,7 +178,7 @@ def open_cookie_dialog(
                     ft.Text(
                         get_string("cookie_paste_box_label"),
                         size=12.5,
-                        weight=ft.FontWeight.W_600,
+                        font_family=FONT_SEMIBOLD,
                         color=COLORS["text_sub"],
                     ),
                     ft.Row(
@@ -214,11 +220,30 @@ def open_cookie_dialog(
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
-        title=ft.Text(
-            get_string("cookie_dialog_title"),
-            size=20,
-            weight=ft.FontWeight.BOLD,
-            color=COLORS["text_main"],
+        title=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    get_string("cookie_dialog_title"),
+                    size=19,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                *(
+                    [
+                        ft.OutlinedButton(
+                            get_string("session_hist_btn"),
+                            icon=ft.Icons.HISTORY,
+                            height=32,
+                            style=OUTLINE_STYLE,
+                            on_click=_open_hist,
+                        )
+                    ]
+                    if on_session_history is not None
+                    else []
+                ),
+            ],
         ),
         content=ft.Container(
             width=560,

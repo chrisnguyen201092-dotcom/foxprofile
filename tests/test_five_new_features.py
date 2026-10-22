@@ -862,3 +862,272 @@ def test_keyboard_shortcuts_and_batch_backup_dialogs(isolated_pm, tmp_path):
     assert len(fake_page.dialogs) == 1
     fake_page.pop_dialog()
 
+
+def test_quick_status_badges_and_bulk_update_status(isolated_pm):
+    from src.core.strings import get_string
+    from src.models.profile import resolve_status_display
+
+    isolated_pm.add_profile("S1", "http://u:p@1.2.3.4:10001", "windows", status="ready")
+    isolated_pm.add_profile("S2", "http://u:p@1.2.3.4:10002", "windows")
+    assert isolated_pm.profiles["S1"].status == "ready"
+    disp = resolve_status_display("ready", get_string)
+    assert disp is not None and disp[0] == get_string("status_ready")
+
+    # Bulk update to custom status
+    cnt = isolated_pm.bulk_update_status(["S1", "S2"], "VIP Queue")
+    assert cnt == 2
+    assert isolated_pm.profiles["S1"].status == "VIP Queue"
+    assert isolated_pm.profiles["S2"].status == "VIP Queue"
+    custom_disp = resolve_status_display("VIP Queue", get_string)
+    assert custom_disp is not None and custom_disp[0] == "VIP Queue"
+
+    # Update profile preserves status when status is not explicitly changed
+    isolated_pm.update_profile(
+        "S1",
+        "S1",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        new_notes="hello",
+    )
+    assert isolated_pm.profiles["S1"].status == "VIP Queue"
+
+    # Clone profile preserves status
+    assert isolated_pm.clone_profile("S1", "S1 Clone")
+    assert isolated_pm.profiles["S1 Clone"].status == "VIP Queue"
+
+    # Too-long status (>32 chars) is rejected
+    assert isolated_pm.bulk_update_status(["S1"], "X" * 40) == 0
+    assert isolated_pm.profiles["S1"].status == "VIP Queue"
+
+    # Clear status
+    assert isolated_pm.bulk_update_status(["S1", "S2"], None) == 2
+    assert isolated_pm.profiles["S1"].status is None
+
+    # Edit default status tag ("ready" -> "Đã kháng", "#06B6D4")
+    isolated_pm.bulk_update_status(["S1"], "ready")
+    assert isolated_pm.save_status_tag("ready", "Đã kháng", "#06B6D4") is True
+    edited_disp = resolve_status_display(isolated_pm.profiles["S1"].status, get_string)
+    assert edited_disp == ("Đã kháng", "#06B6D4")
+
+    # Delete default status tag ("ready") -> removes tag and clears S1's status
+    assert isolated_pm.delete_status_tag("ready") is True
+    assert isolated_pm.profiles["S1"].status is None
+    assert not any(t["code"] == "ready" for t in isolated_pm.list_status_tags())
+
+    # Restore default status tags
+    restored = isolated_pm.reset_status_tags()
+    assert len(restored) == 5
+    assert any(t["code"] == "ready" for t in restored)
+
+
+def test_central_proxy_pool_replace_across_profiles(isolated_pm):
+    isolated_pm.add_profile("P1", "http://u:p@1.2.3.4:44200", "windows")
+    isolated_pm.add_profile("P2", "http://u:p@1.2.3.4:44200", "windows")
+    isolated_pm.add_profile("P3_Running", "http://u:p@1.2.3.4:44200", "windows")
+    isolated_pm.add_profile("P4_Other", "http://u:p@1.2.3.4:44300", "windows")
+
+    # Add unassigned (spare) proxies to the central proxy pool
+    added, skipped = isolated_pm.add_proxies_to_pool(
+        [
+            "1.2.3.4:44500:u:p",
+            "1.2.3.4:44501:u:p",
+            "http://u:p@1.2.3.4:44200",  # Already in use on P1 -> skipped
+            "invalid_proxy",
+        ]
+    )
+    assert added == 2
+    assert skipped == 2
+    unassigned = isolated_pm.list_unassigned_proxies()
+    assert len(unassigned) == 2
+    assert any(":44500" in px for px in unassigned)
+
+    # Removing 1 spare proxy from pool
+    assert isolated_pm.remove_proxy_from_pool(":44501") is True
+    assert len(isolated_pm.list_unassigned_proxies()) == 1
+
+    # Replace by port :44200 while skipping P3_Running
+    updated = isolated_pm.replace_proxy_across_profiles(
+        ":44200",
+        "http://u:p@9.9.9.9:55200",
+        skip_names={"P3_Running"},
+    )
+    assert updated == ["P1", "P2"]
+    assert isolated_pm.profiles["P1"].proxy == "http://u:p@9.9.9.9:55200"
+    assert isolated_pm.profiles["P2"].proxy == "http://u:p@9.9.9.9:55200"
+    assert isolated_pm.profiles["P3_Running"].proxy == "http://u:p@1.2.3.4:44200"
+    assert isolated_pm.profiles["P4_Other"].proxy == "http://u:p@1.2.3.4:44300"
+
+
+def test_csv_export_and_import_roundtrip_and_running_protection(isolated_pm, tmp_path):
+    isolated_pm.add_profile(
+        "CSV1",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Detroit",
+        locale="en-US",
+        color="#3B82F6",
+        group="TeamCSV",
+        notes="Initial note",
+        pages=["PageA"],
+        status="ready",
+    )
+    isolated_pm.add_profile(
+        "RunningProf",
+        "http://u:p@1.2.3.4:10002",
+        "windows",
+        notes="Do not touch",
+    )
+
+    csv_file = tmp_path / "profiles_export.csv"
+    exported = isolated_pm.export_profiles_csv(str(csv_file))
+    assert exported == 2
+    raw_text = csv_file.read_text(encoding="utf-8-sig")
+    assert "CSV1" in raw_text and "TeamCSV" in raw_text
+
+    # Append a new profile row and modify CSV1 + RunningProf in the CSV
+    lines = raw_text.strip().splitlines()
+    lines.append(
+        "CSV_New,working,GroupNew,PageB,http://u:p@1.2.3.4:10099,windows,America/Chicago,en-US,#22C55E,Added via CSV"
+    )
+    modified_csv = "\n".join(lines).replace("Initial note", "Updated via CSV").replace(
+        "Do not touch", "Should be skipped"
+    )
+    csv_file.write_text(modified_csv, encoding="utf-8-sig")
+
+    created, updated, skipped = isolated_pm.import_profiles_csv(
+        str(csv_file),
+        running_names={"RunningProf"},
+    )
+    assert created == 1
+    assert updated == 1
+    assert skipped == 1
+    assert "CSV_New" in isolated_pm.profiles
+    assert isolated_pm.profiles["CSV_New"].status == "working"
+    assert isolated_pm.profiles["CSV_New"].pages == ["PageB"]
+    assert isolated_pm.profiles["CSV1"].notes == "Updated via CSV"
+    # RunningProf was protected and NOT modified
+    assert isolated_pm.profiles["RunningProf"].notes == "Do not touch"
+
+
+def test_per_profile_session_history_and_new_dialogs(isolated_pm, tmp_path):
+    import flet as ft
+
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.ui.app import App
+
+    isolated_pm.add_profile(
+        "HistAcc",
+        "http://u:p@1.2.3.4:44200",
+        "windows",
+        status="working",
+    )
+
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    mon.record_started("HistAcc", "http://u:p@1.2.3.4:44200")
+    sessions_live = mon.get_profile_sessions("HistAcc")
+    assert len(sessions_live) == 1
+    assert sessions_live[0]["is_live"] is True
+    assert sessions_live[0]["port"] == ":44200"
+
+    mon.record_stopped("HistAcc")
+    sessions_done = mon.get_profile_sessions("HistAcc")
+    assert len(sessions_done) >= 1
+    assert sessions_done[0]["is_live"] is False
+    assert sessions_done[0]["duration_mins"] is not None
+
+    class FakeBL:
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def running_count(self):
+            return 0
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+            self.services = []
+            self.dialogs = []
+            self.title = ""
+            self.theme_mode = None
+            self.padding = 0
+            self.bgcolor = ""
+            self.window = type(
+                "W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600}
+            )()
+            self.fonts = {}
+            self.theme = None
+            self.on_keyboard_event = None
+
+        def add(self, *ctrls):
+            self.controls.extend(ctrls)
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            dlg.open = True
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                d = self.dialogs.pop()
+                d.open = False
+
+        def run_task(self, coro_fn, *args):
+            pass
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+
+    app = App(c)
+    app.monitor = mon
+    app.h._monitor = mon
+    fake_page = FakePage()
+    app.page = fake_page  # type: ignore[assignment]
+    app._file_picker = ft.FilePicker()
+    app.clipboard = ft.Clipboard()
+    fake_page.services.extend([app._file_picker, app.clipboard])
+    app._build_ui()
+
+    # Filter by status:working
+    app._on_filter("status:working")
+    all_p, _, _ = app._get_page_profiles()
+    assert len(all_p) == 1 and all_p[0].name == "HistAcc"
+    app._clear_filters()
+
+    # Open single-profile status dialog
+    app.h.on_set_status("HistAcc")
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    # Open bulk status dialog
+    app.h.on_select_all_page()
+    app.h.on_bulk_set_status()
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    # Open Proxy Pool dialog
+    app.h.on_open_proxy_pool()
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    # Open Session History dialog
+    app.h.on_open_session_history("HistAcc")
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+

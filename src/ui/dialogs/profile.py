@@ -6,8 +6,15 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...interfaces.protocols import IProxyService
-from ...models.profile import PROFILE_COLOR_PALETTES, Profile
+from ...models.profile import (
+    PROFILE_COLOR_PALETTES,
+    Profile,
+    get_active_status_tags,
+    resolve_tag_label,
+)
+from ...services.monitor import extract_proxy_port
 from ...services.proxy.geo_check import GeoCheckResult, check_geo
+from ...utils.proxy_parser import mask_proxy
 from ...utils.validation import (
     validate_color,
     validate_group,
@@ -29,6 +36,7 @@ def open_profile_dialog(
     profile: Profile | None = None,
     existing_groups: list[str] | None = None,
     on_batch_create: Callable[[], None] | None = None,
+    unassigned_proxies: list[str] | None = None,
 ) -> None:
     is_edit = profile is not None
     title = get_string("edit_profile") if is_edit else get_string("create_new_profile")
@@ -54,8 +62,8 @@ def open_profile_dialog(
         value=(profile.notes or "") if profile is not None else "",
         hint_text=get_string("notes_hint"),
         multiline=True,
-        min_lines=2,
-        max_lines=3,
+        min_lines=1,
+        max_lines=2,
         **DLG_FIELD_KWARGS,
     )
 
@@ -94,6 +102,48 @@ def open_profile_dialog(
         text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
+
+    def _pick_spare_proxy(px: str) -> None:
+        proxy_field.value = px
+        page.update()
+
+    spare_proxies_row: ft.Control | None = None
+    if unassigned_proxies:
+        spare_proxies_row = ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("profile_pick_spare_proxy", count=len(unassigned_proxies)),
+                    size=11.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_sub"],
+                ),
+                ft.Row(
+                    spacing=6,
+                    wrap=True,
+                    run_spacing=6,
+                    controls=[
+                        ft.Container(
+                            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                            border_radius=5,
+                            bgcolor=COLORS["input_bg"],
+                            border=ft.Border.all(1, COLORS["accent"]),
+                            ink=True,
+                            tooltip=mask_proxy(sp),
+                            on_click=lambda _, s=sp: _pick_spare_proxy(s),
+                            content=ft.Text(
+                                extract_proxy_port(sp) or mask_proxy(sp),
+                                size=11.5,
+                                font_family=FONT_DATA,
+                                color=COLORS["accent"],
+                            ),
+                        )
+                        for sp in unassigned_proxies[:10]
+                    ],
+                ),
+            ],
+        )
     os_dropdown = build_os_dropdown(
         profile.os_type if profile is not None else "windows",
     )
@@ -342,6 +392,64 @@ def open_profile_dialog(
 
     _rebuild_color_section()
 
+    selected_status: list[str | None] = [profile.status if profile is not None else None]
+    status_section = ft.Row(spacing=6, wrap=True, run_spacing=6)
+
+    def _pick_status_form(code: str | None) -> None:
+        if code is not None and selected_status[0] and selected_status[0].lower() == code.lower():
+            selected_status[0] = None
+        else:
+            selected_status[0] = code
+        _rebuild_status_section()
+        page.update()
+
+    def _rebuild_status_section() -> None:
+        cur_st = (selected_status[0] or "").strip().lower()
+        pills: list[ft.Control] = [
+            ft.Container(
+                height=28,
+                padding=ft.Padding.symmetric(horizontal=9),
+                border_radius=6,
+                bgcolor=COLORS["sidebar"] if not cur_st else COLORS["card_bg"],
+                border=ft.Border.all(1, COLORS["sidebar"] if not cur_st else COLORS["rule_strong"]),
+                alignment=ft.Alignment(0, 0),
+                ink=True,
+                on_click=lambda _: _pick_status_form(None),
+                content=ft.Text(
+                    get_string("color_default"),
+                    size=11.5,
+                    font_family=FONT_MEDIUM,
+                    color=COLORS["cover_ink"] if not cur_st else COLORS["text_main"],
+                ),
+            )
+        ]
+        for t in get_active_status_tags():
+            code = t.get("code") or ""
+            lbl = resolve_tag_label(t, get_string)
+            hex_col = t.get("color") or "#0284C7"
+            is_act = bool(cur_st and cur_st in {code.casefold(), lbl.casefold()})
+            pills.append(
+                ft.Container(
+                    height=28,
+                    padding=ft.Padding.symmetric(horizontal=9),
+                    border_radius=6,
+                    bgcolor=ft.Colors.with_opacity(0.14, hex_col) if is_act else COLORS["card_bg"],
+                    border=ft.Border.all(1.5 if is_act else 1, hex_col),
+                    alignment=ft.Alignment(0, 0),
+                    ink=True,
+                    on_click=lambda _, c=code: _pick_status_form(c),
+                    content=ft.Text(
+                        lbl,
+                        size=11.5,
+                        font_family=FONT_SEMIBOLD if is_act else FONT_MEDIUM,
+                        color=hex_col,
+                    ),
+                )
+            )
+        status_section.controls = pills
+
+    _rebuild_status_section()
+
     geo_error = ft.Text("", size=12, color=COLORS["error"], visible=False)
     # The Check IP report is the only part that can grow; it scrolls on its own
     # so the dialog keeps its height on short windows.
@@ -414,17 +522,31 @@ def open_profile_dialog(
                 page.update()
                 return
 
-        error = on_save(
-            name,
-            proxy,
-            os_type,
-            timezone,
-            locale,
-            engine,
-            selected_color[0],
-            group or None,
-            notes or None,
-        )
+        try:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+            )
+        except TypeError:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+            )
         if error:
             name_error.value = error
             name_error.visible = True
@@ -502,6 +624,7 @@ def open_profile_dialog(
                     *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
                     _field(get_string("notes_optional"), notes_field),
+                    _field(get_string("status_optional"), status_section),
                     _field(get_string("profile_color"), color_section),
                     ft.Row(
                         spacing=12,
@@ -525,6 +648,7 @@ def open_profile_dialog(
                     _field(
                         get_string("proxy_optional"), proxy_field, get_string("proxy_format_hint")
                     ),
+                    *([spare_proxies_row] if spare_proxies_row is not None else []),
                     ft.Row(spacing=8, controls=[check_btn, ip_btn]),
                     proxy_error,
                     ft.Row(
@@ -570,12 +694,12 @@ _WARN_TINT = COLORS["warn_tint"]
 def _field(label: str, control: ft.Control, hint: str | None = None) -> ft.Column:
     """A label set above its field, with an optional hint below, as in the web panel."""
     return ft.Column(
-        spacing=6,
+        spacing=4,
         tight=True,
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         controls=[
             ft.Container(
-                padding=ft.Padding.only(top=10),
+                padding=ft.Padding.only(top=6),
                 content=ft.Text(
                     label, size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"]
                 ),

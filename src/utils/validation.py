@@ -56,6 +56,18 @@ def validate_notes(value: str) -> tuple[bool, str]:
     return True, ""
 
 
+def validate_status(value: str) -> tuple[bool, str]:
+    """Optional quick status tag for a profile (up to 32 characters, no control chars)."""
+    if not value:
+        return True, ""
+    if len(value) > 32:
+        return False, get_string("validation_status_too_long")
+    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
+    if found_control:
+        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    return True, ""
+
+
 def validate_profile_name(name: str) -> tuple[bool, str]:
     if not name:
         return False, get_string("validation_empty_name")

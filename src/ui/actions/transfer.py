@@ -12,17 +12,26 @@ async def import_profile(
     pm: IProfileManager,
     log: Callable[[str], None],
     refresh: Callable[[], None],
+    running_names: set[str] | None = None,
 ) -> None:
     files = await file_picker.pick_files(
         allow_multiple=True,
-        allowed_extensions=["zip"],
+        file_type=ft.FilePickerFileType.CUSTOM,
+        allowed_extensions=["zip", "csv"],
         dialog_title=get_string("import_profile"),
     )
     if not files:
         return
     ok_count = 0
     for f in files:
-        if f.path:
+        if not f.path:
+            continue
+        if f.path.lower().endswith(".csv") and hasattr(pm, "import_profiles_csv"):
+            c, u, s = pm.import_profiles_csv(f.path, running_names=running_names)
+            log(get_string("csv_imported_log", created=c, updated=u, skipped=s))
+            if c or u:
+                ok_count += 1
+        else:
             success, result = pm.import_profile(f.path)
             if success:
                 ok_count += 1
@@ -53,10 +62,16 @@ def export_profile(
             else:
                 log(get_string("export_error", error=result))
 
+    def on_csv_complete(names: list[str], csv_path: str) -> None:
+        if hasattr(pm, "export_profiles_csv"):
+            cnt = pm.export_profiles_csv(csv_path, names=names)
+            log(get_string("csv_exported_log", count=cnt, file=csv_path))
+
     open_export_dialog(
         page,
         file_picker,
         profiles,
         on_complete,
         preselected_names=preselected_names,
+        on_export_csv=on_csv_complete,
     )

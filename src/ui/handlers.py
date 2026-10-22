@@ -32,6 +32,9 @@ from .dialogs import (
     open_cooldown_settings_dialog,
     open_log_dialog,
     open_prelaunch_guard_dialog,
+    open_proxy_pool_dialog,
+    open_session_history_dialog,
+    open_status_dialog,
     open_trash_dialog,
 )
 from .refs import UIRefs
@@ -145,7 +148,143 @@ class AppHandlers:
         page = self._get_page()
         refs = self._get_refs()
         assert page is not None and refs is not None
-        manage_cookies(page, name, refs.file_picker, self._pm, self._bl, self._log)
+        manage_cookies(
+            page,
+            name,
+            refs.file_picker,
+            self._pm,
+            self._bl,
+            self._log,
+            on_session_history=lambda: self.on_open_session_history(name),
+        )
+
+    def on_open_session_history(self, name: str) -> None:
+        page = self._get_page()
+        if page is None or self._monitor is None:
+            return
+        sessions = self._monitor.get_profile_sessions(name)
+        snap = self._monitor.snapshot(
+            self._pm.list_profiles(),
+            self._bl.running_profile_names() | set(self._state.loading),
+        )
+        info = snap.profiles.get(name)
+        today_mins = info.today_minutes if info is not None else 0
+        last_port = (info.last_used_port or info.port) if info is not None else ""
+        open_session_history_dialog(
+            page,
+            name,
+            sessions,
+            today_mins=today_mins,
+            last_port=last_port,
+        )
+
+    def _status_tag_callbacks(self) -> dict:
+        def _save_tag(code_or_new: str, label: str, color: str) -> bool:
+            ok = self._pm.save_status_tag(code_or_new, label, color)
+            if ok:
+                self._refresh()
+            return ok
+
+        def _del_tag(code: str) -> bool:
+            ok = self._pm.delete_status_tag(code)
+            if ok:
+                self._refresh()
+            return ok
+
+        def _reset_tags() -> list[dict[str, str]]:
+            res = self._pm.reset_status_tags()
+            self._refresh()
+            return res
+
+        return {
+            "on_save_tag": _save_tag,
+            "on_delete_tag": _del_tag,
+            "on_reset_tags": _reset_tags,
+        }
+
+    def on_set_status(self, name: str) -> None:
+        page = self._get_page()
+        p = self._pm.profiles.get(name)
+        if page is None or p is None:
+            return
+
+        def _apply(st: str | None) -> None:
+            cnt = self._pm.bulk_update_status([name], st)
+            self._log(get_string("bulk_status_updated", count=cnt))
+            self._refresh()
+
+        open_status_dialog(
+            page,
+            get_string("status_single_title", name=name),
+            p.status,
+            _apply,
+            **self._status_tag_callbacks(),
+        )
+
+    def on_open_proxy_pool(self) -> None:
+        page = self._get_page()
+        if page is None:
+            return
+
+        def _get_running() -> set[str]:
+            return self._bl.running_profile_names() | set(self._state.loading)
+
+        def _replace(old_target: str, new_proxy: str) -> tuple[bool, str]:
+            updated = self._pm.replace_proxy_across_profiles(
+                old_target,
+                new_proxy,
+                skip_names=_get_running(),
+            )
+            if not updated:
+                return False, get_string("validation_invalid_proxy")
+            for pname in updated:
+                self._state.proxy_status.pop(pname, None)
+            msg = get_string(
+                "proxy_pool_replaced_log",
+                count=len(updated),
+                names=", ".join(updated),
+            )
+            self._log(msg)
+            self._refresh()
+            return True, msg
+
+        def _add_to_pool(lines: list[str]) -> tuple[int, int]:
+            added, skipped = self._pm.add_proxies_to_pool(lines)
+            if added:
+                self._log(get_string("proxy_pool_added_log", added=added, skipped=skipped))
+                self._refresh()
+            return added, skipped
+
+        def _remove_from_pool(px: str) -> bool:
+            ok = self._pm.remove_proxy_from_pool(px)
+            if ok:
+                self._refresh()
+            return ok
+
+        def _assign_to_profile(prof_name: str, px: str) -> bool:
+            if self._bl.is_running(prof_name) or self._state.is_loading(prof_name):
+                return False
+            cnt = self._pm.bulk_update_proxies({prof_name: px})
+            if cnt > 0:
+                self._state.proxy_status.pop(prof_name, None)
+                self._log(get_string("quick_saved_proxy", name=prof_name))
+                self._refresh()
+                return True
+            return False
+
+        open_proxy_pool_dialog(
+            page,
+            self._pm.list_profiles,
+            _get_running,
+            lambda: dict(self._state.proxy_status),
+            self.on_bulk_check_proxy,
+            self.on_quick_check_proxy,
+            _replace,
+            get_unassigned=self._pm.list_unassigned_proxies,
+            on_add_to_pool=_add_to_pool,
+            on_remove_from_pool=_remove_from_pool,
+            on_assign_to_profile=_assign_to_profile,
+        )
 
     def on_clone(self, name: str) -> None:
         page = self._get_page()
@@ -418,7 +557,13 @@ class AppHandlers:
     async def on_import(self, _: ft.ControlEvent | None = None) -> None:
         refs = self._get_refs()
         assert refs is not None
-        await import_profile(refs.file_picker, self._pm, self._log, self._refresh)
+        await import_profile(
+            refs.file_picker,
+            self._pm,
+            self._log,
+            self._refresh,
+            running_names=self._bl.running_profile_names() | set(self._state.loading),
+        )
 
     def on_export_open(self) -> None:
         page = self._get_page()
@@ -530,6 +675,33 @@ class AppHandlers:
     def on_bulk_stop(self) -> None:
         if names := list(self._state.selected_names()):
             bulk_stop_profiles(names, self._pm, self._bl, self._state, self._log)
+
+    def on_bulk_set_status(self) -> None:
+        page = self._get_page()
+        assert page is not None
+        selected = list(self._state.selected_names())
+        if not selected:
+            return
+        cur_statuses = {
+            self._pm.profiles[n].status
+            for n in selected
+            if n in self._pm.profiles
+        }
+        cur_status = next(iter(cur_statuses)) if len(cur_statuses) == 1 else None
+
+        def _apply(st: str | None) -> None:
+            cnt = self._pm.bulk_update_status(selected, st)
+            self._log(get_string("bulk_status_updated", count=cnt))
+            self._state.clear_selection()
+            self._refresh()
+
+        open_status_dialog(
+            page,
+            get_string("bulk_status_title", count=len(selected)),
+            cur_status,
+            _apply,
+            **self._status_tag_callbacks(),
+        )
 
     def on_bulk_set_group(self) -> None:
         page = self._get_page()

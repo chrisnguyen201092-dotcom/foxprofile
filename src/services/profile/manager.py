@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import json
 import os
 import pathlib
@@ -8,7 +9,14 @@ import time
 
 from ...core.config import DATA_DIR, PROFILES_FILE
 from ...core.logging import get_logger
-from ...models.profile import ENGINES, Profile
+from ...models.profile import (
+    ENGINES,
+    Profile,
+    default_status_tags,
+    set_active_status_tags,
+)
+from ...services.monitor import extract_proxy_port
+from ...utils.proxy_parser import normalize_proxy
 from ...utils.validation import (
     valid_or_none,
     validate_color,
@@ -17,6 +25,7 @@ from ...utils.validation import (
     validate_notes,
     validate_profile_name,
     validate_proxy_format,
+    validate_status,
     validate_timezone,
 )
 from .transfer import export_to_zip, import_from_zip, read_profile_meta
@@ -60,6 +69,9 @@ class ProfileManager:
         self._lock = threading.RLock()
         self.profiles: dict[str, Profile] = {}
         self.custom_pages: list[str] = []
+        self.proxy_pool: list[str] = []
+        self.status_tags: list[dict[str, str]] = default_status_tags()
+        set_active_status_tags(self.status_tags)
         self._load_profiles()
         pathlib.Path(DATA_DIR).mkdir(exist_ok=True, parents=True)
 
@@ -90,6 +102,37 @@ class ProfileManager:
     @staticmethod
     def _pages_file() -> pathlib.Path:
         return pathlib.Path(PROFILES_FILE).with_name("custom_pages.json")
+
+    @staticmethod
+    def _proxy_pool_file() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).with_name("proxy_pool.json")
+
+    @staticmethod
+    def _status_tags_file() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).with_name("status_tags.json")
+
+    def _save_status_tags(self) -> None:
+        st_path = self._status_tags_file()
+        tmp = st_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(self.status_tags, indent=2), encoding="utf-8")
+            _replace(tmp, st_path)
+            set_active_status_tags(self.status_tags)
+        except Exception as e:
+            logger.exception("Error saving status tags: %s", e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+
+    def _save_proxy_pool(self) -> None:
+        pool_path = self._proxy_pool_file()
+        tmp = pool_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(self.proxy_pool, indent=2), encoding="utf-8")
+            _replace(tmp, pool_path)
+        except Exception as e:
+            logger.exception("Error saving proxy pool: %s", e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _trash_file() -> pathlib.Path:
@@ -144,6 +187,39 @@ class ProfileManager:
                 raw_pages = json.loads(pages_path.read_text(encoding="utf-8"))
                 self.custom_pages = _clean_pages(raw_pages)
 
+        pool_path = self._proxy_pool_file()
+        if pool_path.exists():
+            with contextlib.suppress(Exception):
+                raw_pool = json.loads(pool_path.read_text(encoding="utf-8"))
+                if isinstance(raw_pool, list):
+                    seen_px: set[str] = set()
+                    clean_pool: list[str] = []
+                    for item in raw_pool:
+                        if isinstance(item, str) and item.strip() and validate_proxy_format(item.strip())[0]:
+                            norm = normalize_proxy(item.strip())
+                            if norm not in seen_px:
+                                seen_px.add(norm)
+                                clean_pool.append(norm)
+                    self.proxy_pool = clean_pool
+
+        st_path = self._status_tags_file()
+        if st_path.exists():
+            with contextlib.suppress(Exception):
+                raw_tags = json.loads(st_path.read_text(encoding="utf-8"))
+                if isinstance(raw_tags, list):
+                    clean_tags: list[dict[str, str]] = []
+                    for item in raw_tags:
+                        if isinstance(item, dict):
+                            code = str(item.get("code") or "").strip()
+                            label = str(item.get("label") or "").strip()
+                            color = str(item.get("color") or "#0284C7").strip()
+                            if code and validate_status(label or code)[0]:
+                                if not validate_color(color)[0]:
+                                    color = "#0284C7"
+                                clean_tags.append({"code": code, "label": label, "color": color})
+                    self.status_tags = clean_tags
+                    set_active_status_tags(self.status_tags)
+
         if pathlib.Path(PROFILES_FILE).exists():
             try:
                 with pathlib.Path(PROFILES_FILE).open(encoding="utf-8") as f:
@@ -170,6 +246,7 @@ class ProfileManager:
                             "group": valid_or_none(p_data.get("group"), validate_group),
                             "notes": valid_or_none(p_data.get("notes"), validate_notes),
                             "pages": [self._find_page_by_casefold(pg) or pg for pg in pages],
+                            "status": valid_or_none(p_data.get("status"), validate_status),
                         }
                         self.profiles[name] = Profile(**clean_data)
                 logger.info("Loaded %d profiles", len(self.profiles))
@@ -229,6 +306,7 @@ class ProfileManager:
         group: str | None = None,
         notes: str | None = None,
         pages: list[str] | None = None,
+        status: str | None = None,
     ) -> bool:
         with self._lock:
             if self._find_by_casefold(name) is not None:
@@ -251,6 +329,7 @@ class ProfileManager:
                 group=group or None,
                 notes=notes or None,
                 pages=self._register_pages(pages),
+                status=valid_or_none(status, validate_status),
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -503,6 +582,7 @@ class ProfileManager:
                 group=src.group,
                 notes=src.notes,
                 pages=list(src.pages),
+                status=src.status,
             )
 
     def trash_profile(self, name: str) -> bool:
@@ -572,6 +652,7 @@ class ProfileManager:
                 group=valid_or_none(p_data.get("group"), validate_group),
                 notes=valid_or_none(p_data.get("notes"), validate_notes),
                 pages=pages,
+                status=valid_or_none(p_data.get("status"), validate_status),
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -633,6 +714,370 @@ class ProfileManager:
             if count:
                 self.save_profiles()
         return count
+
+    def bulk_update_status(self, names: list[str], status: str | None) -> int:
+        clean_status = (status or "").strip() or None
+        if clean_status is not None and not validate_status(clean_status)[0]:
+            return 0
+        count = 0
+        with self._lock:
+            for name in names:
+                p = self.profiles.get(name)
+                if p is not None:
+                    p.status = clean_status
+                    count += 1
+            if count:
+                self.save_profiles()
+        return count
+
+    def list_status_tags(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [dict(t) for t in self.status_tags]
+
+    def save_status_tag(self, code_or_new: str, label: str, color: str) -> bool:
+        clean_label = (label or "").strip()
+        if not clean_label or not validate_status(clean_label)[0]:
+            return False
+        clean_color = (color or "").strip()
+        if not clean_color.startswith("#"):
+            clean_color = f"#{clean_color}"
+        if not validate_color(clean_color)[0]:
+            clean_color = "#0284C7"
+        target_code = (code_or_new or "").strip()
+        with self._lock:
+            for tag in self.status_tags:
+                if target_code and tag["code"].casefold() == target_code.casefold():
+                    old_code = tag["code"]
+                    old_label = tag.get("label") or ""
+                    tag["label"] = clean_label
+                    tag["color"] = clean_color.upper()
+                    # Also update profiles that stored old_label as custom string
+                    changed_prof = False
+                    for p in self.profiles.values():
+                        if p.status and p.status.casefold() in {
+                            old_code.casefold(),
+                            old_label.casefold(),
+                        } - {""}:
+                            p.status = old_code
+                            changed_prof = True
+                    self._save_status_tags()
+                    if changed_prof:
+                        self.save_profiles()
+                    return True
+            # Check duplicate by label/code
+            if any(
+                t["code"].casefold() == clean_label.casefold()
+                or (t.get("label") or "").casefold() == clean_label.casefold()
+                for t in self.status_tags
+            ):
+                return False
+            self.status_tags.append(
+                {
+                    "code": clean_label,
+                    "label": clean_label,
+                    "color": clean_color.upper(),
+                }
+            )
+            self._save_status_tags()
+            return True
+
+    def delete_status_tag(self, code: str) -> bool:
+        target = (code or "").strip().casefold()
+        if not target:
+            return False
+        with self._lock:
+            removed_tags = [
+                t
+                for t in self.status_tags
+                if t["code"].casefold() == target
+                or (t.get("label") or "").casefold() == target
+            ]
+            if not removed_tags:
+                return False
+            removed_keys = {
+                s.casefold()
+                for t in removed_tags
+                for s in (t["code"], t.get("label") or "")
+                if s
+            }
+            self.status_tags = [
+                t
+                for t in self.status_tags
+                if t["code"].casefold() != target
+                and (t.get("label") or "").casefold() != target
+            ]
+            self._save_status_tags()
+            cleared = False
+            for p in self.profiles.values():
+                if p.status and p.status.strip().casefold() in removed_keys:
+                    p.status = None
+                    cleared = True
+            if cleared:
+                self.save_profiles()
+            return True
+
+    def reset_status_tags(self) -> list[dict[str, str]]:
+        with self._lock:
+            self.status_tags = default_status_tags()
+            self._save_status_tags()
+            return [dict(t) for t in self.status_tags]
+
+    def replace_proxy_across_profiles(
+        self,
+        old_proxy_or_port: str,
+        new_proxy: str | None,
+        *,
+        skip_names: set[str] | None = None,
+    ) -> list[str]:
+        """Replace a proxy (matched by exact string or by port) across all attached profiles."""
+        target = (old_proxy_or_port or "").strip()
+        if not target:
+            return []
+        clean_new = (new_proxy or "").strip()
+        if clean_new:
+            ok, _ = validate_proxy_format(clean_new)
+            if not ok:
+                return []
+            clean_new = normalize_proxy(clean_new)
+        target_port = target if target.startswith(":") else extract_proxy_port(target)
+        skipped = set(skip_names or ())
+        updated: list[str] = []
+        with self._lock:
+            for name, p in self.profiles.items():
+                if name in skipped:
+                    continue
+                cur = (p.proxy or "").strip()
+                if not cur:
+                    continue
+                cur_port = extract_proxy_port(cur)
+                if cur == target or (target_port and cur_port == target_port):
+                    p.proxy = clean_new or None
+                    updated.append(name)
+            if updated:
+                self.proxy_pool = [
+                    px
+                    for px in self.proxy_pool
+                    if px != target
+                    and (not target_port or extract_proxy_port(px) != target_port)
+                ]
+                pool_path = self._proxy_pool_file()
+                if self.proxy_pool or pool_path.exists():
+                    self._save_proxy_pool()
+                self.save_profiles()
+        return updated
+
+    def list_proxy_pool(self) -> list[str]:
+        with self._lock:
+            return list(self.proxy_pool)
+
+    def list_unassigned_proxies(self) -> list[str]:
+        """Return proxies in the saved pool that are not currently assigned to any profile."""
+        with self._lock:
+            used_exact: set[str] = set()
+            used_ports: set[str] = set()
+            for p in self.profiles.values():
+                cur = (p.proxy or "").strip()
+                if cur:
+                    used_exact.add(normalize_proxy(cur))
+                    port = extract_proxy_port(cur)
+                    if port:
+                        used_ports.add(port)
+            return [
+                px
+                for px in self.proxy_pool
+                if px not in used_exact
+                and (not extract_proxy_port(px) or extract_proxy_port(px) not in used_ports)
+            ]
+
+    def add_proxies_to_pool(self, raw_lines: list[str]) -> tuple[int, int]:
+        """Validate, normalize, and add new proxies to the central proxy pool."""
+        added = 0
+        skipped = 0
+        with self._lock:
+            existing: set[str] = set(self.proxy_pool)
+            existing_ports: set[str] = {
+                extract_proxy_port(px) for px in self.proxy_pool if extract_proxy_port(px)
+            }
+            for p in self.profiles.values():
+                cur = (p.proxy or "").strip()
+                if cur:
+                    existing.add(normalize_proxy(cur))
+                    port = extract_proxy_port(cur)
+                    if port:
+                        existing_ports.add(port)
+            for line in raw_lines:
+                s = (line or "").strip()
+                if not s:
+                    continue
+                if not validate_proxy_format(s)[0]:
+                    skipped += 1
+                    continue
+                norm = normalize_proxy(s)
+                port = extract_proxy_port(norm)
+                if norm in existing or (port and port in existing_ports):
+                    skipped += 1
+                    continue
+                existing.add(norm)
+                if port:
+                    existing_ports.add(port)
+                self.proxy_pool.append(norm)
+                added += 1
+            if added:
+                self._save_proxy_pool()
+        return added, skipped
+
+    def remove_proxy_from_pool(self, proxy_or_port: str) -> bool:
+        target = (proxy_or_port or "").strip()
+        if not target:
+            return False
+        target_port = target if target.startswith(":") else extract_proxy_port(target)
+        with self._lock:
+            before = len(self.proxy_pool)
+            self.proxy_pool = [
+                px
+                for px in self.proxy_pool
+                if px != target
+                and (not target_port or extract_proxy_port(px) != target_port)
+            ]
+            if len(self.proxy_pool) < before:
+                self._save_proxy_pool()
+                return True
+        return False
+
+    def export_profiles_csv(self, csv_path: str, names: list[str] | None = None) -> int:
+        """Export profiles metadata to a UTF-8-SIG CSV file (Excel-compatible)."""
+        fieldnames = [
+            "name",
+            "status",
+            "group",
+            "pages",
+            "proxy",
+            "os_type",
+            "timezone",
+            "locale",
+            "color",
+            "notes",
+        ]
+        with self._lock:
+            selected_set = set(names) if names is not None else None
+            rows = [
+                p
+                for p in self.profiles.values()
+                if selected_set is None or p.name in selected_set
+            ]
+        path = pathlib.Path(csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for p in rows:
+                writer.writerow(
+                    {
+                        "name": p.name,
+                        "status": p.status or "",
+                        "group": p.group or "",
+                        "pages": ";".join(p.pages),
+                        "proxy": p.proxy or "",
+                        "os_type": p.os_type,
+                        "timezone": p.timezone or "",
+                        "locale": p.locale or "",
+                        "color": p.color or "",
+                        "notes": p.notes or "",
+                    }
+                )
+        return len(rows)
+
+    def import_profiles_csv(
+        self,
+        csv_path: str,
+        running_names: set[str] | None = None,
+    ) -> tuple[int, int, int]:
+        """Import or sync profile configurations from a CSV file without touching camoufox_data/."""
+        path = pathlib.Path(csv_path)
+        if not path.exists():
+            return 0, 0, 0
+        active = set(running_names or ())
+        created = 0
+        updated = 0
+        skipped = 0
+        try:
+            content = path.read_text(encoding="utf-8-sig", errors="replace")
+            reader = csv.DictReader(content.splitlines())
+        except Exception:
+            return 0, 0, 0
+
+        with self._lock:
+            for row in reader:
+                if not isinstance(row, dict):
+                    skipped += 1
+                    continue
+                raw_name = str(row.get("name") or "").strip()
+                if not raw_name or not validate_profile_name(raw_name)[0]:
+                    skipped += 1
+                    continue
+                raw_proxy = str(row.get("proxy") or "").strip()
+                if raw_proxy:
+                    if not validate_proxy_format(raw_proxy)[0]:
+                        skipped += 1
+                        continue
+                    raw_proxy = normalize_proxy(raw_proxy)
+                os_val = str(row.get("os_type") or "windows").strip().lower()
+                if os_val not in ("windows", "macos", "linux"):
+                    os_val = "windows"
+                tz_val = valid_or_none(str(row.get("timezone") or "").strip(), validate_timezone)
+                loc_val = valid_or_none(str(row.get("locale") or "").strip(), validate_locale)
+                col_val = valid_or_none(str(row.get("color") or "").strip(), validate_color)
+                grp_val = valid_or_none(str(row.get("group") or "").strip(), validate_group)
+                not_val = valid_or_none(str(row.get("notes") or "").strip(), validate_notes)
+                st_val = valid_or_none(str(row.get("status") or "").strip(), validate_status)
+                raw_pages_str = str(row.get("pages") or "").strip()
+                page_list = (
+                    [s.strip() for s in raw_pages_str.split(";") if s.strip()]
+                    if raw_pages_str
+                    else []
+                )
+                canonical_pages = self._register_pages(page_list)
+
+                existing_key = self._find_by_casefold(raw_name)
+                if existing_key is not None:
+                    if existing_key in active:
+                        skipped += 1
+                        continue
+                    cur = self.profiles[existing_key]
+                    cur.proxy = raw_proxy or None
+                    cur.os_type = os_val
+                    cur.timezone = tz_val
+                    cur.locale = loc_val
+                    cur.color = col_val
+                    cur.group = grp_val
+                    cur.notes = not_val
+                    cur.status = st_val
+                    if canonical_pages:
+                        cur.pages = canonical_pages
+                    updated += 1
+                else:
+                    try:
+                        pathlib.Path(self._data_path(raw_name)).mkdir(exist_ok=True, parents=True)
+                    except OSError:
+                        skipped += 1
+                        continue
+                    self.profiles[raw_name] = Profile(
+                        name=raw_name,
+                        proxy=raw_proxy or None,
+                        os_type=os_val,
+                        timezone=tz_val,
+                        locale=loc_val,
+                        engine="camoufox",
+                        color=col_val,
+                        group=grp_val,
+                        notes=not_val,
+                        pages=canonical_pages,
+                        status=st_val,
+                    )
+                    created += 1
+            if created or updated:
+                self.save_profiles()
+        return created, updated, skipped
 
     def bulk_update_proxies(self, assignments: dict[str, str | None]) -> int:
         count = 0
@@ -824,6 +1269,7 @@ class ProfileManager:
                     group=valid_or_none(p_data.get("group"), validate_group),
                     notes=valid_or_none(p_data.get("notes"), validate_notes),
                     pages=pages,
+                    status=valid_or_none(p_data.get("status"), validate_status),
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1

@@ -62,12 +62,6 @@ class App:
             height=36,
             style=RAIL_STYLE,
         )
-        self._cooldown_btn = ft.OutlinedButton(
-            self._cooldown_btn_text(),
-            icon=ft.Icons.TIMER_OUTLINED,
-            height=40,
-            style=OUTLINE_STYLE,
-        )
         self._arrange_btn = ft.OutlinedButton(
             get_string("arrange_windows_btn"),
             icon=ft.Icons.GRID_VIEW_ROUNDED,
@@ -169,13 +163,6 @@ class App:
             style=RAIL_STYLE,
             on_click=lambda _: self.h.on_open_trash(),
         )
-        self._cooldown_btn = ft.OutlinedButton(
-            self._cooldown_btn_text(),
-            icon=ft.Icons.TIMER_OUTLINED,
-            height=40,
-            style=OUTLINE_STYLE,
-            on_click=lambda _: self.h.on_open_cooldown_settings(),
-        )
         self._arrange_btn = ft.OutlinedButton(
             get_string("arrange_windows_btn"),
             icon=ft.Icons.GRID_VIEW_ROUNDED,
@@ -212,13 +199,9 @@ class App:
         self.state.search_query = ""
         self._build_ui()
 
-    def _cooldown_btn_text(self) -> str:
+    def _cooldown_chip_text(self) -> str:
         mins = self.monitor.cooldown_minutes
-        return (
-            get_string("cooldown_btn_label", mins=mins)
-            if mins > 0
-            else get_string("cooldown_btn_off")
-        )
+        return f"{mins}p" if mins > 0 else get_string("cooldown_preset_off")
 
     def _build_root_layout(self, r: UIRefs) -> ft.Row:
         sidebar = build_sidebar(
@@ -238,13 +221,6 @@ class App:
             on_language=self._set_language,
             trash_btn=self._trash_btn,
         )
-        check_proxy_btn = ft.OutlinedButton(
-            get_string("bulk_check_proxy"),
-            icon=ft.Icons.NETWORK_CHECK,
-            height=40,
-            style=OUTLINE_STYLE,
-            on_click=lambda _: self.h.on_bulk_check_proxy(),
-        )
         content = build_content_area(
             r.content_subtitle,
             r.profile_list_area,
@@ -257,8 +233,6 @@ class App:
             sort_control=r.sort_dropdown,
             pages_bar=self._pages_bar_slot,
             monitor_bar=self._monitor_bar_slot,
-            check_proxy_btn=check_proxy_btn,
-            cooldown_btn=self._cooldown_btn,
             arrange_btn=self._arrange_btn,
         )
         return ft.Row(
@@ -399,6 +373,13 @@ class App:
         if self.filter.startswith("group:"):
             target_group = self.filter.removeprefix("group:")
             all_profiles = [p for p in all_profiles if p.group == target_group]
+        elif self.filter.startswith("status:"):
+            target_status = self.filter.removeprefix("status:").casefold()
+            all_profiles = [
+                p
+                for p in all_profiles
+                if (p.status or "").strip().casefold() == target_status
+            ]
         else:
             test = self._filter_tests().get(self.filter, lambda p: True)
             all_profiles = [p for p in all_profiles if test(p)]
@@ -409,6 +390,7 @@ class App:
                 if q in p.name.lower()
                 or q in (p.proxy or "").lower()
                 or q in (p.group or "").lower()
+                or q in (p.status or "").lower()
                 or q in (p.notes or "").lower()
             ]
         sort_by = self.state.sort_by
@@ -489,7 +471,6 @@ class App:
         alert_bar = build_monitor_bar(snap, len(everything))
         self._monitor_bar_slot.content = alert_bar
         self._monitor_bar_slot.visible = alert_bar is not None
-        self._cooldown_btn.content = self._cooldown_btn_text()
         self._arrange_btn.visible = len(running) >= 1
         if hasattr(self.pm, "list_trashed_profiles"):
             self._trash_btn.content = get_string(
@@ -523,15 +504,20 @@ class App:
 
         tests = self._filter_tests()
         group_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
         for p in everything:
             if p.group:
                 group_counts[p.group] = group_counts.get(p.group, 0) + 1
+            if p.status:
+                st_key = p.status.strip()
+                status_counts[st_key] = status_counts.get(st_key, 0) + 1
         group_counts = dict(sorted(group_counts.items(), key=lambda kv: kv[0].casefold()))
         self._filter_column.controls = build_filter_buttons(
             self.filter,
             {fid: sum(1 for p in everything if test(p)) for fid, test in tests.items()},
             self._on_filter,
             group_counts=group_counts,
+            status_counts=status_counts,
         )
         names = [p.name for p in page_profiles]
         all_sel = bool(names) and all(self.state.is_selected(n) for n in names)
@@ -541,6 +527,9 @@ class App:
                 all_sel,
                 any_sel,
                 lambda select: self.h.on_select_all_page() if select else self.h.on_deselect_page(),
+                on_open_proxy_pool=self.h.on_open_proxy_pool,
+                cooldown_chip_label=self._cooldown_chip_text(),
+                on_open_cooldown=self.h.on_open_cooldown_settings,
             )
             if page_profiles
             else None
@@ -573,6 +562,8 @@ class App:
                     on_check_proxy=self.h.on_quick_check_proxy if p.proxy else None,
                     on_clone=self.h.on_clone,
                     on_focus_window=self.h.on_focus_window,
+                    on_status_click=self.h.on_set_status,
+                    on_session_history=self.h.on_open_session_history,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )
@@ -590,6 +581,7 @@ class App:
                 "stop": self.h.on_bulk_stop,
                 "delete": self.h.on_bulk_delete,
                 "select_range": self.h.on_bulk_select_range,
+                "set_status": self.h.on_bulk_set_status,
                 "set_group": self.h.on_bulk_set_group,
                 "set_color": self.h.on_bulk_set_color,
                 "set_proxy": self.h.on_bulk_set_proxy,

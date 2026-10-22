@@ -5,7 +5,7 @@ from typing import Any
 import flet as ft
 
 from ...core.strings import get_string
-from ..theme.colors import COLORS
+from ..theme.colors import COLORS, FONT_BOLD, FONT_SEMIBOLD
 from ..theme.styles import ERROR_STYLE, OUTLINE_STYLE
 
 
@@ -80,7 +80,7 @@ def open_trash_dialog(
                                     ft.Text(
                                         pname,
                                         size=14,
-                                        weight=ft.FontWeight.W_600,
+                                        font_family=FONT_SEMIBOLD,
                                         color=COLORS["text_main"],
                                     ),
                                     ft.Text(
@@ -139,8 +139,8 @@ def open_trash_dialog(
             controls=[
                 ft.Text(
                     get_string("trash_title"),
-                    size=20,
-                    weight=ft.FontWeight.BOLD,
+                    size=19,
+                    font_family=FONT_BOLD,
                     color=COLORS["text_main"],
                 ),
                 *(

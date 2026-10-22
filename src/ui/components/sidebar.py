@@ -3,6 +3,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ...core.strings import get_string
+from ...models.profile import resolve_status_display
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, RAIL_STYLE
 
@@ -57,12 +58,29 @@ def build_filter_buttons(
     counts: dict[str, int],
     on_filter: Callable[[str], None],
     group_counts: dict[str, int] | None = None,
+    status_counts: dict[str, int] | None = None,
 ) -> list[ft.Control]:
     """The rail's filter list; the active filter is set in cover ink."""
     controls: list[ft.Control] = [
         _filter_row(fid, get_string(key), counts.get(fid, 0), active, on_filter)
         for fid, key in FILTERS
     ]
+    if status_counts:
+        controls.append(
+            ft.Container(
+                padding=ft.Padding.only(left=10, top=12, bottom=4),
+                content=ft.Text(
+                    get_string("status_filter_title"),
+                    size=11.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["cover_muted"],
+                ),
+            )
+        )
+        for st_val, cnt in status_counts.items():
+            disp = resolve_status_display(st_val, get_string)
+            lbl = disp[0] if disp is not None else st_val
+            controls.append(_filter_row(f"status:{st_val}", lbl, cnt, active, on_filter))
     if group_counts:
         controls.append(
             ft.Container(
