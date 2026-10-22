@@ -50,19 +50,11 @@ def rebuild_bulk_bar(
         bulk_bar.visible = False
         bulk_bar.controls = []
         return
-    sel_indices = [
-        i for i, p in enumerate(page_profiles) if state.is_selected(p.name)
-    ]
-    range_span = (
-        (sel_indices[-1] - sel_indices[0] + 1)
-        if len(sel_indices) >= 2
-        else 0
-    )
+    sel_indices = [i for i, p in enumerate(page_profiles) if state.is_selected(p.name)]
+    range_span = (sel_indices[-1] - sel_indices[0] + 1) if len(sel_indices) >= 2 else 0
     range_count = range_span if range_span > len(sel_indices) else 0
     bulk_bar.visible = True
-    bulk_bar.controls = [
-        _build_container(count, cbs, active_page, range_count=range_count)
-    ]
+    bulk_bar.controls = [_build_container(count, cbs, active_page, range_count=range_count)]
 
 
 def _build_container(
@@ -88,6 +80,14 @@ def _build_container(
                 get_string("bulk_select_range", count=range_count),
                 ft.Icons.LOW_PRIORITY,
                 "select_range",
+            )
+        )
+    if "toggle_pin" in cbs:
+        extra_btns.append(
+            btn(
+                get_string("bulk_pin"),
+                ft.Icons.PUSH_PIN_OUTLINED,
+                "toggle_pin",
             )
         )
     if "set_status" in cbs:
@@ -177,7 +177,12 @@ def _build_container(
                     scroll=ft.ScrollMode.AUTO,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     controls=[
-                        btn(get_string("launch"), ft.Icons.PLAY_ARROW_ROUNDED, "launch", primary=True),
+                        btn(
+                            get_string("launch"),
+                            ft.Icons.PLAY_ARROW_ROUNDED,
+                            "launch",
+                            primary=True,
+                        ),
                         btn(get_string("stop"), ft.Icons.STOP_ROUNDED, "stop"),
                         btn(get_string("delete"), ft.Icons.DELETE_OUTLINE, "delete"),
                         *extra_btns,

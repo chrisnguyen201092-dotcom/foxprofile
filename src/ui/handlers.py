@@ -8,7 +8,7 @@ import flet as ft
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.monitor import MonitorService
-from ..services.proxy.geo_check import derive_geo_from_ip, extract_ip_from_check_detail
+from ..services.proxy.geo_check import derive_ip_metadata, extract_ip_from_check_detail
 from ..utils.validation import validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
@@ -84,6 +84,7 @@ class AppHandlers:
                 set(self._state.loading),
             )
             if warnings:
+
                 def _force() -> None:
                     if self._monitor is not None:
                         self._monitor.acknowledge_proxy_change(name, profile.proxy)
@@ -112,11 +113,7 @@ class AppHandlers:
 
     def on_arrange_windows(self) -> None:
         if hasattr(self._bl, "arrange_windows"):
-            ordered = [
-                p.name
-                for p in self._pm.list_profiles()
-                if self._bl.is_running(p.name)
-            ]
+            ordered = [p.name for p in self._pm.list_profiles() if self._bl.is_running(p.name)]
             cnt = self._bl.arrange_windows(ordered)
             if cnt > 0:
                 self._log(get_string("arranged_windows_log", count=cnt))
@@ -158,11 +155,12 @@ class AppHandlers:
             on_session_history=lambda: self.on_open_session_history(name),
         )
 
-    def on_open_session_history(self, name: str) -> None:
+    def on_open_session_history(self, name: str, initial_tab: str = "sessions") -> None:
         page = self._get_page()
         if page is None or self._monitor is None:
             return
         sessions = self._monitor.get_profile_sessions(name)
+        ip_hist = self._monitor.get_ip_history(name)
         snap = self._monitor.snapshot(
             self._pm.list_profiles(),
             self._bl.running_profile_names() | set(self._state.loading),
@@ -170,13 +168,38 @@ class AppHandlers:
         info = snap.profiles.get(name)
         today_mins = info.today_minutes if info is not None else 0
         last_port = (info.last_used_port or info.port) if info is not None else ""
+        p = self._pm.profiles.get(name)
+
+        def _clear_ips() -> None:
+            if self._monitor is not None:
+                self._monitor.clear_ip_history(name)
+                self._refresh()
+
         open_session_history_dialog(
             page,
             name,
             sessions,
             today_mins=today_mins,
             last_port=last_port,
+            ip_history=ip_hist,
+            initial_tab=initial_tab,
+            on_check_ip_now=(
+                (lambda: self.on_quick_check_proxy(name)) if p is not None and p.proxy else None
+            ),
+            on_clear_ip_history=_clear_ips,
         )
+
+    def on_open_ip_history(self, name: str) -> None:
+        self.on_open_session_history(name, initial_tab="ips")
+
+    def on_toggle_pin(self, name: str) -> None:
+        if not hasattr(self._pm, "toggle_pin_profile"):
+            return
+        pinned = self._pm.toggle_pin_profile(name)
+        if pinned is not None:
+            msg_key = "pinned_profile_log" if pinned else "unpinned_profile_log"
+            self._log(get_string(msg_key, name=name))
+            self._refresh()
 
     def _status_tag_callbacks(self) -> dict:
         def _save_tag(code_or_new: str, label: str, color: str) -> bool:
@@ -357,11 +380,10 @@ class AppHandlers:
             self._refresh()
             if auto_geo and created and page is not None:
                 with_proxy = [
-                    n
-                    for n in created
-                    if n in self._pm.profiles and self._pm.profiles[n].proxy
+                    n for n in created if n in self._pm.profiles and self._pm.profiles[n].proxy
                 ]
                 if with_proxy:
+
                     async def _check_created() -> None:
                         await bulk_check_proxies(
                             with_proxy,
@@ -371,6 +393,7 @@ class AppHandlers:
                             state=self._state,
                             bl=self._bl,
                             auto_pin_geo=True,
+                            monitor=self._monitor,
                         )
 
                     page.run_task(_check_created)
@@ -496,11 +519,7 @@ class AppHandlers:
         if page is None or p is None or not p.proxy:
             return
         proxy_str = p.proxy
-        siblings = [
-            prof.name
-            for prof in self._pm.profiles.values()
-            if prof.proxy == proxy_str
-        ]
+        siblings = [prof.name for prof in self._pm.profiles.values() if prof.proxy == proxy_str]
         for sib in siblings:
             self._state.proxy_status[sib] = ("checking", f"⏳ {get_string('proxy_checking')}")
         self._refresh()
@@ -509,13 +528,27 @@ class AppHandlers:
         async def _check() -> None:
             ok, detail = await asyncio.to_thread(self._ps.check_proxy_sync, proxy_str, 10)
             badge = format_proxy_badge(ok, detail)
+            raw_ip: str | None = None
+            country = ""
             auto_tz, auto_loc = (None, None)
             if ok:
                 raw_ip = extract_ip_from_check_detail(detail)
                 if raw_ip:
-                    auto_tz, auto_loc = await asyncio.to_thread(derive_geo_from_ip, raw_ip)
+                    country, auto_tz, auto_loc = await asyncio.to_thread(
+                        derive_ip_metadata,
+                        raw_ip,
+                        detail,
+                    )
             for sib in siblings:
                 self._state.proxy_status[sib] = badge
+                if ok and raw_ip and self._monitor is not None:
+                    self._monitor.record_exit_ip(
+                        sib,
+                        raw_ip,
+                        country=country,
+                        tz=auto_tz or "",
+                        proxy=proxy_str,
+                    )
                 if (
                     ok
                     and (auto_tz or auto_loc)
@@ -548,6 +581,7 @@ class AppHandlers:
             self._log,
             self._refresh,
             on_batch_create=lambda: self.on_open_batch_create(active_page),
+            active_page=active_page,
         )
 
     def on_move(self, name: str, direction: int) -> None:
@@ -650,9 +684,7 @@ class AppHandlers:
 
                 def _launch_safe() -> None:
                     if safe_names:
-                        bulk_launch_profiles(
-                            safe_names, self._pm, self._bl, self._state, self._log
-                        )
+                        bulk_launch_profiles(safe_names, self._pm, self._bl, self._state, self._log)
 
                 def _force_all() -> None:
                     if self._monitor is not None:
@@ -676,17 +708,29 @@ class AppHandlers:
         if names := list(self._state.selected_names()):
             bulk_stop_profiles(names, self._pm, self._bl, self._state, self._log)
 
+    def on_bulk_toggle_pin(self) -> None:
+        if not hasattr(self._pm, "bulk_update_pinned"):
+            return
+        selected = [n for n in self._state.selected_names() if n in self._pm.profiles]
+        if not selected:
+            return
+        all_currently_pinned = all(
+            bool(getattr(self._pm.profiles[n], "pinned", False)) for n in selected
+        )
+        target_pinned = not all_currently_pinned
+        cnt = self._pm.bulk_update_pinned(selected, target_pinned)
+        msg_key = "bulk_pinned_log" if target_pinned else "bulk_unpinned_log"
+        self._log(get_string(msg_key, count=cnt or len(selected)))
+        self._state.clear_selection()
+        self._refresh()
+
     def on_bulk_set_status(self) -> None:
         page = self._get_page()
         assert page is not None
         selected = list(self._state.selected_names())
         if not selected:
             return
-        cur_statuses = {
-            self._pm.profiles[n].status
-            for n in selected
-            if n in self._pm.profiles
-        }
+        cur_statuses = {self._pm.profiles[n].status for n in selected if n in self._pm.profiles}
         cur_status = next(iter(cur_statuses)) if len(cur_statuses) == 1 else None
 
         def _apply(st: str | None) -> None:
@@ -750,9 +794,7 @@ class AppHandlers:
             if p.name in selected_set and p.name not in seen:
                 ordered.append(p.name)
                 seen.add(p.name)
-        current_proxies = {
-            n: self._pm.profiles[n].proxy for n in ordered if n in self._pm.profiles
-        }
+        current_proxies = {n: self._pm.profiles[n].proxy for n in ordered if n in self._pm.profiles}
         session_ports: dict[str, str] = {}
         if self._monitor is not None:
             snap = self._monitor.snapshot(
@@ -778,11 +820,11 @@ class AppHandlers:
                     if pval
                     and pname in self._pm.profiles
                     and (
-                        not self._pm.profiles[pname].timezone
-                        or not self._pm.profiles[pname].locale
+                        not self._pm.profiles[pname].timezone or not self._pm.profiles[pname].locale
                     )
                 ]
                 if need_geo:
+
                     async def _auto_check() -> None:
                         await bulk_check_proxies(
                             need_geo,
@@ -792,6 +834,7 @@ class AppHandlers:
                             state=self._state,
                             bl=self._bl,
                             auto_pin_geo=True,
+                            monitor=self._monitor,
                         )
 
                     page.run_task(_auto_check)
@@ -823,6 +866,7 @@ class AppHandlers:
                 state=self._state,
                 bl=self._bl,
                 auto_pin_geo=True,
+                monitor=self._monitor,
             )
 
         page.run_task(_task)

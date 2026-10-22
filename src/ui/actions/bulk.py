@@ -5,7 +5,8 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
-from ...services.proxy.geo_check import derive_geo_from_ip, extract_ip_from_check_detail
+from ...services.monitor import MonitorService
+from ...services.proxy.geo_check import derive_ip_metadata, extract_ip_from_check_detail
 from ..dialogs import open_confirm_dialog
 from ..state import AppState
 from .browser import launch_or_stop
@@ -66,6 +67,7 @@ async def bulk_check_proxies(
     *,
     bl: IBrowserLauncher | None = None,
     auto_pin_geo: bool = True,
+    monitor: MonitorService | None = None,
 ) -> None:
     proxy_to_names: dict[str, list[str]] = {}
     skip_count = 0
@@ -94,14 +96,28 @@ async def bulk_check_proxies(
         async with sem:
             ok, detail = await asyncio.to_thread(ps.check_proxy_sync, pstr, 10)
         badge = format_proxy_badge(ok, detail)
+        raw_ip: str | None = None
+        country = ""
         auto_tz, auto_loc = (None, None)
-        if ok and auto_pin_geo:
+        if ok:
             raw_ip = extract_ip_from_check_detail(detail)
-            if raw_ip:
-                auto_tz, auto_loc = await asyncio.to_thread(derive_geo_from_ip, raw_ip)
+            if raw_ip and (auto_pin_geo or monitor is not None):
+                country, auto_tz, auto_loc = await asyncio.to_thread(
+                    derive_ip_metadata,
+                    raw_ip,
+                    detail,
+                )
         for pname in member_names:
             if ok:
                 ok_count += 1
+                if monitor is not None and raw_ip:
+                    monitor.record_exit_ip(
+                        pname,
+                        raw_ip,
+                        country=country,
+                        tz=auto_tz or "",
+                        proxy=pstr,
+                    )
             else:
                 fail_count += 1
             if state is not None:

@@ -19,6 +19,8 @@ class ProfileCreate(BaseModel):
     color: str | None = Field(None, description="Optional #RRGGBB highlight color. Unset = default")
     group: str | None = Field(None, description="Optional group/folder name")
     notes: str | None = Field(None, description="Optional free-text notes")
+    status: str | None = Field(None, description="Optional operational status tag")
+    pinned: bool = Field(False, description="Whether this profile is pinned to the top")
     pages: list[str] = Field(
         default_factory=list, description="Custom pages this profile belongs to"
     )
@@ -37,6 +39,8 @@ class ProfileUpdate(BaseModel):
     group: str | None = Field(None, description='"" clears the group')
     notes: str | None = Field(None, description='"" clears the notes')
     pages: list[str] | None = Field(None, description="Custom pages this profile belongs to")
+    status: str | None = Field(None, description='"" clears the status tag')
+    pinned: bool | None = Field(None, description="Pin or unpin profile")
 
 
 class CustomPageRequest(BaseModel):
@@ -72,6 +76,8 @@ class ProfileResponse(BaseModel):
     group: str | None = None
     notes: str | None = None
     pages: list[str] = Field(default_factory=list)
+    status: str | None = None
+    pinned: bool = False
     data_dir: str
     is_running: bool
 

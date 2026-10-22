@@ -220,6 +220,8 @@ def create_profile(
         (body.group or "").strip() or None,
         (body.notes or "").strip() or None,
         body.pages,
+        status=(body.status or "").strip() or None,
+        pinned=bool(body.pinned),
     ):
         raise HTTPException(status_code=409, detail="Profile already exists")
 
@@ -324,6 +326,16 @@ def update_profile(
         (new_group or "").strip() or None,
         (new_notes or "").strip() or None,
         supplied.get("pages"),
+        **(
+            {"new_status": (supplied.get("status") or "").strip() or None}
+            if "status" in supplied
+            else {}
+        ),
+        **(
+            {"new_pinned": bool(supplied["pinned"])}
+            if "pinned" in supplied and supplied.get("pinned") is not None
+            else {}
+        ),
     ):
         raise HTTPException(status_code=409, detail="Update failed (name conflict?)")
 

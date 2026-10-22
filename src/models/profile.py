@@ -77,8 +77,7 @@ _STATUS_PRESET_MAP: dict[str, tuple[str, str]] = {
 
 def default_status_tags() -> list[dict[str, str]]:
     return [
-        {"code": code, "label": "", "color": hex_col}
-        for code, _, hex_col in PROFILE_STATUS_PRESETS
+        {"code": code, "label": "", "color": hex_col} for code, _, hex_col in PROFILE_STATUS_PRESETS
     ]
 
 
@@ -141,6 +140,7 @@ class Profile:
     notes: str | None = None
     pages: list[str] = field(default_factory=list)
     status: str | None = None
+    pinned: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

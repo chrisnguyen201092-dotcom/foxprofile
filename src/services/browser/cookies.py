@@ -309,7 +309,11 @@ def inspect_cookie_summary(
     live_cookies: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return a safe metadata summary of cookies (counts & domains, no secret values)."""
-    raw = live_cookies if live_cookies is not None else (read_cookies_sqlite_readonly(profile_name) or [])
+    raw = (
+        live_cookies
+        if live_cookies is not None
+        else (read_cookies_sqlite_readonly(profile_name) or [])
+    )
     domain_counts: dict[str, int] = {}
     has_gw = False
     has_session = False

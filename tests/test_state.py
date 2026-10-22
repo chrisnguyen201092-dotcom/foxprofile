@@ -162,3 +162,40 @@ def test_custom_pages_crud(tmp_path, monkeypatch):
     assert pm2.delete_custom_page("Chạy Ads")
     assert pm2.list_custom_pages() == ["Lỗi Mạng"]
     assert pm2.profiles["p2"].pages == []
+
+
+def test_update_profile_rename_and_new_status(tmp_path, monkeypatch):
+    """ProfileManager.update_profile supports new_status and preserves status when omitted."""
+    import src.services.profile.manager as pm_mod
+
+    monkeypatch.setattr(pm_mod, "PROFILES_FILE", str(tmp_path / "profiles.json"))
+    monkeypatch.setattr(pm_mod, "DATA_DIR", str(tmp_path / "data"))
+    pm = ProfileManager()
+
+    assert pm.add_profile("old-name", None, "windows", status="ready")
+    assert pm.profiles["old-name"].status == "ready"
+
+    # Rename and update status via new_status kwarg (exact call used by UI edit_profile)
+    assert pm.update_profile(
+        "old-name",
+        "new-name",
+        "",
+        "windows",
+        None,
+        None,
+        "#EF4444",
+        "GroupA",
+        "NoteA",
+        new_status="working",
+    )
+    assert "old-name" not in pm.profiles
+    assert pm.profiles["new-name"].status == "working"
+    assert pm.profiles["new-name"].color == "#EF4444"
+
+    # Omit new_status (e.g., quick note save) -> status is preserved
+    assert pm.update_profile("new-name", "new-name", "", "windows")
+    assert pm.profiles["new-name"].status == "working"
+
+    # Explicitly clear status with new_status=None
+    assert pm.update_profile("new-name", "new-name", "", "windows", new_status=None)
+    assert pm.profiles["new-name"].status is None

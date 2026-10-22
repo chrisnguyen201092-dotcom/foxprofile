@@ -1,3 +1,5 @@
+import contextlib
+import inspect
 from collections.abc import Callable
 
 import flet as ft
@@ -209,11 +211,7 @@ def open_bulk_proxy_dialog(
     )
 
     def _compute_mapping() -> tuple[dict[str, str | None], list[ft.Control]]:
-        lines = [
-            ln.strip()
-            for ln in (proxy_box.value or "").splitlines()
-            if ln.strip()
-        ]
+        lines = [ln.strip() for ln in (proxy_box.value or "").splitlines() if ln.strip()]
         repeat = bool(repeat_cb.value)
         valid_assignments: dict[str, str | None] = {}
         rows: list[ft.Control] = []
@@ -286,7 +284,7 @@ def open_bulk_proxy_dialog(
         proxy_box.error = None
         _, rows = _compute_mapping()
         preview_col.controls = rows
-        if preview_col.page is not None:
+        with contextlib.suppress(Exception):
             preview_col.update()
 
     _, initial_rows = _compute_mapping()
@@ -294,12 +292,19 @@ def open_bulk_proxy_dialog(
     proxy_box.on_change = _refresh_preview
     repeat_cb.on_change = _refresh_preview
 
+    def _call_apply(assignments: dict[str, str | None], auto_geo: bool) -> None:
+        sig = inspect.signature(on_apply)
+        has_varargs = any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
+        )
+        if has_varargs or len(sig.parameters) >= 2:
+            on_apply(assignments, auto_geo)
+        else:
+            on_apply(assignments)  # type: ignore[call-arg]
+
     def _clear_all(_: ft.ControlEvent) -> None:
         page.pop_dialog()
-        try:
-            on_apply({n: None for n in profile_names}, False)
-        except TypeError:
-            on_apply({n: None for n in profile_names})
+        _call_apply({n: None for n in profile_names}, False)
 
     def _save(_: ft.ControlEvent) -> None:
         valid_assignments, _ = _compute_mapping()
@@ -308,10 +313,7 @@ def open_bulk_proxy_dialog(
             page.update()
             return
         page.pop_dialog()
-        try:
-            on_apply(valid_assignments, bool(auto_geo_cb.value))
-        except TypeError:
-            on_apply(valid_assignments)
+        _call_apply(valid_assignments, bool(auto_geo_cb.value))
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -457,11 +459,7 @@ def open_status_dialog(
     status_field.on_submit = lambda _: _pick((status_field.value or "").strip() or None)
 
     def _cycle_new_color(_: ft.ControlEvent) -> None:
-        idx = (
-            _STATUS_PALETTE.index(new_color[0])
-            if new_color[0] in _STATUS_PALETTE
-            else 0
-        )
+        idx = _STATUS_PALETTE.index(new_color[0]) if new_color[0] in _STATUS_PALETTE else 0
         new_color[0] = _STATUS_PALETTE[(idx + 1) % len(_STATUS_PALETTE)]
         _rebuild_body()
         page.update()
@@ -632,9 +630,7 @@ def open_status_dialog(
             code = t.get("code") or ""
             lbl = resolve_tag_label(t, get_string)
             hex_col = t.get("color") or "#0284C7"
-            is_active = bool(
-                cur_low and cur_low in {code.casefold(), lbl.casefold()}
-            )
+            is_active = bool(cur_low and cur_low in {code.casefold(), lbl.casefold()})
             preset_pills.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=7),

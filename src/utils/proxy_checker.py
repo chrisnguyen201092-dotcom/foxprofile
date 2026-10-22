@@ -68,11 +68,7 @@ async def check_proxy(proxy_str: str, timeout: int = 10) -> tuple[bool, str]:
                 ) as resp:
                     if resp.status == 200:
                         text = await resp.text()
-                        kv = dict(
-                            ln.split("=", 1)
-                            for ln in text.splitlines()
-                            if "=" in ln
-                        )
+                        kv = dict(ln.split("=", 1) for ln in text.splitlines() if "=" in ln)
                         if ip := kv.get("ip"):
                             loc = kv.get("loc")
                             label = f"{ip} ({loc})" if loc else ip

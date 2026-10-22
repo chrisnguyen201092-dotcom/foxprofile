@@ -1,3 +1,4 @@
+import contextlib
 import pathlib
 from collections.abc import Callable
 from typing import Any
@@ -98,16 +99,8 @@ def open_batch_create_dialog(
     )
 
     def _compute() -> tuple[list[tuple[str, str | None]], int, list[ft.Control]]:
-        name_lines = [
-            ln.strip()
-            for ln in (names_box.value or "").splitlines()
-            if ln.strip()
-        ]
-        proxy_lines = [
-            ln.strip()
-            for ln in (proxies_box.value or "").splitlines()
-            if ln.strip()
-        ]
+        name_lines = [ln.strip() for ln in (names_box.value or "").splitlines() if ln.strip()]
+        proxy_lines = [ln.strip() for ln in (proxies_box.value or "").splitlines() if ln.strip()]
         repeat = bool(repeat_cb.value)
         valid_entries: list[tuple[str, str | None]] = []
         skipped = 0
@@ -186,7 +179,7 @@ def open_batch_create_dialog(
         )
         preview_col.controls = rows
         preview_col.visible = bool(rows)
-        if preview_col.page is not None:
+        with contextlib.suppress(Exception):
             page.update()
 
     names_box.on_change = _refresh_preview
@@ -618,9 +611,7 @@ def open_proxy_pool_dialog(
             def _toggle_assign(target_px: str = free_px) -> Callable[[ft.ControlEvent], None]:
                 def _cb(_: ft.ControlEvent) -> None:
                     notice_text.visible = False
-                    assigning_target[0] = (
-                        None if assigning_target[0] == target_px else target_px
-                    )
+                    assigning_target[0] = None if assigning_target[0] == target_px else target_px
                     _rebuild()
                     page.update()
 
@@ -815,7 +806,7 @@ def open_proxy_pool_dialog(
 
         sorted_items = sorted(
             by_proxy.items(),
-            key=lambda kv: (extract_proxy_port(kv[0]) or kv[0]),
+            key=lambda kv: extract_proxy_port(kv[0]) or kv[0],
         )
         for px_str, member_names in sorted_items:
             port_badge = extract_proxy_port(px_str) or "PROXY"
@@ -1139,22 +1130,38 @@ def open_session_history_dialog(
     sessions: list[dict[str, Any]],
     today_mins: int = 0,
     last_port: str = "",
+    *,
+    ip_history: list[dict[str, Any]] | None = None,
+    initial_tab: str = "sessions",
+    on_check_ip_now: Callable[[], None] | None = None,
+    on_clear_ip_history: Callable[[], None] | None = None,
 ) -> None:
-    """Modal dialog showing the recorded browser session history for a profile."""
-    list_col = ft.Column(spacing=6, height=290, scroll=ft.ScrollMode.AUTO)
-    if not sessions:
-        list_col.controls.append(
-            ft.Container(
-                padding=ft.Padding.symmetric(vertical=40),
-                alignment=ft.Alignment(0, 0),
-                content=ft.Text(
-                    get_string("session_hist_empty"),
-                    size=13.5,
-                    color=COLORS["text_dim"],
-                ),
-            )
-        )
-    else:
+    """Modal dialog showing browser session history and exit IP log for a profile."""
+    ip_items: list[dict[str, Any]] = list(ip_history or [])
+    active_tab: list[str] = ["ips" if initial_tab == "ips" else "sessions"]
+    tab_bar = ft.Row(spacing=8)
+    list_col = ft.Column(spacing=6, height=280, scroll=ft.ScrollMode.AUTO)
+    clear_ip_btn = ft.TextButton(
+        get_string("ip_hist_clear_btn"),
+        icon=ft.Icons.DELETE_SWEEP_OUTLINED,
+        visible=active_tab[0] == "ips" and bool(ip_items) and on_clear_ip_history is not None,
+        style=ft.ButtonStyle(color=COLORS["error"]),
+    )
+
+    def _build_session_rows() -> list[ft.Control]:
+        if not sessions:
+            return [
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=40),
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("session_hist_empty"),
+                        size=13.5,
+                        color=COLORS["text_dim"],
+                    ),
+                )
+            ]
+        rows: list[ft.Control] = []
         for idx, s in enumerate(sessions, start=1):
             is_live = bool(s.get("is_live"))
             start_str = str(s.get("start", ""))
@@ -1166,7 +1173,7 @@ def open_session_history_dialog(
                 if is_live
                 else f"{idx}. {get_string('session_hist_row', start=start_str, end=end_str, mins=dur_mins)}"
             )
-            list_col.controls.append(
+            rows.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=8),
                     border_radius=7,
@@ -1202,6 +1209,236 @@ def open_session_history_dialog(
                     ),
                 )
             )
+        return rows
+
+    def _build_ip_rows() -> list[ft.Control]:
+        if not ip_items:
+            return [
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=40, horizontal=16),
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("ip_hist_empty"),
+                        size=13,
+                        text_align=ft.TextAlign.CENTER,
+                        color=COLORS["text_dim"],
+                    ),
+                )
+            ]
+        rows: list[ft.Control] = []
+        for idx, item in enumerate(ip_items):
+            ip_val = str(item.get("ip") or "-")
+            country_val = str(item.get("country") or "").strip().upper()
+            tz_val = str(item.get("tz") or "").strip()
+            port_val = str(item.get("port") or "-")
+            ts_val = str(item.get("ts") or "")
+            older = ip_items[idx + 1] if idx + 1 < len(ip_items) else None
+            older_country = str(older.get("country") or "").strip().upper() if older else ""
+            older_ip = str(older.get("ip") or "").strip() if older else ""
+
+            badge_text = ""
+            badge_col = COLORS["success"]
+            if country_val and older_country and country_val != older_country:
+                badge_text = get_string(
+                    "ip_hist_badge_country_changed",
+                    old=older_country,
+                    new=country_val,
+                )
+                badge_col = COLORS["error"]
+            elif idx == 0:
+                badge_text = get_string("ip_hist_badge_current")
+                badge_col = COLORS["success"]
+            elif older_ip and ip_val != older_ip:
+                badge_text = get_string("ip_hist_badge_ip_changed")
+                badge_col = COLORS["accent"]
+
+            meta_parts = [p for p in (country_val, tz_val, ts_val) if p]
+            meta_line = " · ".join(meta_parts)
+
+            top_controls: list[ft.Control] = [
+                ft.Text(
+                    f"{idx + 1}. {ip_val}",
+                    size=13,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_600,
+                    color=COLORS["text_main"],
+                ),
+            ]
+            if country_val:
+                top_controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=COLORS["card_bg"],
+                        border=ft.Border.all(1, COLORS["rule_strong"]),
+                        content=ft.Text(
+                            country_val,
+                            size=10.5,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_700,
+                            color=COLORS["text_main"],
+                        ),
+                    )
+                )
+            if badge_text:
+                top_controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=ft.Colors.with_opacity(0.12, badge_col),
+                        border=ft.Border.all(1, badge_col),
+                        content=ft.Text(
+                            badge_text,
+                            size=10,
+                            font_family=FONT_SEMIBOLD,
+                            color=badge_col,
+                        ),
+                    )
+                )
+
+            rows.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                    border_radius=7,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1.5 if idx == 0 else 1,
+                        badge_col if idx == 0 else COLORS["border"],
+                    ),
+                    content=ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Column(
+                                spacing=2,
+                                tight=True,
+                                expand=True,
+                                controls=[
+                                    ft.Row(
+                                        spacing=6,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=top_controls,
+                                    ),
+                                    ft.Text(
+                                        meta_line,
+                                        size=11.5,
+                                        font_family=FONT_DATA,
+                                        color=COLORS["text_sub"],
+                                    ),
+                                ],
+                            ),
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                border_radius=5,
+                                bgcolor=COLORS["card_bg"],
+                                border=ft.Border.all(1, COLORS["rule_strong"]),
+                                content=ft.Text(
+                                    port_val,
+                                    size=11.5,
+                                    font_family=FONT_DATA,
+                                    color=COLORS["text_sub"],
+                                ),
+                            ),
+                        ],
+                    ),
+                )
+            )
+        return rows
+
+    def _switch_tab(tab_key: str) -> None:
+        active_tab[0] = tab_key
+        _rebuild_view()
+        with contextlib.suppress(Exception):
+            page.update()
+
+    def _seg_btn(tab_key: str, label: str, icon: ft.IconData) -> ft.Container:
+        on = active_tab[0] == tab_key
+        return ft.Container(
+            height=32,
+            padding=ft.Padding.symmetric(horizontal=12),
+            border_radius=7,
+            bgcolor=COLORS["sidebar"] if on else COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["sidebar"] if on else COLORS["rule_strong"]),
+            ink=True,
+            on_click=lambda _, k=tab_key: _switch_tab(k),
+            content=ft.Row(
+                spacing=6,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(
+                        icon,
+                        size=14,
+                        color=COLORS["cover_ink"] if on else COLORS["text_sub"],
+                    ),
+                    ft.Text(
+                        label,
+                        size=12.5,
+                        font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
+                        color=COLORS["cover_ink"] if on else COLORS["text_main"],
+                    ),
+                ],
+            ),
+        )
+
+    def _rebuild_view() -> None:
+        tab_bar.controls = [
+            _seg_btn(
+                "sessions",
+                get_string("session_hist_tab", count=len(sessions)),
+                ft.Icons.HISTORY,
+            ),
+            _seg_btn(
+                "ips",
+                get_string("ip_hist_tab", count=len(ip_items)),
+                ft.Icons.PUBLIC,
+            ),
+        ]
+        clear_ip_btn.visible = (
+            active_tab[0] == "ips" and bool(ip_items) and on_clear_ip_history is not None
+        )
+        list_col.controls = _build_ip_rows() if active_tab[0] == "ips" else _build_session_rows()
+
+    def _handle_clear_ip(_: ft.ControlEvent) -> None:
+        if on_clear_ip_history is not None:
+            on_clear_ip_history()
+            ip_items.clear()
+            _rebuild_view()
+            page.update()
+
+    def _handle_check_ip(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_check_ip_now is not None:
+            on_check_ip_now()
+
+    clear_ip_btn.on_click = _handle_clear_ip
+    _rebuild_view()
+
+    header_row = ft.Row(
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        controls=[
+            ft.Text(
+                get_string("session_hist_title", name=profile_name),
+                size=19,
+                font_family=FONT_BOLD,
+                color=COLORS["text_main"],
+            ),
+            *(
+                [
+                    ft.OutlinedButton(
+                        get_string("ip_hist_check_now"),
+                        icon=ft.Icons.NETWORK_CHECK,
+                        height=32,
+                        style=OUTLINE_STYLE,
+                        on_click=_handle_check_ip,
+                    )
+                ]
+                if on_check_ip_now is not None
+                else []
+            ),
+        ],
+    )
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -1214,12 +1451,7 @@ def open_session_history_dialog(
             spacing=4,
             tight=True,
             controls=[
-                ft.Text(
-                    get_string("session_hist_title", name=profile_name),
-                    size=19,
-                    font_family=FONT_BOLD,
-                    color=COLORS["text_main"],
-                ),
+                header_row,
                 ft.Text(
                     get_string(
                         "session_hist_subtitle",
@@ -1233,10 +1465,19 @@ def open_session_history_dialog(
             ],
         ),
         content=ft.Container(
-            width=520,
-            content=list_col,
+            width=540,
+            content=ft.Column(
+                spacing=10,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    tab_bar,
+                    list_col,
+                ],
+            ),
         ),
         actions=[
+            clear_ip_btn,
             ft.TextButton(
                 get_string("close_btn"),
                 style=ft.ButtonStyle(color=COLORS["text_sub"]),

@@ -21,8 +21,8 @@ COLUMNS = {
     "device": (9, None),
     "proxy": (8, None),
     "geo": (7, None),
-    # Launch button (100) + gap (4) + four compact icon buttons (4 * 30 = 120).
-    "actions": (None, 232),
+    # Launch button (100) + gap (4) + five compact icon buttons (5 * 28 = 140).
+    "actions": (None, 248),
 }
 ROW_HEIGHT = 58
 
@@ -182,6 +182,8 @@ def build_profile_card(
     on_focus_window: Callable[[str], None] | None = None,
     on_status_click: Callable[[str], None] | None = None,
     on_session_history: Callable[[str], None] | None = None,
+    on_ip_history: Callable[[str], None] | None = None,
+    on_toggle_pin: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -204,7 +206,8 @@ def build_profile_card(
 
     show_failed = failed and not is_loading and not is_running
     status_disp = resolve_status_display(profile.status, get_string)
-    has_badges = bool(profile.group or show_failed or status_disp is not None)
+    is_pinned = bool(getattr(profile, "pinned", False))
+    has_badges = bool(is_pinned or profile.group or show_failed or status_disp is not None)
     name_tooltip = (
         f"{profile.name}\n({get_string('tooltip_quick_edit_note')})"
         if on_start_edit_note is not None
@@ -233,7 +236,26 @@ def build_profile_card(
             else name_text
         )
     )
-    top_line_controls: list[ft.Control] = [name_control]
+    top_line_controls: list[ft.Control] = []
+    if is_pinned:
+        top_line_controls.append(
+            ft.Container(
+                ink=on_toggle_pin is not None,
+                border_radius=4,
+                tooltip=get_string("tooltip_unpin"),
+                on_click=(
+                    (lambda _, n=profile.name: on_toggle_pin(n))
+                    if on_toggle_pin is not None
+                    else None
+                ),
+                content=ft.Icon(
+                    ft.Icons.PUSH_PIN_ROUNDED,
+                    size=13,
+                    color=COLORS["accent"],
+                ),
+            )
+        )
+    top_line_controls.append(name_control)
     if show_failed:
         top_line_controls.append(
             ft.Container(
@@ -355,11 +377,7 @@ def build_profile_card(
                 height=10,
                 border_radius=5,
                 bgcolor=dot_color,
-                border=(
-                    None
-                    if dot_color
-                    else ft.Border.all(1.5, COLORS["rule_strong"])
-                ),
+                border=(None if dot_color else ft.Border.all(1.5, COLORS["rule_strong"])),
                 ink=on_status_click is not None,
                 tooltip=get_string("tooltip_click_status") if on_status_click is not None else None,
                 on_click=(
@@ -424,6 +442,7 @@ def build_profile_card(
                             on_start_edit_proxy=on_start_edit_proxy,
                             on_save_proxy=on_save_proxy,
                             on_check_proxy=on_check_proxy,
+                            on_ip_history=on_ip_history,
                             monitor_info=monitor_info,
                             proxy_check_state=proxy_check_state,
                         ),
@@ -459,6 +478,8 @@ def build_profile_card(
                                 on_delete,
                                 on_cookies,
                                 on_clone,
+                                is_pinned=is_pinned,
+                                on_toggle_pin=on_toggle_pin,
                             ),
                         ],
                     ),
@@ -535,6 +556,15 @@ def _device(profile: Profile, device: str) -> ft.Row:
     )
 
 
+def _shorten_ip_label(ip: str, country: str = "") -> str:
+    clean_ip = (ip or "").strip()
+    if ":" in clean_ip and len(clean_ip) > 18:
+        segs = clean_ip.split(":")
+        if len(segs) >= 4:
+            clean_ip = f"{segs[0]}:..:{segs[-1]}"
+    return f"{clean_ip} ({country})" if country else clean_ip
+
+
 def _proxy(
     profile: Profile,
     *,
@@ -542,6 +572,7 @@ def _proxy(
     on_start_edit_proxy: Callable[[str], None] | None = None,
     on_save_proxy: Callable[[str, str], None] | None = None,
     on_check_proxy: Callable[[str], None] | None = None,
+    on_ip_history: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Control:
@@ -592,10 +623,24 @@ def _proxy(
     elif monitor_info is not None and monitor_info.proxy_port_changed:
         sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
         sub_color = COLORS["error"]
+    elif monitor_info is not None and monitor_info.ip_country_changed:
+        sub_label = get_string(
+            "proxy_country_changed_badge",
+            old=monitor_info.prev_exit_country,
+            new=monitor_info.last_exit_country,
+        )
+        sub_color = COLORS["warning"]
     elif proxy_check_state is not None:
         _, st_msg = proxy_check_state
         sub_label = st_msg
         sub_color = COLORS["success"]
+    elif monitor_info is not None and monitor_info.last_exit_ip:
+        short_ip = _shorten_ip_label(
+            monitor_info.last_exit_ip,
+            monitor_info.last_exit_country,
+        )
+        sub_label = f"{scheme.upper()} · {short_ip}"
+        sub_color = COLORS["text_sub"]
 
     host_text = _data(rest)
     host_text.tooltip = (
@@ -611,14 +656,28 @@ def _proxy(
         if on_start_edit_proxy is not None
         else host_text
     )
-    line2 = ft.Text(
+    line2_text = ft.Text(
         sub_label,
         size=11.5,
         font_family=FONT_DATA,
         color=sub_color,
         no_wrap=True,
         overflow=ft.TextOverflow.ELLIPSIS,
-        tooltip=sub_label,
+        tooltip=(
+            f"{sub_label} ({get_string('tooltip_ip_history')})"
+            if on_ip_history is not None
+            else sub_label
+        ),
+    )
+    line2: ft.Control = (
+        ft.Container(
+            ink=True,
+            border_radius=4,
+            on_click=lambda _, n=profile.name: on_ip_history(n),
+            content=line2_text,
+        )
+        if on_ip_history is not None
+        else line2_text
     )
     return _stack(line1, line2)
 
@@ -795,15 +854,32 @@ def _action_buttons(
     on_delete: Callable[[str], None],
     on_cookies: Callable[[str], None] | None,
     on_clone: Callable[[str], None] | None = None,
+    *,
+    is_pinned: bool = False,
+    on_toggle_pin: Callable[[str], None] | None = None,
 ) -> list[ft.IconButton]:
     buttons: list[ft.IconButton] = []
+    if on_toggle_pin is not None:
+        buttons.append(
+            ft.IconButton(
+                icon=ft.Icons.PUSH_PIN_ROUNDED if is_pinned else ft.Icons.PUSH_PIN_OUTLINED,
+                icon_size=16,
+                width=28,
+                height=28,
+                padding=0,
+                icon_color=COLORS["accent"] if is_pinned else COLORS["text_sub"],
+                tooltip=get_string("tooltip_unpin") if is_pinned else get_string("tooltip_pin"),
+                style=ICON_STYLE,
+                on_click=lambda _, n=name: on_toggle_pin(n),
+            ),
+        )
     if on_cookies:
         buttons.append(
             ft.IconButton(
                 icon=ft.Icons.COOKIE_OUTLINED,
                 icon_size=17,
-                width=30,
-                height=30,
+                width=28,
+                height=28,
                 padding=0,
                 icon_color=COLORS["success"] if is_running else COLORS["text_sub"],
                 tooltip=get_string("tooltip_cookies"),
@@ -817,8 +893,8 @@ def _action_buttons(
             ft.IconButton(
                 icon=ft.Icons.CONTENT_COPY,
                 icon_size=16,
-                width=30,
-                height=30,
+                width=28,
+                height=28,
                 padding=0,
                 icon_color=COLORS["text_sub"],
                 tooltip=get_string("tooltip_clone"),
@@ -831,8 +907,8 @@ def _action_buttons(
         ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
             icon_size=17,
-            width=30,
-            height=30,
+            width=28,
+            height=28,
             padding=0,
             icon_color=COLORS["text_sub"],
             tooltip=get_string("tooltip_edit"),
@@ -842,8 +918,8 @@ def _action_buttons(
         ft.IconButton(
             icon=ft.Icons.DELETE_OUTLINE,
             icon_size=17,
-            width=30,
-            height=30,
+            width=28,
+            height=28,
             padding=0,
             icon_color=COLORS["rule_strong"] if is_running else COLORS["text_sub"],
             tooltip=get_string("tooltip_delete"),

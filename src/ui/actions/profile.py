@@ -105,6 +105,7 @@ def add_profile(
     log: Callable[[str], None],
     refresh: Callable[[], None],
     on_batch_create: Callable[[], None] | None = None,
+    active_page: str = "__all__",
 ) -> None:
     def on_save(
         name: str,
@@ -120,6 +121,7 @@ def add_profile(
     ) -> str | None:
         if engine == "chrome" and (reason := chrome_prefetch.unsupported_reason()):
             return get_string("chrome_engine_unsupported", reason=reason)
+        init_pages = [active_page] if active_page and active_page != "__all__" else None
         if pm.add_profile(
             name,
             proxy,
@@ -130,6 +132,7 @@ def add_profile(
             color,
             group,
             notes,
+            pages=init_pages,
             status=status,
         ):
             log(get_string("created_profile", name=name))

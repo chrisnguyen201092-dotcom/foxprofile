@@ -10,7 +10,10 @@ from ..theme.styles import ACCENT_STYLE, RAIL_STYLE
 # (filter id, string key) in display order; counts come from the app.
 FILTERS = (
     ("all", "filter_all"),
+    ("pinned", "filter_pinned"),
     ("running", "filter_running"),
+    ("ready_launch", "filter_ready_launch"),
+    ("cooldown", "filter_cooldown"),
     ("warnings", "filter_warnings"),
     ("proxy", "filter_proxy"),
     ("direct", "filter_direct"),
@@ -116,7 +119,9 @@ def build_sidebar(
     trash_btn: ft.Control | None = None,
 ) -> ft.Container:
     log_toggle_btn.on_click = on_toggle_log
-    bottom_tools: list[ft.Control] = [ft.Container(height=8), trash_btn] if trash_btn is not None else []
+    bottom_tools: list[ft.Control] = (
+        [ft.Container(height=8), trash_btn] if trash_btn is not None else []
+    )
     return ft.Container(
         width=240,
         bgcolor=COLORS["sidebar"],
@@ -195,8 +200,10 @@ def build_sidebar(
                         color=COLORS["cover_muted"],
                     ),
                 ),
-                filter_column or ft.Column(),
-                ft.Container(expand=True),
+                ft.Container(
+                    expand=True,
+                    content=filter_column or ft.Column(),
+                ),
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[

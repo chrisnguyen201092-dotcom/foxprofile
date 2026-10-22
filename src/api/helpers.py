@@ -45,6 +45,8 @@ def profile_response(profile: Profile, bl: IBrowserLauncher) -> ProfileResponse:
         group=profile.group,
         notes=profile.notes,
         pages=list(profile.pages),
+        status=profile.status,
+        pinned=bool(getattr(profile, "pinned", False)),
         data_dir=os.path.join(os.getcwd(), DATA_DIR, profile.name),
         is_running=bl.is_running(profile.name),
     )

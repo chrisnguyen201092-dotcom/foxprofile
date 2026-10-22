@@ -580,7 +580,9 @@ def test_full_app_ui_and_all_handlers_end_to_end(isolated_pm, tmp_path):
             self.theme_mode = None
             self.padding = 0
             self.bgcolor = ""
-            self.window = type("W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600})()
+            self.window = type(
+                "W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600}
+            )()
             self.fonts = {}
             self.theme = None
             self.on_keyboard_event = None
@@ -608,7 +610,9 @@ def test_full_app_ui_and_all_handlers_end_to_end(isolated_pm, tmp_path):
     c._instances["eb"] = EventBus()
 
     app = App(c)
-    app.monitor = MonitorService(data_dir=str(tmp_path / "camoufox_data"), log_dir=str(tmp_path / "logs"))
+    app.monitor = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"), log_dir=str(tmp_path / "logs")
+    )
     app.h._monitor = app.monitor
     fake_page = FakePage()
     app.page = fake_page  # type: ignore[assignment]
@@ -618,7 +622,16 @@ def test_full_app_ui_and_all_handlers_end_to_end(isolated_pm, tmp_path):
     app._build_ui()
 
     # Exercise all sort modes
-    for s_mode in ("custom", "cooldown_desc", "cooldown_asc", "name_asc", "name_desc", "group", "running", "proxy"):
+    for s_mode in (
+        "custom",
+        "cooldown_desc",
+        "cooldown_asc",
+        "name_asc",
+        "name_desc",
+        "group",
+        "running",
+        "proxy",
+    ):
         app._on_sort(s_mode)
 
     # Exercise all filters
@@ -989,8 +1002,10 @@ def test_csv_export_and_import_roundtrip_and_running_protection(isolated_pm, tmp
     lines.append(
         "CSV_New,working,GroupNew,PageB,http://u:p@1.2.3.4:10099,windows,America/Chicago,en-US,#22C55E,Added via CSV"
     )
-    modified_csv = "\n".join(lines).replace("Initial note", "Updated via CSV").replace(
-        "Do not touch", "Should be skipped"
+    modified_csv = (
+        "\n".join(lines)
+        .replace("Initial note", "Updated via CSV")
+        .replace("Do not touch", "Should be skipped")
     )
     csv_file.write_text(modified_csv, encoding="utf-8-sig")
 
@@ -1131,3 +1146,238 @@ def test_per_profile_session_history_and_new_dialogs(isolated_pm, tmp_path):
     fake_page.pop_dialog()
 
 
+def test_exit_ip_history_and_country_mismatch_warning(tmp_path):
+    from src.services.proxy.geo_check import extract_country_from_check_detail
+
+    assert extract_country_from_check_detail("Proxy working. IP: 172.58.12.34 (US)") == "US"
+    assert extract_country_from_check_detail("Proxy working. IP: 1.2.3.4 (XX)") == ""
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+
+    p = Profile(
+        name="TicketAcc",
+        proxy="http://u:p@1.2.3.4:10001",
+        os_type="windows",
+        timezone="America/Chicago",
+        locale="en-US",
+    )
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon.get_ip_history("TicketAcc") == []
+
+    # 1. Record initial US exit IP
+    rec1 = mon.record_exit_ip(
+        "TicketAcc",
+        "172.58.12.34",
+        country="US",
+        tz="America/Chicago",
+        proxy=p.proxy,
+    )
+    assert rec1 is not None
+    assert rec1["ip"] == "172.58.12.34"
+    assert rec1["country"] == "US"
+    assert rec1["port"] == ":10001"
+
+    # Re-checking the same IP on the same port updates timestamp without duplicating
+    mon.record_exit_ip(
+        "TicketAcc",
+        "172.58.12.34",
+        country="US",
+        tz="America/Chicago",
+        proxy=p.proxy,
+    )
+    assert len(mon.get_ip_history("TicketAcc")) == 1
+
+    snap1 = mon.snapshot([p], set())
+    info1 = snap1.profiles["TicketAcc"]
+    assert info1.last_exit_ip == "172.58.12.34"
+    assert info1.last_exit_country == "US"
+    assert info1.ip_country_changed is False
+    assert mon.check_prelaunch(p, [p], set(), snap=snap1) == []
+
+    # 2. Record a rotated US exit IP (same country -> no country warning)
+    mon.record_exit_ip(
+        "TicketAcc",
+        "172.58.99.88",
+        country="US",
+        tz="America/Chicago",
+        proxy=p.proxy,
+    )
+    assert len(mon.get_ip_history("TicketAcc")) == 2
+    snap2 = mon.snapshot([p], set())
+    assert snap2.profiles["TicketAcc"].ip_country_changed is False
+
+    # 3. Record an exit IP in a different country (DE) -> triggers ip_country_changed warning!
+    mon.record_exit_ip(
+        "TicketAcc",
+        "88.198.1.2",
+        country="DE",
+        tz="Europe/Berlin",
+        proxy=p.proxy,
+    )
+    snap3 = mon.snapshot([p], set())
+    info3 = snap3.profiles["TicketAcc"]
+    assert info3.ip_country_changed is True
+    assert info3.last_exit_country == "DE"
+    assert info3.prev_exit_country == "US"
+    assert info3.has_warning is True
+
+    warnings = mon.check_prelaunch(p, [p], set(), snap=snap3)
+    assert any(w.code == "ip_country_changed" for w in warnings)
+
+    # Verify persistence across MonitorService reload
+    mon_reloaded = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert len(mon_reloaded.get_ip_history("TicketAcc")) == 3
+
+    # Acknowledging proxy change clears the country jump warning
+    mon_reloaded.acknowledge_proxy_change("TicketAcc", p.proxy)
+    snap4 = mon_reloaded.snapshot([p], set())
+    assert snap4.profiles["TicketAcc"].ip_country_changed is False
+
+    # Clearing IP history removes all entries
+    mon_reloaded.clear_ip_history("TicketAcc")
+    assert mon_reloaded.get_ip_history("TicketAcc") == []
+
+
+def test_pin_profiles_and_smart_operational_filters(isolated_pm, tmp_path):
+    import flet as ft
+
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.ui.app import App
+
+    isolated_pm.add_profile(
+        "Alpha",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Chicago",
+        locale="en-US",
+    )
+    isolated_pm.add_profile(
+        "Beta",
+        "http://u:p@1.2.3.4:10002",
+        "windows",
+        timezone="America/Chicago",
+        locale="en-US",
+    )
+    isolated_pm.add_profile(
+        "GammaDirect",
+        "",
+        "windows",
+    )
+
+    # Pin Beta -> Beta must float above Alpha in all sort modes
+    assert isolated_pm.toggle_pin_profile("Beta") is True
+    assert isolated_pm.profiles["Beta"].pinned is True
+
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    class FakeBL:
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def running_count(self):
+            return 0
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+            self.services = []
+            self.dialogs = []
+            self.title = ""
+            self.theme_mode = None
+            self.padding = 0
+            self.bgcolor = ""
+            self.window = type(
+                "W", (), {"width": 1200, "height": 800, "min_width": 800, "min_height": 600}
+            )()
+            self.fonts = {}
+            self.theme = None
+            self.on_keyboard_event = None
+
+        def add(self, *ctrls):
+            self.controls.extend(ctrls)
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            dlg.open = True
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                d = self.dialogs.pop()
+                d.open = False
+
+        def run_task(self, coro_fn, *args):
+            pass
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+
+    app = App(c)
+    app.monitor = mon
+    app.h._monitor = mon
+    fake_page = FakePage()
+    app.page = fake_page  # type: ignore[assignment]
+    app._file_picker = ft.FilePicker()
+    app.clipboard = ft.Clipboard()
+    fake_page.services.extend([app._file_picker, app.clipboard])
+    app._build_ui()
+
+    # Check pinned profile floats to top even in name_asc sort
+    app._on_sort("name_asc")
+    ordered, _, _ = app._get_page_profiles()
+    assert [p.name for p in ordered] == ["Beta", "Alpha", "GammaDirect"]
+
+    # Filter: pinned
+    app._on_filter("pinned")
+    pinned_list, _, _ = app._get_page_profiles()
+    assert [p.name for p in pinned_list] == ["Beta"]
+
+    # Filter: ready_launch (has proxy, not running, no warnings)
+    app._on_filter("ready_launch")
+    ready_list, _, _ = app._get_page_profiles()
+    assert [p.name for p in ready_list] == ["Beta", "Alpha"]
+
+    # Simulate Alpha just closed -> Alpha enters cooldown filter
+    mon.record_stopped("Alpha")
+    app._refresh_profiles()
+    app._on_filter("cooldown")
+    cd_list, _, _ = app._get_page_profiles()
+    assert [p.name for p in cd_list] == ["Alpha"]
+
+    app._clear_filters()
+
+    # Open IP history dialog directly from Proxy cell callback
+    app.h.on_open_ip_history("Beta")
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
+    # Bulk toggle pin: select Alpha & GammaDirect (unpinned) -> pins both
+    app.state.select_all(["Alpha", "GammaDirect"])
+    app.h.on_bulk_toggle_pin()
+    assert isolated_pm.profiles["Alpha"].pinned is True
+    assert isolated_pm.profiles["GammaDirect"].pinned is True
+
+    # Selecting all 3 (all pinned) -> bulk toggle unpins all 3
+    app.state.select_all(["Alpha", "Beta", "GammaDirect"])
+    app.h.on_bulk_toggle_pin()
+    assert isolated_pm.profiles["Beta"].pinned is False

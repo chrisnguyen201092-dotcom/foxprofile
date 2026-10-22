@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import threading
 from collections.abc import Callable
 
@@ -6,12 +7,7 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...interfaces.protocols import IProxyService
-from ...models.profile import (
-    PROFILE_COLOR_PALETTES,
-    Profile,
-    get_active_status_tags,
-    resolve_tag_label,
-)
+from ...models.profile import PROFILE_COLOR_PALETTES, Profile
 from ...services.monitor import extract_proxy_port
 from ...services.proxy.geo_check import GeoCheckResult, check_geo
 from ...utils.proxy_parser import mask_proxy
@@ -393,62 +389,6 @@ def open_profile_dialog(
     _rebuild_color_section()
 
     selected_status: list[str | None] = [profile.status if profile is not None else None]
-    status_section = ft.Row(spacing=6, wrap=True, run_spacing=6)
-
-    def _pick_status_form(code: str | None) -> None:
-        if code is not None and selected_status[0] and selected_status[0].lower() == code.lower():
-            selected_status[0] = None
-        else:
-            selected_status[0] = code
-        _rebuild_status_section()
-        page.update()
-
-    def _rebuild_status_section() -> None:
-        cur_st = (selected_status[0] or "").strip().lower()
-        pills: list[ft.Control] = [
-            ft.Container(
-                height=28,
-                padding=ft.Padding.symmetric(horizontal=9),
-                border_radius=6,
-                bgcolor=COLORS["sidebar"] if not cur_st else COLORS["card_bg"],
-                border=ft.Border.all(1, COLORS["sidebar"] if not cur_st else COLORS["rule_strong"]),
-                alignment=ft.Alignment(0, 0),
-                ink=True,
-                on_click=lambda _: _pick_status_form(None),
-                content=ft.Text(
-                    get_string("color_default"),
-                    size=11.5,
-                    font_family=FONT_MEDIUM,
-                    color=COLORS["cover_ink"] if not cur_st else COLORS["text_main"],
-                ),
-            )
-        ]
-        for t in get_active_status_tags():
-            code = t.get("code") or ""
-            lbl = resolve_tag_label(t, get_string)
-            hex_col = t.get("color") or "#0284C7"
-            is_act = bool(cur_st and cur_st in {code.casefold(), lbl.casefold()})
-            pills.append(
-                ft.Container(
-                    height=28,
-                    padding=ft.Padding.symmetric(horizontal=9),
-                    border_radius=6,
-                    bgcolor=ft.Colors.with_opacity(0.14, hex_col) if is_act else COLORS["card_bg"],
-                    border=ft.Border.all(1.5 if is_act else 1, hex_col),
-                    alignment=ft.Alignment(0, 0),
-                    ink=True,
-                    on_click=lambda _, c=code: _pick_status_form(c),
-                    content=ft.Text(
-                        lbl,
-                        size=11.5,
-                        font_family=FONT_SEMIBOLD if is_act else FONT_MEDIUM,
-                        color=hex_col,
-                    ),
-                )
-            )
-        status_section.controls = pills
-
-    _rebuild_status_section()
 
     geo_error = ft.Text("", size=12, color=COLORS["error"], visible=False)
     # The Check IP report is the only part that can grow; it scrolls on its own
@@ -522,7 +462,11 @@ def open_profile_dialog(
                 page.update()
                 return
 
-        try:
+        sig = inspect.signature(on_save)
+        has_varargs = any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
+        )
+        if has_varargs or len(sig.parameters) >= 10:
             error = on_save(
                 name,
                 proxy,
@@ -535,7 +479,7 @@ def open_profile_dialog(
                 notes or None,
                 selected_status[0],
             )
-        except TypeError:
+        else:
             error = on_save(
                 name,
                 proxy,
@@ -560,6 +504,7 @@ def open_profile_dialog(
         # Text fields keep Material's 48px height so rows of fields and
         # dropdowns (which cannot go below 48px) line up.
         dropdown.text_size = 14
+
     def _switch_to_batch(_: ft.ControlEvent) -> None:
         page.pop_dialog()
         if on_batch_create is not None:
@@ -624,7 +569,6 @@ def open_profile_dialog(
                     *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
                     _field(get_string("notes_optional"), notes_field),
-                    _field(get_string("status_optional"), status_section),
                     _field(get_string("profile_color"), color_section),
                     ft.Row(
                         spacing=12,

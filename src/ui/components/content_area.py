@@ -1,3 +1,4 @@
+import contextlib
 from collections.abc import Callable
 
 import flet as ft
@@ -174,7 +175,7 @@ def build_pages_bar(
 
         def _on_will_accept(e: ft.DragWillAcceptEvent, box: ft.Container = tab_box) -> None:
             box.border = ft.Border.all(1.5, COLORS["accent"])
-            if box.page is not None:
+            with contextlib.suppress(Exception):
                 box.update()
 
         def _on_leave(
@@ -183,7 +184,7 @@ def build_pages_bar(
             default_border: str = border_col,
         ) -> None:
             box.border = ft.Border.all(1, default_border)
-            if box.page is not None:
+            with contextlib.suppress(Exception):
                 box.update()
 
         def _on_accept(

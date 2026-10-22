@@ -136,9 +136,7 @@ async def run_browser(
             else None
         )
         title_task = (
-            asyncio.create_task(
-                window_title.keep_window_title_prefixed(profile_name, close_event)
-            )
+            asyncio.create_task(window_title.keep_window_title_prefixed(profile_name, close_event))
             if not _headless()
             else None
         )

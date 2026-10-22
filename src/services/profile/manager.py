@@ -31,6 +31,7 @@ from ...utils.validation import (
 from .transfer import export_to_zip, import_from_zip, read_profile_meta
 
 logger = get_logger("profile.manager")
+_UNSET = object()
 
 
 def _engine_or_default(value: object) -> str:
@@ -195,7 +196,11 @@ class ProfileManager:
                     seen_px: set[str] = set()
                     clean_pool: list[str] = []
                     for item in raw_pool:
-                        if isinstance(item, str) and item.strip() and validate_proxy_format(item.strip())[0]:
+                        if (
+                            isinstance(item, str)
+                            and item.strip()
+                            and validate_proxy_format(item.strip())[0]
+                        ):
                             norm = normalize_proxy(item.strip())
                             if norm not in seen_px:
                                 seen_px.add(norm)
@@ -247,6 +252,7 @@ class ProfileManager:
                             "notes": valid_or_none(p_data.get("notes"), validate_notes),
                             "pages": [self._find_page_by_casefold(pg) or pg for pg in pages],
                             "status": valid_or_none(p_data.get("status"), validate_status),
+                            "pinned": bool(p_data.get("pinned", False)),
                         }
                         self.profiles[name] = Profile(**clean_data)
                 logger.info("Loaded %d profiles", len(self.profiles))
@@ -307,6 +313,7 @@ class ProfileManager:
         notes: str | None = None,
         pages: list[str] | None = None,
         status: str | None = None,
+        pinned: bool = False,
     ) -> bool:
         with self._lock:
             if self._find_by_casefold(name) is not None:
@@ -330,6 +337,7 @@ class ProfileManager:
                 notes=notes or None,
                 pages=self._register_pages(pages),
                 status=valid_or_none(status, validate_status),
+                pinned=bool(pinned),
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -347,6 +355,8 @@ class ProfileManager:
         new_group: str | None = None,
         new_notes: str | None = None,
         new_pages: list[str] | None = None,
+        new_status: object = _UNSET,
+        new_pinned: bool | None = None,
     ) -> bool:
         """Replace every field; a None/empty timezone or locale means automatic."""
         with self._lock:
@@ -400,6 +410,13 @@ class ProfileManager:
             profile.notes = new_notes or None
             if new_pages is not None:
                 profile.pages = self._register_pages(new_pages)
+            if new_status is not _UNSET:
+                profile.status = valid_or_none(
+                    new_status if isinstance(new_status, str) else None,
+                    validate_status,
+                )
+            if new_pinned is not None:
+                profile.pinned = bool(new_pinned)
 
             if new_name != original_name:
                 self.profiles = {
@@ -614,7 +631,9 @@ class ProfileManager:
     def restore_profile(self, name: str) -> bool:
         with self._lock:
             trash_data = self._load_trash_dict()
-            key = next((k for k in trash_data if k == name or k.casefold() == name.casefold()), None)
+            key = next(
+                (k for k in trash_data if k == name or k.casefold() == name.casefold()), None
+            )
             if key is None:
                 return False
             p_data = trash_data.pop(key)
@@ -623,7 +642,10 @@ class ProfileManager:
                 idx = 1
                 while True:
                     candidate = f"{key} ({idx})"
-                    if validate_profile_name(candidate)[0] and self._find_by_casefold(candidate) is None:
+                    if (
+                        validate_profile_name(candidate)[0]
+                        and self._find_by_casefold(candidate) is None
+                    ):
                         target_name = candidate
                         break
                     idx += 1
@@ -653,6 +675,7 @@ class ProfileManager:
                 notes=valid_or_none(p_data.get("notes"), validate_notes),
                 pages=pages,
                 status=valid_or_none(p_data.get("status"), validate_status),
+                pinned=bool(p_data.get("pinned", False)),
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -662,7 +685,9 @@ class ProfileManager:
     def delete_trashed_profile(self, name: str) -> bool:
         with self._lock:
             trash_data = self._load_trash_dict()
-            key = next((k for k in trash_data if k == name or k.casefold() == name.casefold()), None)
+            key = next(
+                (k for k in trash_data if k == name or k.casefold() == name.casefold()), None
+            )
             if key is None:
                 return False
             del trash_data[key]
@@ -730,6 +755,28 @@ class ProfileManager:
                 self.save_profiles()
         return count
 
+    def toggle_pin_profile(self, name: str) -> bool | None:
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return None
+            p.pinned = not bool(p.pinned)
+            self.save_profiles()
+            return p.pinned
+
+    def bulk_update_pinned(self, names: list[str], pinned: bool) -> int:
+        target_val = bool(pinned)
+        count = 0
+        with self._lock:
+            for name in names:
+                p = self.profiles.get(name)
+                if p is not None and bool(p.pinned) != target_val:
+                    p.pinned = target_val
+                    count += 1
+            if count:
+                self.save_profiles()
+        return count
+
     def list_status_tags(self) -> list[dict[str, str]]:
         with self._lock:
             return [dict(t) for t in self.status_tags]
@@ -789,22 +836,17 @@ class ProfileManager:
             removed_tags = [
                 t
                 for t in self.status_tags
-                if t["code"].casefold() == target
-                or (t.get("label") or "").casefold() == target
+                if t["code"].casefold() == target or (t.get("label") or "").casefold() == target
             ]
             if not removed_tags:
                 return False
             removed_keys = {
-                s.casefold()
-                for t in removed_tags
-                for s in (t["code"], t.get("label") or "")
-                if s
+                s.casefold() for t in removed_tags for s in (t["code"], t.get("label") or "") if s
             }
             self.status_tags = [
                 t
                 for t in self.status_tags
-                if t["code"].casefold() != target
-                and (t.get("label") or "").casefold() != target
+                if t["code"].casefold() != target and (t.get("label") or "").casefold() != target
             ]
             self._save_status_tags()
             cleared = False
@@ -857,8 +899,7 @@ class ProfileManager:
                 self.proxy_pool = [
                     px
                     for px in self.proxy_pool
-                    if px != target
-                    and (not target_port or extract_proxy_port(px) != target_port)
+                    if px != target and (not target_port or extract_proxy_port(px) != target_port)
                 ]
                 pool_path = self._proxy_pool_file()
                 if self.proxy_pool or pool_path.exists():
@@ -936,8 +977,7 @@ class ProfileManager:
             self.proxy_pool = [
                 px
                 for px in self.proxy_pool
-                if px != target
-                and (not target_port or extract_proxy_port(px) != target_port)
+                if px != target and (not target_port or extract_proxy_port(px) != target_port)
             ]
             if len(self.proxy_pool) < before:
                 self._save_proxy_pool()
@@ -957,13 +997,12 @@ class ProfileManager:
             "locale",
             "color",
             "notes",
+            "pinned",
         ]
         with self._lock:
             selected_set = set(names) if names is not None else None
             rows = [
-                p
-                for p in self.profiles.values()
-                if selected_set is None or p.name in selected_set
+                p for p in self.profiles.values() if selected_set is None or p.name in selected_set
             ]
         path = pathlib.Path(csv_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -974,6 +1013,7 @@ class ProfileManager:
                 writer.writerow(
                     {
                         "name": p.name,
+                        "pinned": "1" if p.pinned else "",
                         "status": p.status or "",
                         "group": p.group or "",
                         "pages": ";".join(p.pages),
@@ -1030,6 +1070,9 @@ class ProfileManager:
                 grp_val = valid_or_none(str(row.get("group") or "").strip(), validate_group)
                 not_val = valid_or_none(str(row.get("notes") or "").strip(), validate_notes)
                 st_val = valid_or_none(str(row.get("status") or "").strip(), validate_status)
+                has_pinned_col = "pinned" in row and row.get("pinned") is not None
+                raw_pinned = str(row.get("pinned") or "").strip().lower()
+                pinned_val = raw_pinned in ("1", "true", "yes", "x", "ghim", "pinned")
                 raw_pages_str = str(row.get("pages") or "").strip()
                 page_list = (
                     [s.strip() for s in raw_pages_str.split(";") if s.strip()]
@@ -1052,6 +1095,8 @@ class ProfileManager:
                     cur.group = grp_val
                     cur.notes = not_val
                     cur.status = st_val
+                    if has_pinned_col:
+                        cur.pinned = pinned_val
                     if canonical_pages:
                         cur.pages = canonical_pages
                     updated += 1
@@ -1073,6 +1118,7 @@ class ProfileManager:
                         notes=not_val,
                         pages=canonical_pages,
                         status=st_val,
+                        pinned=pinned_val,
                     )
                     created += 1
             if created or updated:
@@ -1270,6 +1316,7 @@ class ProfileManager:
                     notes=valid_or_none(p_data.get("notes"), validate_notes),
                     pages=pages,
                     status=valid_or_none(p_data.get("status"), validate_status),
+                    pinned=bool(p_data.get("pinned", False)),
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1

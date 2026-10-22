@@ -51,7 +51,7 @@ class App:
         self._live_since: dict[str, str] = {}
         self.monitor = MonitorService()
         self._last_monitor_snap: MonitorSnapshot | None = None
-        self._filter_column = ft.Column(spacing=2)
+        self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
@@ -151,7 +151,7 @@ class App:
             on_sort=self._on_sort,
             on_reorder=self._on_reorder,
         )
-        self._filter_column = ft.Column(spacing=2)
+        self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
@@ -348,9 +348,31 @@ class App:
 
     def _filter_tests(self) -> dict:
         snap = self._last_monitor_snap
+        cd_target = self.monitor.cooldown_minutes
         return {
             "all": lambda p: True,
+            "pinned": lambda p: bool(getattr(p, "pinned", False)),
             "running": lambda p: self.bl.is_running(p.name),
+            "ready_launch": lambda p: bool(
+                p.proxy
+                and not self.bl.is_running(p.name)
+                and not self.state.is_loading(p.name)
+                and not (snap and p.name in snap.profiles and snap.profiles[p.name].has_warning)
+            ),
+            "cooldown": lambda p: bool(
+                snap
+                and p.name in snap.profiles
+                and not self.bl.is_running(p.name)
+                and (
+                    snap.profiles[p.name].busy_by
+                    or snap.profiles[p.name].port_cooldown_by is not None
+                    or (
+                        cd_target > 0
+                        and snap.profiles[p.name].cooldown_mins is not None
+                        and snap.profiles[p.name].cooldown_mins < cd_target
+                    )
+                )
+            ),
             "warnings": lambda p: bool(
                 snap and p.name in snap.profiles and snap.profiles[p.name].has_warning
             ),
@@ -376,9 +398,7 @@ class App:
         elif self.filter.startswith("status:"):
             target_status = self.filter.removeprefix("status:").casefold()
             all_profiles = [
-                p
-                for p in all_profiles
-                if (p.status or "").strip().casefold() == target_status
+                p for p in all_profiles if (p.status or "").strip().casefold() == target_status
             ]
         else:
             test = self._filter_tests().get(self.filter, lambda p: True)
@@ -431,9 +451,10 @@ class App:
                     return (1, info.cooldown_mins, pname.casefold())
                 return (2, 0, pname.casefold())
 
-            all_profiles.sort(
-                key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key
-            )
+            all_profiles.sort(key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key)
+
+        # Pinned profiles always float to the top while preserving the active sort within each group
+        all_profiles.sort(key=lambda p: not bool(getattr(p, "pinned", False)))
 
         per_page = self.state.items_per_page
         if per_page <= 0:
@@ -564,6 +585,8 @@ class App:
                     on_focus_window=self.h.on_focus_window,
                     on_status_click=self.h.on_set_status,
                     on_session_history=self.h.on_open_session_history,
+                    on_ip_history=self.h.on_open_ip_history,
+                    on_toggle_pin=self.h.on_toggle_pin,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )
@@ -581,6 +604,7 @@ class App:
                 "stop": self.h.on_bulk_stop,
                 "delete": self.h.on_bulk_delete,
                 "select_range": self.h.on_bulk_select_range,
+                "toggle_pin": self.h.on_bulk_toggle_pin,
                 "set_status": self.h.on_bulk_set_status,
                 "set_group": self.h.on_bulk_set_group,
                 "set_color": self.h.on_bulk_set_color,

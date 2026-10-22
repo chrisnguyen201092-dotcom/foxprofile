@@ -125,6 +125,7 @@ def _camoufox_geo(ip: str) -> tuple[str, str, str, float]:
 
 
 _DETAIL_IP_RE = re.compile(r"IP:\s*([0-9a-fA-F:\.]+)")
+_DETAIL_COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})\)")
 
 
 def extract_ip_from_check_detail(detail: str) -> str | None:
@@ -137,19 +138,43 @@ def extract_ip_from_check_detail(detail: str) -> str | None:
     return None
 
 
-def derive_geo_from_ip(ip: str | None) -> tuple[str | None, str | None]:
-    """Derive validated (timezone, locale) from an exit IP using Camoufox's offline GeoIP DB."""
+def extract_country_from_check_detail(detail: str) -> str:
+    """Extract a 2-letter country code (e.g. 'US') from a proxy check result string."""
+    if not detail:
+        return ""
+    m = _DETAIL_COUNTRY_RE.search(detail)
+    if m:
+        code = m.group(1).strip().upper()
+        if code not in ("XX", "T1"):
+            return code
+    return ""
+
+
+def derive_ip_metadata(
+    ip: str | None,
+    detail: str = "",
+) -> tuple[str, str | None, str | None]:
+    """Derive (country_code, timezone, locale) from an exit IP and check detail string."""
+    country = extract_country_from_check_detail(detail)
     if not ip:
-        return None, None
+        return country, None, None
     try:
         from ...utils.validation import validate_locale, validate_timezone
 
-        _country, tz, loc, _share = _camoufox_geo(ip.strip())
+        cam_country, tz, loc, _share = _camoufox_geo(ip.strip())
+        if not country and cam_country and cam_country.upper() not in ("XX", "T1"):
+            country = cam_country.strip().upper()
         clean_tz = tz if tz and validate_timezone(tz)[0] else None
         clean_loc = loc if loc and validate_locale(loc)[0] else None
-        return clean_tz, clean_loc
+        return country, clean_tz, clean_loc
     except Exception:
-        return None, None
+        return country, None, None
+
+
+def derive_geo_from_ip(ip: str | None) -> tuple[str | None, str | None]:
+    """Derive validated (timezone, locale) from an exit IP using Camoufox's offline GeoIP DB."""
+    _country, tz, loc = derive_ip_metadata(ip)
+    return tz, loc
 
 
 def _cloudflare(proxies: dict[str, str] | None) -> SourceResult:

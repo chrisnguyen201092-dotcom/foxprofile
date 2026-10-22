@@ -118,11 +118,7 @@ class AppState:
                 self.last_selected_name = target_name
                 return 1
 
-            indices = [
-                idx
-                for idx, n in enumerate(visible_names)
-                if n in self._selected_profiles
-            ]
+            indices = [idx for idx, n in enumerate(visible_names) if n in self._selected_profiles]
             if len(indices) < 2:
                 return len(indices)
             lo, hi = min(indices), max(indices)

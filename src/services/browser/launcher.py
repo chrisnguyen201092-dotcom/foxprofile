@@ -260,9 +260,7 @@ class BrowserLauncher:
     def arrange_windows(self, profile_names: list[str] | None = None) -> int:
         with self._lock:
             names = (
-                profile_names
-                if profile_names is not None
-                else list(self._active_sessions.keys())
+                profile_names if profile_names is not None else list(self._active_sessions.keys())
             )
             pairs = [
                 (

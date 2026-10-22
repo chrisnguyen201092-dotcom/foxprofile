@@ -14,6 +14,7 @@ from ...utils.validation import (
     validate_locale,
     validate_notes,
     validate_profile_name,
+    validate_status,
     validate_timezone,
 )
 from ..browser.fingerprint import CHROME_PERSONA_FILE
@@ -111,6 +112,8 @@ def import_from_zip(
                 ]
                 if isinstance(profile_data.get("pages"), list)
                 else [],
+                status=valid_or_none(profile_data.get("status"), validate_status),
+                pinned=bool(profile_data.get("pinned", False)),
             )
 
             data_files = [f for f in zipf.namelist() if f.startswith("data/")]

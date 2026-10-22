@@ -22,10 +22,7 @@ def open_export_dialog(
 
     presel = preselected_names or set()
     names = [p.name for p in profiles]
-    checkboxes = [
-        ft.Checkbox(label=n, value=(n in presel), shape=ft.CircleBorder())
-        for n in names
-    ]
+    checkboxes = [ft.Checkbox(label=n, value=(n in presel), shape=ft.CircleBorder()) for n in names]
     include_data_cb = ft.Checkbox(label=get_string("include_browser_data"), value=True)
 
     async def on_export(_: ft.ControlEvent) -> None:

@@ -74,6 +74,12 @@ class ProfileMonitorInfo:
     burst_10m: int = 0
     last_used_port: str = ""
     proxy_port_changed: bool = False
+    last_exit_ip: str = ""
+    last_exit_country: str = ""
+    last_exit_ts: str = ""
+    prev_exit_ip: str = ""
+    prev_exit_country: str = ""
+    ip_country_changed: bool = False
 
     @property
     def has_warning(self) -> bool:
@@ -82,6 +88,7 @@ class ProfileMonitorInfo:
             or self.port_cooldown_by is not None
             or self.burst_10m >= TOKEN_BURST_THRESHOLD
             or self.proxy_port_changed
+            or self.ip_country_changed
         )
 
 
@@ -117,6 +124,7 @@ class MonitorService:
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
         self._last_used_ports: dict[str, str] = {}
+        self._ip_history: dict[str, list[dict[str, str]]] = {}
         self._token_entry_memo: dict[str, tuple[float, bool]] = {}
         self._load_settings()
 
@@ -138,6 +146,27 @@ class MonitorService:
                     self._last_used_ports = {
                         str(k): str(v) for k, v in ports.items() if isinstance(k, str) and v
                     }
+                raw_ips = raw.get("ip_history")
+                if isinstance(raw_ips, dict):
+                    clean_hist: dict[str, list[dict[str, str]]] = {}
+                    for pname, entries in raw_ips.items():
+                        if not isinstance(pname, str) or not isinstance(entries, list):
+                            continue
+                        items: list[dict[str, str]] = []
+                        for item in entries[:20]:
+                            if isinstance(item, dict) and item.get("ip"):
+                                items.append(
+                                    {
+                                        "ip": str(item.get("ip", "")).strip(),
+                                        "country": str(item.get("country", "")).strip().upper(),
+                                        "tz": str(item.get("tz", "")).strip(),
+                                        "port": str(item.get("port", "")).strip(),
+                                        "ts": str(item.get("ts", "")).strip(),
+                                    }
+                                )
+                        if items:
+                            clean_hist[pname] = items
+                    self._ip_history = clean_hist
 
     def _save_settings(self) -> None:
         path = self._settings_file()
@@ -147,6 +176,7 @@ class MonitorService:
             payload = {
                 "cooldown_minutes": self._cooldown_minutes,
                 "last_used_ports": self._last_used_ports,
+                "ip_history": self._ip_history,
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
@@ -165,7 +195,65 @@ class MonitorService:
             self._last_used_ports[profile_name] = port
         else:
             self._last_used_ports.pop(profile_name, None)
+        if profile_name in self._ip_history and len(self._ip_history[profile_name]) > 1:
+            self._ip_history[profile_name] = self._ip_history[profile_name][:1]
         self._save_settings()
+
+    def record_exit_ip(
+        self,
+        profile_name: str,
+        ip: str,
+        *,
+        country: str = "",
+        tz: str = "",
+        proxy: str | None = None,
+    ) -> dict[str, str] | None:
+        """Record an exit IP check for `profile_name` (stored outside camoufox_data/<Profile>/)."""
+        clean_ip = (ip or "").strip()
+        if not clean_ip or not profile_name:
+            return None
+        clean_country = (country or "").strip().upper()
+        if clean_country in ("XX", "T1"):
+            clean_country = ""
+        clean_tz = (tz or "").strip()
+        port = extract_proxy_port(proxy)
+        now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entries = self._ip_history.setdefault(profile_name, [])
+        if (
+            entries
+            and entries[0].get("ip") == clean_ip
+            and (not port or entries[0].get("port", "") == port)
+        ):
+            entries[0]["ts"] = now_str
+            if clean_country:
+                entries[0]["country"] = clean_country
+            if clean_tz:
+                entries[0]["tz"] = clean_tz
+            if port:
+                entries[0]["port"] = port
+            out = dict(entries[0])
+        else:
+            entry = {
+                "ip": clean_ip,
+                "country": clean_country,
+                "tz": clean_tz,
+                "port": port,
+                "ts": now_str,
+            }
+            entries.insert(0, entry)
+            del entries[20:]
+            out = dict(entry)
+        self._save_settings()
+        return out
+
+    def get_ip_history(self, profile_name: str, limit: int = 20) -> list[dict[str, str]]:
+        """Return recorded exit IP entries for `profile_name` (newest first)."""
+        return [dict(item) for item in self._ip_history.get(profile_name, [])[:limit]]
+
+    def clear_ip_history(self, profile_name: str) -> None:
+        """Clear recorded exit IP history for `profile_name`."""
+        if self._ip_history.pop(profile_name, None) is not None:
+            self._save_settings()
 
     def record_started(self, profile_name: str, proxy: str | None = None) -> None:
         self._live_started_at[profile_name] = dt.datetime.now()
@@ -289,7 +377,9 @@ class MonitorService:
                                     {
                                         "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
                                         "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                                        "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                                        "duration_mins": max(1, round(dur / 60))
+                                        if dur >= 10
+                                        else 0,
                                         "port": self._last_used_ports.get(pname, ""),
                                         "is_live": False,
                                     }
@@ -395,11 +485,7 @@ class MonitorService:
         if tabs_mtime > 0:
             try:
                 raw = json.loads(tabs_file.read_text(encoding="utf-8", errors="replace"))
-                urls = (
-                    raw
-                    if isinstance(raw, list)
-                    else (raw.get("tabs") or raw.get("urls") or [])
-                )
+                urls = raw if isinstance(raw, list) else (raw.get("tabs") or raw.get("urls") or [])
                 str_urls = [u for u in urls if isinstance(u, str)]
                 result["tab_count"] = len(str_urls)
                 result["has_thread_url"] = any("/thread/" in u for u in str_urls)
@@ -428,7 +514,16 @@ class MonitorService:
                         hatch_gw = True
                     elif any(
                         k in cname_s.lower()
-                        for k in ("session", "token", "auth", "user", "id", "clerk", "sb-", "hatch_sess")
+                        for k in (
+                            "session",
+                            "token",
+                            "auth",
+                            "user",
+                            "id",
+                            "clerk",
+                            "sb-",
+                            "hatch_sess",
+                        )
                     ):
                         hatch_sess = True
                         if exp:
@@ -619,6 +714,23 @@ class MonitorService:
             has_sess = bool(disk["hatch_gw"] or disk["hatch_sess"])
             proxy_port_changed = bool(has_sess and last_port and port != last_port)
 
+            ip_entries = self._ip_history.get(p.name, [])
+            last_ip = ip_entries[0].get("ip", "") if ip_entries else ""
+            last_country = ip_entries[0].get("country", "") if ip_entries else ""
+            last_ts = ip_entries[0].get("ts", "") if ip_entries else ""
+            prev_ip = ip_entries[1].get("ip", "") if len(ip_entries) > 1 else ""
+            prev_country = ""
+            for prev_entry in ip_entries[1:]:
+                c = prev_entry.get("country", "")
+                if c:
+                    prev_country = c
+                    if not prev_ip:
+                        prev_ip = prev_entry.get("ip", "")
+                    break
+            ip_country_changed = bool(
+                p.proxy and last_country and prev_country and last_country != prev_country
+            )
+
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
                 port=port,
@@ -636,6 +748,12 @@ class MonitorService:
                 burst_10m=int(disk["burst_10m"]),
                 last_used_port=last_port,
                 proxy_port_changed=proxy_port_changed,
+                last_exit_ip=last_ip,
+                last_exit_country=last_country,
+                last_exit_ts=last_ts,
+                prev_exit_ip=prev_ip,
+                prev_exit_country=prev_country,
+                ip_country_changed=ip_country_changed,
             )
 
         return snap
@@ -717,6 +835,22 @@ class MonitorService:
                         "guard_proxy_changed",
                         old_port=info.last_used_port,
                         new_port=info.port or get_string("direct_short"),
+                    ),
+                )
+            )
+
+        # Exit IP country jump detection
+        if info and info.ip_country_changed:
+            warnings.append(
+                PreLaunchWarning(
+                    code="ip_country_changed",
+                    level="warning",
+                    message=get_string(
+                        "guard_ip_country_changed",
+                        old_country=info.prev_exit_country,
+                        old_ip=info.prev_exit_ip or "-",
+                        new_country=info.last_exit_country,
+                        new_ip=info.last_exit_ip or "-",
                     ),
                 )
             )

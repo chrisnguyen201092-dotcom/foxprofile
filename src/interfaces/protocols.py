@@ -21,6 +21,8 @@ class IProfileManager(Protocol):
         group: str | None = None,
         notes: str | None = None,
         pages: list[str] | None = None,
+        status: str | None = None,
+        pinned: bool = False,
     ) -> bool: ...
 
     def update_profile(
@@ -35,6 +37,8 @@ class IProfileManager(Protocol):
         new_group: str | None = None,
         new_notes: str | None = None,
         new_pages: list[str] | None = None,
+        new_status: Any = ...,
+        new_pinned: bool | None = None,
     ) -> bool: ...
 
     def move_profile(self, name: str, direction: int) -> bool: ...
@@ -82,6 +86,10 @@ class IProfileManager(Protocol):
     def bulk_update_color(self, names: list[str], color: str | None) -> int: ...
 
     def bulk_update_status(self, names: list[str], status: str | None) -> int: ...
+
+    def toggle_pin_profile(self, name: str) -> bool | None: ...
+
+    def bulk_update_pinned(self, names: list[str], pinned: bool) -> int: ...
 
     def list_status_tags(self) -> list[dict[str, str]]: ...
 
