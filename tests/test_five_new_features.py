@@ -196,6 +196,8 @@ def test_monitor_service_collisions_and_cooldown(tmp_path):
     conn.close()
 
     assert extract_proxy_port("http://u:p@1.2.3.4:44200") == ":44200"
+    assert extract_proxy_port("sp02-usa102.nguonproxy.com:10620:LF0AI:81379") == ":10620"
+    assert extract_proxy_port("Zb3F3:42425@sp02-usa114.nguonproxy.com:10010") == ":10010"
 
     profiles = [
         Profile(name="Acc 1", proxy="http://u:p@1.2.3.4:44200", os_type="windows"),

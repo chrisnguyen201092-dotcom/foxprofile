@@ -31,7 +31,9 @@ from ..models.profile import Profile
 PORT_COOLDOWN_MINUTES = 15
 TOKEN_BURST_THRESHOLD = 12
 
-_RE_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
+_RE_PORT = re.compile(r":(\d{2,5})(?=:|$|\s|/)")
+_RE_LEGACY_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
+_RE_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 _RE_LOG_LINE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?:\||-)\s+(?P<lvl>\w+)\s+(?:\||-)\s+"
     r"(?P<mod>[\w\.]+)\s+(?:\||-)\s+(?P<msg>.*)$"
@@ -63,7 +65,10 @@ _RE_TRASH_PROFILE = re.compile(r"^(?:Moved profile to trash|Deleted profile):\s*
 def extract_proxy_port(proxy_str: str | None) -> str:
     if not proxy_str:
         return ""
-    m = _RE_PORT.search(proxy_str.strip())
+    s = _RE_SCHEME.sub("", proxy_str.strip())
+    if "@" in s:
+        s = s.rsplit("@", 1)[-1]
+    m = _RE_PORT.search(s)
     return f":{m.group(1)}" if m else ""
 
 
@@ -538,8 +543,7 @@ class MonitorService:
                         oh = hist.pop(old_p)
                         new_port = self._last_used_ports.get(new_p, "")
                         for s_item in oh["sessions"]:
-                            if not s_item.get("port") and new_port:
-                                s_item["port"] = new_port
+                            s_item["port"] = new_port
                         nh["sessions"].extend(oh["sessions"])
                         nh["today_seconds"] += oh["today_seconds"]
                         if oh["last_closed"] and (
@@ -848,6 +852,15 @@ class MonitorService:
             disk_map[p.name] = disk
 
             port = extract_proxy_port(p.proxy)
+            if port and p.name in self._last_used_ports and self._last_used_ports[p.name] != port:
+                m_leg = _RE_LEGACY_PORT.search((p.proxy or "").strip())
+                leg_port = f":{m_leg.group(1)}" if m_leg else ""
+                if leg_port and self._last_used_ports[p.name] == leg_port:
+                    self._last_used_ports[p.name] = port
+                    for s_live in self._live_sessions.get(p.name, []):
+                        if s_live.get("port") == leg_port:
+                            s_live["port"] = port
+                    ports_seeded = True
             if (
                 port
                 and (disk.get("hatch_gw") or disk.get("hatch_sess"))
