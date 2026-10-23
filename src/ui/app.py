@@ -23,7 +23,11 @@ from .components import (
 from .components.content_area import build_monitor_bar
 from .components.profile_card import build_header_row
 from .components.sidebar import build_filter_buttons
-from .dialogs import open_add_to_page_dialog, open_custom_page_dialog
+from .dialogs import (
+    open_add_to_page_dialog,
+    open_custom_page_dialog,
+    open_token_burst_alert_dialog,
+)
 from .dialogs.mcp_guide import open_mcp_guide
 from .handlers import AppHandlers
 from .refs import UIRefs
@@ -52,6 +56,7 @@ class App:
             init_pages[0] if getattr(self.pm, "all_page_index", 0) > 0 and init_pages else "__all__"
         )
         self._live_since: dict[str, str] = {}
+        self._alerted_token_bursts: set[str] = set()
         self.monitor = MonitorService()
         self._last_monitor_snap: MonitorSnapshot | None = None
         self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
@@ -492,6 +497,7 @@ class App:
         for name in set(self._live_since) - running:
             del self._live_since[name]
             self.monitor.record_stopped(name)
+        self._alerted_token_bursts.intersection_update(running)
 
         everything = self.pm.list_profiles()
         snap = self.monitor.snapshot(everything, running | self.state.loading)
@@ -499,6 +505,19 @@ class App:
         alert_bar = build_monitor_bar(snap, len(everything))
         self._monitor_bar_slot.content = alert_bar
         self._monitor_bar_slot.visible = alert_bar is not None
+        new_bursts = [
+            (pname, cnt)
+            for pname, cnt in snap.token_bursts
+            if pname in running and pname not in self._alerted_token_bursts
+        ]
+        if new_bursts and self.page is not None and not self._has_open_dialog():
+            for pname, _ in new_bursts:
+                self._alerted_token_bursts.add(pname)
+            open_token_burst_alert_dialog(
+                self.page,
+                new_bursts,
+                on_focus_window=self.h.on_focus_window,
+            )
         self._arrange_btn.visible = len(running) >= 1
         if hasattr(self.pm, "list_trashed_profiles"):
             self._trash_btn.content = get_string(

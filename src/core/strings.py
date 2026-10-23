@@ -269,6 +269,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "monitor_alert_disk_low": "🚨 LOW DISK SPACE: Only {gb} GB free!",
         "monitor_alert_proxy_collision": "🚨 PROXY COLLISION ({port}): {names}",
         "monitor_alert_token_burst": "⚠ Token burst on {name} ({count}x in 10m)",
+        "token_burst_dialog_title": "Token Refresh Burst Detected",
+        "token_burst_dialog_desc": (
+            "FoxProfile detected abnormally high /api/hatch/token refreshes in the last 10 minutes. "
+            "Please inspect the browser window and close it manually after any active AI response finishes."
+        ),
+        "token_burst_dialog_item": "{name}: {count} token calls in 10 minutes",
+        "token_burst_focus_btn": "Focus Browser",
+        "token_burst_dismiss_btn": "Got it",
         "filter_warnings": "Alerts / IP busy",
         "bulk_set_group": "Set group",
         "bulk_set_color": "Set color",
@@ -745,6 +753,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "monitor_alert_disk_low": "🚨 Ổ ĐĨA SẮP ĐẦY: Chỉ còn trống {gb} GB!",
         "monitor_alert_proxy_collision": "🚨 TRÙNG CỔNG PROXY ({port}): {names}",
         "monitor_alert_token_burst": "⚠ Lặp token trên {name} ({count} lần/10p)",
+        "token_burst_dialog_title": "Cảnh báo Lặp Token (/api/hatch/token)",
+        "token_burst_dialog_desc": (
+            "FoxProfile phát hiện số lần gọi /api/hatch/token tăng cao bất thường trong 10 phút qua. "
+            "Hãy kiểm tra cửa sổ trình duyệt và chủ động đóng lại sau khi AI trả lời xong để bảo vệ tài khoản."
+        ),
+        "token_burst_dialog_item": "{name}: {count} lần gọi token / 10 phút",
+        "token_burst_focus_btn": "Hiện trình duyệt",
+        "token_burst_dismiss_btn": "Đã hiểu",
         "filter_warnings": "Cảnh báo / Bận IP",
         "bulk_set_group": "Đổi nhóm",
         "bulk_set_color": "Đổi màu",

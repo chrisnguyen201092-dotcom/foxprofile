@@ -348,6 +348,7 @@ def test_ui_dialogs_and_profile_card_focus_render():
         open_cooldown_settings_dialog,
         open_export_dialog,
         open_prelaunch_guard_dialog,
+        open_token_burst_alert_dialog,
     )
 
     p = Profile(
@@ -402,7 +403,8 @@ def test_ui_dialogs_and_profile_card_focus_render():
         lambda *_: None,
         preselected_names={"Kenji"},
     )
-    assert len(page.dialogs) == 5
+    open_token_burst_alert_dialog(page, [("Kenji", 14)], on_focus_window=lambda _: None)
+    assert len(page.dialogs) == 6
 
 
 def test_app_handlers_on_launch_and_bulk_launch_with_monitor(isolated_pm, tmp_path):

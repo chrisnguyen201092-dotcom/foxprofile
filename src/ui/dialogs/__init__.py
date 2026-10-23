@@ -22,6 +22,7 @@ from .safety_guard import (
     open_bulk_prelaunch_guard_dialog,
     open_cooldown_settings_dialog,
     open_prelaunch_guard_dialog,
+    open_token_burst_alert_dialog,
 )
 from .trash import open_trash_dialog
 
@@ -46,5 +47,6 @@ __all__ = [
     "open_proxy_pool_dialog",
     "open_session_history_dialog",
     "open_status_dialog",
+    "open_token_burst_alert_dialog",
     "open_trash_dialog",
 ]

@@ -322,3 +322,90 @@ def open_cooldown_settings_dialog(
         ],
     )
     page.show_dialog(dlg)
+
+
+def open_token_burst_alert_dialog(
+    page: ft.Page,
+    bursts: list[tuple[str, int]],
+    on_focus_window: Callable[[str], None] | None = None,
+) -> None:
+    """Modal warning dialog shown on FoxProfile when a running profile exceeds token refresh burst threshold."""
+    rows: list[ft.Control] = []
+    for pname, count in bursts:
+        row_ctrls: list[ft.Control] = [
+            ft.Icon(ft.Icons.BOLT, size=18, color=COLORS["warning"]),
+            ft.Text(
+                get_string("token_burst_dialog_item", name=pname, count=count),
+                size=13,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_main"],
+                expand=True,
+            ),
+        ]
+        if on_focus_window is not None:
+            row_ctrls.append(
+                ft.OutlinedButton(
+                    get_string("token_burst_focus_btn"),
+                    icon=ft.Icons.OPEN_IN_NEW,
+                    height=30,
+                    style=OUTLINE_STYLE,
+                    on_click=lambda _, n=pname: on_focus_window(n),
+                )
+            )
+        rows.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                border_radius=8,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["warning"]),
+                content=ft.Row(
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=row_ctrls,
+                ),
+            )
+        )
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title=ft.Row(
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=22, color=COLORS["warning"]),
+                ft.Text(
+                    get_string("token_burst_dialog_title"),
+                    size=17,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                    expand=True,
+                ),
+            ],
+        ),
+        content=ft.Container(
+            width=460,
+            content=ft.Column(
+                spacing=10,
+                tight=True,
+                controls=[
+                    ft.Text(
+                        get_string("token_burst_dialog_desc"),
+                        size=12.5,
+                        color=COLORS["text_sub"],
+                    ),
+                    *rows,
+                ],
+            ),
+        ),
+        actions=[
+            ft.Button(
+                get_string("token_burst_dismiss_btn"),
+                icon=ft.Icons.CHECK,
+                style=ACCENT_STYLE,
+                on_click=lambda _: page.pop_dialog(),
+            ),
+        ],
+    )
+    page.show_dialog(dlg)

@@ -72,6 +72,20 @@ def extract_proxy_port(proxy_str: str | None) -> str:
     return f":{m.group(1)}" if m else ""
 
 
+def extract_proxy_endpoint(proxy_str: str | None) -> str:
+    if not proxy_str:
+        return ""
+    s = _RE_SCHEME.sub("", proxy_str.strip())
+    if "@" in s:
+        s = s.rsplit("@", 1)[-1]
+    s = s.split("/", 1)[0].strip()
+    m = _RE_PORT.search(s)
+    if not m:
+        return ""
+    host = s[: m.start()].strip().lower()
+    return f"{host}:{m.group(1)}" if host else f":{m.group(1)}"
+
+
 @dataclass
 class PreLaunchWarning:
     code: str
@@ -833,12 +847,12 @@ class MonitorService:
 
         hist = self._refresh_log_history()
 
-        # Group profiles by proxy port
+        # Group profiles by proxy endpoint (host:port) so identical port numbers on different servers never collide
         port_to_profiles: dict[str, list[str]] = {}
         for p in profiles:
-            port = extract_proxy_port(p.proxy)
-            if port:
-                port_to_profiles.setdefault(port, []).append(p.name)
+            ep = extract_proxy_endpoint(p.proxy)
+            if ep:
+                port_to_profiles.setdefault(ep, []).append(p.name)
 
         # Determine disk state, last_closed, and today_minutes per profile first
         today_str = now.strftime("%Y-%m-%d")
@@ -919,19 +933,21 @@ class MonitorService:
         )
 
         active_ports_set: set[str] = set()
-        for port, members in port_to_profiles.items():
+        for ep, members in port_to_profiles.items():
             running_on_port = [m for m in members if m in running_names]
             if running_on_port:
-                active_ports_set.add(port)
+                active_ports_set.add(ep)
             if len(running_on_port) > 1:
-                snap.proxy_collisions.append((port, running_on_port))
+                port_label = f":{ep.rsplit(':', 1)[-1]}" if ":" in ep else ep
+                snap.proxy_collisions.append((port_label, running_on_port))
         snap.active_ports = len(active_ports_set)
 
         cd_target = self._cooldown_minutes
         for p in profiles:
             is_run = p.name in running_names
             port = extract_proxy_port(p.proxy)
-            siblings = port_to_profiles.get(port, [p.name]) if port else [p.name]
+            ep = extract_proxy_endpoint(p.proxy)
+            siblings = port_to_profiles.get(ep, [p.name]) if ep else [p.name]
             busy_by = [m for m in siblings if m != p.name and m in running_names]
 
             lc = last_closed_map.get(p.name)
@@ -1153,8 +1169,9 @@ class MonitorService:
                 snap=snap,
             )
             port = extract_proxy_port(p.proxy)
-            if port:
-                if port in seen_ports:
+            ep = extract_proxy_endpoint(p.proxy)
+            if ep:
+                if ep in seen_ports:
                     wlist.insert(
                         0,
                         PreLaunchWarning(
@@ -1163,12 +1180,12 @@ class MonitorService:
                             message=get_string(
                                 "guard_batch_collision",
                                 port=port,
-                                other=seen_ports[port],
+                                other=seen_ports[ep],
                             ),
                         ),
                     )
                 else:
-                    seen_ports[port] = name
+                    seen_ports[ep] = name
             if wlist:
                 issues[name] = wlist
 
