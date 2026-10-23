@@ -161,7 +161,12 @@ class AppHandlers:
         page = self._get_page()
         if page is None or self._monitor is None:
             return
-        sessions = self._monitor.get_profile_sessions(name)
+        p = self._pm.profiles.get(name)
+        sessions = self._monitor.get_profile_sessions(
+            name,
+            is_running=self._bl.is_running(name),
+            current_proxy=p.proxy if p is not None else None,
+        )
         ip_hist = self._monitor.get_ip_history(name)
         snap = self._monitor.snapshot(
             self._pm.list_profiles(),
@@ -170,7 +175,6 @@ class AppHandlers:
         info = snap.profiles.get(name)
         today_mins = info.today_minutes if info is not None else 0
         last_port = (info.last_used_port or info.port) if info is not None else ""
-        p = self._pm.profiles.get(name)
 
         def _clear_ips() -> None:
             if self._monitor is not None:

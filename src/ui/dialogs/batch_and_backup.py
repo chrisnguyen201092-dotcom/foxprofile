@@ -487,7 +487,7 @@ def open_proxy_pool_dialog(
     """Central Proxy Manager dialog: view all unique proxies, spare unassigned proxies, test, assign, or replace."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=8, height=340, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, height=540, scroll=ft.ScrollMode.AUTO)
     editing_target: list[str | None] = [None]
     assigning_target: list[str | None] = [None]
     adding_open: list[bool] = [False]
@@ -787,7 +787,7 @@ def open_proxy_pool_dialog(
                                             else COLORS["text_main"],
                                         ),
                                     )
-                                    for cand in candidates[:16]
+                                    for cand in candidates[:32]
                                 ],
                             ),
                         ],
@@ -796,7 +796,7 @@ def open_proxy_pool_dialog(
 
             list_col.controls.append(
                 ft.Container(
-                    padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=7),
                     border_radius=8,
                     bgcolor=COLORS["card_bg"],
                     border=ft.Border.all(1, COLORS["accent"]),
@@ -1026,7 +1026,7 @@ def open_proxy_pool_dialog(
 
             list_col.controls.append(
                 ft.Container(
-                    padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=7),
                     border_radius=8,
                     bgcolor=COLORS["input_bg"],
                     border=ft.Border.all(
@@ -1100,7 +1100,7 @@ def open_proxy_pool_dialog(
             ],
         ),
         content=ft.Container(
-            width=600,
+            width=740,
             content=ft.Column(
                 spacing=8,
                 tight=True,

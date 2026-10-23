@@ -37,9 +37,27 @@ _RE_LOG_LINE = re.compile(
     r"(?P<mod>[\w\.]+)\s+(?:\||-)\s+(?P<msg>.*)$"
 )
 _RE_BRACKET_PROFILE = re.compile(r"^\[(?P<prof>[^\]]+)\]\s*(?P<rest>.*)$")
-_RE_STOPPING = re.compile(r"^Stopping browser for (?P<prof>.+?)\.\.\.$")
-_RE_TERMINATED = re.compile(r"^Browser process for (?P<prof>.+?) terminated\.$")
-_RE_SESSION_ENDED = re.compile(r"^(?:Session ended|Phi\u00ean k\u1ebft th\u00fac):\s*(?P<prof>.+)$")
+_RE_STARTING = re.compile(
+    r"^(?:Starting browser for profile|Browser started for profile|\u0110ang kh\u1edfi ch\u1ea1y|Launching):\s*(?P<prof>.+)$"
+)
+_RE_STOPPING = re.compile(
+    r"^(?:Stopping browser for (?P<p1>.+?)\.\.\.|Stopped browser for profile:\s*(?P<p2>.+))$"
+)
+_RE_TERMINATED = re.compile(
+    r"^(?:"
+    r"Browser process for (?P<p1>.+?) terminated\.|"
+    r"Browser (?P<p2>.+?) terminated gracefully|"
+    r"Browser close detected for profile:\s*(?P<p3>.+)"
+    r")$"
+)
+_RE_SESSION_ENDED = re.compile(
+    r"^(?:Session ended(?: for profile)?|Phi\u00ean k\u1ebft th\u00fac|\u0110\u00e3 \u0111\u00f3ng):\s*(?P<prof>.+)$"
+)
+_RE_LAUNCH_FAILED = re.compile(
+    r"^(?:Launch failed for profile|Error starting browser for)\s+(?P<prof>[^:]+):"
+)
+_RE_RENAME_PROFILE = re.compile(r"^Updated profile:\s*(?P<old>.+?)\s*->\s*(?P<new>.+)$")
+_RE_TRASH_PROFILE = re.compile(r"^(?:Moved profile to trash|Deleted profile):\s*(?P<prof>.+)$")
 
 
 def extract_proxy_port(proxy_str: str | None) -> str:
@@ -168,6 +186,31 @@ class MonitorService:
                         if items:
                             clean_hist[pname] = items
                     self._ip_history = clean_hist
+                raw_sess = raw.get("session_history")
+                if isinstance(raw_sess, dict):
+                    clean_sess: dict[str, list[dict[str, Any]]] = {}
+                    for pname, entries in raw_sess.items():
+                        if not isinstance(pname, str) or not isinstance(entries, list):
+                            continue
+                        s_items: list[dict[str, Any]] = []
+                        for item in entries[-50:]:
+                            if (
+                                isinstance(item, dict)
+                                and item.get("start")
+                                and item.get("end")
+                            ):
+                                s_items.append(
+                                    {
+                                        "start": str(item.get("start", "")).strip(),
+                                        "end": str(item.get("end", "")).strip(),
+                                        "duration_mins": int(item.get("duration_mins") or 0),
+                                        "port": str(item.get("port", "")).strip(),
+                                        "is_live": False,
+                                    }
+                                )
+                        if s_items:
+                            clean_sess[pname] = s_items
+                    self._live_sessions = clean_sess
 
     def _save_settings(self) -> None:
         path = self._settings_file()
@@ -178,6 +221,9 @@ class MonitorService:
                 "cooldown_minutes": self._cooldown_minutes,
                 "last_used_ports": self._last_used_ports,
                 "ip_history": self._ip_history,
+                "session_history": {
+                    k: v[-50:] for k, v in self._live_sessions.items() if v
+                },
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
@@ -272,7 +318,9 @@ class MonitorService:
         if old_name in self._live_stopped_at:
             self._live_stopped_at[new_name] = self._live_stopped_at.pop(old_name)
         if old_name in self._live_sessions:
-            self._live_sessions[new_name] = self._live_sessions.pop(old_name)
+            prev_sess = self._live_sessions.pop(old_name)
+            self._live_sessions.setdefault(new_name, []).extend(prev_sess)
+            changed = True
         if old_name in self._disk_cache:
             self._disk_cache[new_name] = self._disk_cache.pop(old_name)
         if changed:
@@ -292,7 +340,8 @@ class MonitorService:
         start_dt = self._live_started_at.pop(profile_name, None)
         if start_dt is not None:
             dur = max(0.0, (now - start_dt).total_seconds())
-            self._live_sessions.setdefault(profile_name, []).append(
+            sessions = self._live_sessions.setdefault(profile_name, [])
+            sessions.append(
                 {
                     "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                     "end": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -301,26 +350,95 @@ class MonitorService:
                     "is_live": False,
                 }
             )
+            del sessions[:-50]
+            self._save_settings()
 
-    def get_profile_sessions(self, profile_name: str, limit: int = 25) -> list[dict[str, Any]]:
-        """Return recent browser sessions for `profile_name` (newest first)."""
-        hist = self._refresh_log_history()
+    def _merged_completed_sessions(
+        self,
+        profile_name: str,
+        hist: dict[str, dict[str, Any]] | None = None,
+        fallback_port: str = "",
+    ) -> list[dict[str, Any]]:
+        if hist is None:
+            hist = self._refresh_log_history()
         h = hist.get(profile_name, {})
-        port = self._last_used_ports.get(profile_name, "")
+        port = self._last_used_ports.get(profile_name, "") or fallback_port
         merged: list[dict[str, Any]] = []
-        seen_starts: set[str] = set()
-        for s in list(h.get("sessions", [])) + list(self._live_sessions.get(profile_name, [])):
-            st = str(s.get("start", ""))
-            if st and st not in seen_starts:
-                seen_starts.add(st)
+        accepted_intervals: list[tuple[dt.datetime | None, dt.datetime | None, str]] = []
+
+        def _parse_ts(val: str) -> dt.datetime | None:
+            if not val:
+                return None
+            with contextlib.suppress(ValueError):
+                return dt.datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+            return None
+
+        candidates = list(h.get("sessions", [])) + list(
+            self._live_sessions.get(profile_name, [])
+        )
+        for s in candidates:
+            st = str(s.get("start", "")).strip()
+            en = str(s.get("end", "")).strip()
+            if not st:
+                continue
+            st_dt = _parse_ts(st)
+            en_dt = _parse_ts(en)
+            is_dup = False
+            for idx, (ast_dt, aen_dt, ast_str) in enumerate(accepted_intervals):
+                if (
+                    st == ast_str
+                    or (
+                        st_dt is not None
+                        and ast_dt is not None
+                        and abs((st_dt - ast_dt).total_seconds()) <= 45.0
+                    )
+                    or (
+                        en_dt is not None
+                        and aen_dt is not None
+                        and abs((en_dt - aen_dt).total_seconds()) <= 45.0
+                    )
+                ):
+                    is_dup = True
+                    if not merged[idx].get("port") and (s.get("port") or port):
+                        merged[idx]["port"] = str(s.get("port") or port)
+                    break
+            if not is_dup:
                 entry = dict(s)
                 if not entry.get("port") and port:
                     entry["port"] = port
+                entry["is_live"] = False
                 merged.append(entry)
-        merged.sort(key=lambda item: str(item.get("start", "")), reverse=True)
+                accepted_intervals.append((st_dt, en_dt, st))
 
+        merged.sort(key=lambda item: str(item.get("start", "")), reverse=True)
+        return merged
+
+    def get_profile_sessions(
+        self,
+        profile_name: str,
+        limit: int = 30,
+        *,
+        is_running: bool | None = None,
+        current_proxy: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent browser sessions for `profile_name` (newest first)."""
+        hist = self._refresh_log_history()
+        h = hist.get(profile_name, {})
+        fallback_port = extract_proxy_port(current_proxy)
+        port = self._last_used_ports.get(profile_name, "") or fallback_port
+        merged = self._merged_completed_sessions(
+            profile_name,
+            hist=hist,
+            fallback_port=fallback_port,
+        )
+
+        show_live = (
+            is_running
+            if is_running is not None
+            else (profile_name in self._live_started_at)
+        )
         live_start = self._live_started_at.get(profile_name) or h.get("_open_start")
-        if live_start is not None and profile_name in self._live_started_at:
+        if show_live and live_start is not None:
             now = dt.datetime.now()
             mins = max(0, int((now - live_start).total_seconds() // 60))
             merged.insert(
@@ -338,7 +456,7 @@ class MonitorService:
     def _refresh_log_history(self) -> dict[str, dict[str, Any]]:
         if not self._log_dir.exists():
             return self._log_history
-        log_files = sorted(self._log_dir.glob("foxprofile_*.log"))[-3:]
+        log_files = sorted(self._log_dir.glob("foxprofile_*.log"))[-30:]
         key_parts: list[tuple[str, float, int]] = []
         for lf in log_files:
             try:
@@ -363,6 +481,24 @@ class MonitorService:
                 }
             return hist[pname]
 
+        def _close_session(h: dict[str, Any], pname: str, ts: dt.datetime, ts_str: str) -> None:
+            start_ts = h["_open_start"]
+            if start_ts is not None:
+                dur = max(0.0, (ts - start_ts).total_seconds())
+                if ts_str.startswith(today_str):
+                    h["today_seconds"] += dur
+                h["sessions"].append(
+                    {
+                        "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                        "port": self._last_used_ports.get(pname, ""),
+                        "is_live": False,
+                    }
+                )
+                h["_open_start"] = None
+            h["last_closed"] = ts
+
         for lf in log_files:
             try:
                 lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -379,37 +515,73 @@ class MonitorService:
                 except ValueError:
                     continue
 
+                mr = _RE_RENAME_PROFILE.match(msg)
+                if mr:
+                    old_p = mr.group("old").strip()
+                    new_p = mr.group("new").strip()
+                    if old_p != new_p and old_p in hist:
+                        nh = _ensure(new_p)
+                        oh = hist.pop(old_p)
+                        new_port = self._last_used_ports.get(new_p, "")
+                        for s_item in oh["sessions"]:
+                            if not s_item.get("port") and new_port:
+                                s_item["port"] = new_port
+                        nh["sessions"].extend(oh["sessions"])
+                        nh["today_seconds"] += oh["today_seconds"]
+                        if oh["last_closed"] and (
+                            not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
+                        ):
+                            nh["last_closed"] = oh["last_closed"]
+                        if oh["_open_start"] and not nh["_open_start"]:
+                            nh["_open_start"] = oh["_open_start"]
+                    continue
+
+                mt = _RE_TRASH_PROFILE.match(msg)
+                if mt:
+                    hist.pop(mt.group("prof").strip(), None)
+                    continue
+
                 mb = _RE_BRACKET_PROFILE.match(msg)
                 if mb:
                     pname = mb.group("prof").strip()
                     rest = mb.group("rest").strip()
                     h = _ensure(pname)
-                    if rest.startswith("Starting browser for ") or rest == "BROWSER_STARTED":
-                        if h["_open_start"] is None:
+                    if (
+                        rest.startswith("Starting browser for ")
+                        or rest.startswith("\u0110ang kh\u1edfi \u0111\u1ed9ng tr\u00ecnh duy\u1ec7t cho ")
+                        or rest == "BROWSER_STARTED"
+                    ):
+                        if h["_open_start"] is None or (
+                            rest != "BROWSER_STARTED"
+                            and (ts - h["_open_start"]).total_seconds() > 120.0
+                        ):
                             h["_open_start"] = ts
                     elif rest in ("BROWSER_CLOSED", "LAUNCH_CANCELLED") or rest.startswith(
                         "LAUNCH_FAILED:"
                     ):
-                        start_ts = h["_open_start"]
-                        if start_ts is not None:
-                            dur = max(0.0, (ts - start_ts).total_seconds())
-                            if ts_str.startswith(today_str):
-                                h["today_seconds"] += dur
-                            if rest == "BROWSER_CLOSED":
-                                h["sessions"].append(
-                                    {
-                                        "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                                        "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                                        "duration_mins": max(1, round(dur / 60))
-                                        if dur >= 10
-                                        else 0,
-                                        "port": self._last_used_ports.get(pname, ""),
-                                        "is_live": False,
-                                    }
-                                )
-                            h["_open_start"] = None
                         if rest == "BROWSER_CLOSED":
-                            h["last_closed"] = ts
+                            _close_session(h, pname, ts, ts_str)
+                        else:
+                            h["_open_start"] = None
+                    continue
+
+                mst = _RE_STARTING.match(msg)
+                if mst:
+                    pname = mst.group("prof").strip()
+                    h = _ensure(pname)
+                    is_ready_line = msg.startswith("Browser started for profile:")
+                    if h["_open_start"] is None or (
+                        not is_ready_line
+                        and (ts - h["_open_start"]).total_seconds() > 120.0
+                    ):
+                        h["_open_start"] = ts
+                    continue
+
+                mlf = _RE_LAUNCH_FAILED.match(msg)
+                if mlf:
+                    pname = mlf.group("prof").strip()
+                    h = _ensure(pname)
+                    h["_open_start"] = None
                     continue
 
                 ms = (
@@ -418,24 +590,32 @@ class MonitorService:
                     or _RE_SESSION_ENDED.match(msg)
                 )
                 if ms:
-                    pname = ms.group("prof").strip()
+                    pname = next(g for g in ms.groups() if g is not None).strip()
                     h = _ensure(pname)
-                    start_ts = h["_open_start"]
-                    if start_ts is not None:
-                        dur = max(0.0, (ts - start_ts).total_seconds())
-                        if ts_str.startswith(today_str):
-                            h["today_seconds"] += dur
-                        h["sessions"].append(
-                            {
-                                "start": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                                "end": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                                "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
-                                "port": self._last_used_ports.get(pname, ""),
-                                "is_live": False,
-                            }
-                        )
-                        h["_open_start"] = None
-                    h["last_closed"] = ts
+                    _close_session(h, pname, ts, ts_str)
+
+        # Merge legacy "<BaseName> (<email_or_note>)" log entries into "<BaseName>"
+        for k in list(hist.keys()):
+            if " (" in k and k.endswith(")"):
+                base = k.split(" (", 1)[0].strip()
+                if base and base != k:
+                    nh = _ensure(base)
+                    oh = hist[k]
+                    base_port = self._last_used_ports.get(base, "")
+                    existing_starts = {s["start"] for s in nh["sessions"]}
+                    for s_item in oh["sessions"]:
+                        if s_item["start"] not in existing_starts:
+                            copied = dict(s_item)
+                            if not copied.get("port") and base_port:
+                                copied["port"] = base_port
+                            nh["sessions"].append(copied)
+                            existing_starts.add(s_item["start"])
+                    nh["sessions"].sort(key=lambda item: str(item.get("start", "")))
+                    nh["today_seconds"] += oh["today_seconds"]
+                    if oh["last_closed"] and (
+                        not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
+                    ):
+                        nh["last_closed"] = oh["last_closed"]
 
         self._log_cache_key = cache_key
         self._log_history = hist
@@ -643,6 +823,7 @@ class MonitorService:
                 port_to_profiles.setdefault(port, []).append(p.name)
 
         # Determine disk state, last_closed, and today_minutes per profile first
+        today_str = now.strftime("%Y-%m-%d")
         disk_map: dict[str, dict[str, Any]] = {}
         last_closed_map: dict[str, dt.datetime | None] = {}
         today_mins_map: dict[str, int] = {}
@@ -662,7 +843,19 @@ class MonitorService:
                 ports_seeded = True
 
             h = hist.get(p.name, {})
+            completed = self._merged_completed_sessions(
+                p.name,
+                hist=hist,
+                fallback_port=port,
+            )
             lc = h.get("last_closed")
+            if completed:
+                with contextlib.suppress(ValueError):
+                    end_dt = dt.datetime.strptime(
+                        str(completed[0].get("end", "")), "%Y-%m-%d %H:%M:%S"
+                    )
+                    if lc is None or end_dt > lc:
+                        lc = end_dt
             live_stop = self._live_stopped_at.get(p.name)
             if live_stop and (lc is None or live_stop > lc):
                 lc = live_stop
@@ -673,7 +866,17 @@ class MonitorService:
                     lc = disk_dt
             last_closed_map[p.name] = lc
 
-            secs = float(h.get("today_seconds", 0.0))
+            secs = 0.0
+            for s_item in completed:
+                en_str = str(s_item.get("end", ""))
+                st_str = str(s_item.get("start", ""))
+                if en_str.startswith(today_str) or st_str.startswith(today_str):
+                    try:
+                        st_dt = dt.datetime.strptime(st_str, "%Y-%m-%d %H:%M:%S")
+                        en_dt = dt.datetime.strptime(en_str, "%Y-%m-%d %H:%M:%S")
+                        secs += max(0.0, (en_dt - st_dt).total_seconds())
+                    except ValueError:
+                        secs += float(s_item.get("duration_mins") or 0) * 60.0
             if p.name in running_names:
                 start_dt = self._live_started_at.get(p.name) or h.get("_open_start")
                 if start_dt and start_dt.date() == now.date():

@@ -1531,7 +1531,7 @@ def test_profile_email_inline_and_monitor_rename(isolated_pm, tmp_path):
     assert card_editing is not None
 
     # MonitorService.rename_profile migrates port & IP history
-    mon = MonitorService(data_dir=str(tmp_path))
+    mon = MonitorService(data_dir=str(tmp_path / "data"), log_dir=str(tmp_path / "logs"))
     mon.record_exit_ip(
         "Monica", "1.2.3.4", country="US", tz="America/Detroit", proxy="http://1.2.3.4:10783"
     )
@@ -1539,3 +1539,64 @@ def test_profile_email_inline_and_monitor_rename(isolated_pm, tmp_path):
     mon.rename_profile("Monica", "Monica2")
     assert len(mon.get_ip_history("Monica")) == 0
     assert len(mon.get_ip_history("Monica2")) == 1
+
+
+def test_session_history_log_parsing_renames_and_persistence(tmp_path):
+    """Test real log line parsing, profile rename & legacy Name (email) migration, and settings persistence."""
+    import datetime as dt
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    today_str = dt.datetime.now().strftime("%Y-%m-%d")
+    log_file = log_dir / f"foxprofile_{today_str.replace('-', '')}.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                f"{today_str} 08:00:00 - INFO - foxprofile.browser.launcher - Starting browser for profile: 1",
+                f"{today_str} 08:00:01 - INFO - foxprofile.app - [1] Starting browser for 1...",
+                f"{today_str} 08:00:08 - INFO - foxprofile.browser.launcher - Browser started for profile: 1",
+                f"{today_str} 08:15:10 - INFO - foxprofile.browser.launcher - Browser close detected for profile: 1",
+                f"{today_str} 08:15:10 - INFO - foxprofile.app - Đã đóng: 1",
+                f"{today_str} 08:15:10 - INFO - foxprofile.browser.launcher - Session ended for profile: 1",
+                f"{today_str} 08:15:10 - INFO - foxprofile.browser.process - Browser 1 terminated gracefully",
+                f"{today_str} 08:16:00 - INFO - foxprofile.profile.manager - Updated profile: 1 -> Monica (vnacc2)",
+                f"{today_str} 08:30:00 - INFO - foxprofile.browser.launcher - Starting browser for profile: Monica",
+                f"{today_str} 08:30:05 - INFO - foxprofile.browser.launcher - Browser started for profile: Monica",
+                f"{today_str} 08:50:05 - INFO - foxprofile.browser.launcher - Browser close detected for profile: Monica",
+                f"{today_str} 08:50:05 - INFO - foxprofile.app - Đã đóng: Monica",
+                f"{today_str} 08:50:05 - INFO - foxprofile.browser.launcher - Session ended for profile: Monica",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    p_monica = Profile(name="Monica", proxy="http://u:p@1.2.3.4:46227", os_type="windows")
+
+    sessions = mon.get_profile_sessions(
+        "Monica",
+        is_running=False,
+        current_proxy=p_monica.proxy,
+    )
+    assert len(sessions) == 2
+    assert sessions[0]["start"] == f"{today_str} 08:30:00"
+    assert sessions[0]["end"] == f"{today_str} 08:50:05"
+    assert sessions[0]["duration_mins"] == 20
+    assert sessions[0]["port"] == ":46227"
+    assert sessions[1]["start"] == f"{today_str} 08:00:00"
+    assert sessions[1]["duration_mins"] == 15
+
+    snap = mon.snapshot([p_monica], set())
+    assert snap.profiles["Monica"].today_minutes == 35
+    assert snap.profiles["Monica"].last_closed is not None
+
+    # Live session persistence across MonitorService restart
+    mon.record_started("Monica", p_monica.proxy)
+    mon.record_stopped("Monica")
+    mon2 = MonitorService(data_dir=str(data_dir), log_dir=str(tmp_path / "empty_logs"))
+    persisted = mon2.get_profile_sessions("Monica", is_running=False)
+    assert len(persisted) == 1
+    assert persisted[0]["port"] == ":46227"
