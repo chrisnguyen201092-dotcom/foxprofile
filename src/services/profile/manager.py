@@ -22,6 +22,7 @@ from ...models.profile import (
 )
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
+from ...utils.totp import normalize_totp_secret
 from ...utils.validation import (
     valid_or_none,
     validate_color,
@@ -29,10 +30,12 @@ from ...utils.validation import (
     validate_group,
     validate_locale,
     validate_notes,
+    validate_password,
     validate_profile_name,
     validate_proxy_format,
     validate_status,
     validate_timezone,
+    validate_two_fa,
 )
 from .transfer import export_to_zip, import_from_zip, read_profile_meta
 
@@ -336,6 +339,11 @@ class ProfileManager:
                             "created_at": created_val,
                             "banned_at": banned_val,
                             "email": valid_or_none(p_data.get("email"), validate_email),
+                            "password": valid_or_none(p_data.get("password"), validate_password),
+                            "two_fa": normalize_totp_secret(
+                                valid_or_none(p_data.get("two_fa"), validate_two_fa)
+                            )
+                            or None,
                         }
                         self.profiles[name] = Profile(**clean_data)
                 logger.info("Loaded %d profiles", len(self.profiles))
@@ -404,6 +412,8 @@ class ProfileManager:
         status: str | None = None,
         pinned: bool = False,
         email: str | None = None,
+        password: str | None = None,
+        two_fa: str | None = None,
     ) -> bool:
         with self._lock:
             if self._find_by_casefold(name) is not None:
@@ -436,6 +446,8 @@ class ProfileManager:
                 if (is_ban_status(clean_status) or has_ban_page(canon_pages))
                 else None,
                 email=valid_or_none(email, validate_email),
+                password=valid_or_none(password, validate_password),
+                two_fa=normalize_totp_secret(valid_or_none(two_fa, validate_two_fa)) or None,
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -456,6 +468,8 @@ class ProfileManager:
         new_status: object = _UNSET,
         new_pinned: bool | None = None,
         new_email: object = _UNSET,
+        new_password: object = _UNSET,
+        new_two_fa: object = _UNSET,
     ) -> bool:
         """Replace every field; a None/empty timezone or locale means automatic."""
         with self._lock:
@@ -522,6 +536,17 @@ class ProfileManager:
                     new_email if isinstance(new_email, str) else None,
                     validate_email,
                 )
+            if new_password is not _UNSET:
+                profile.password = valid_or_none(
+                    new_password if isinstance(new_password, str) else None,
+                    validate_password,
+                )
+            if new_two_fa is not _UNSET:
+                raw_2fa = valid_or_none(
+                    new_two_fa if isinstance(new_two_fa, str) else None,
+                    validate_two_fa,
+                )
+                profile.two_fa = normalize_totp_secret(raw_2fa) or None
             if not profile.created_at:
                 profile.created_at = self._infer_created_at(new_name)
             self._sync_ban_state(profile, was_banned=was_banned)
@@ -728,6 +753,8 @@ class ProfileManager:
                 pages=list(src.pages),
                 status=src.status,
                 email=src.email,
+                password=src.password,
+                two_fa=src.two_fa,
             )
 
     def trash_profile(self, name: str) -> bool:
@@ -814,6 +841,11 @@ class ProfileManager:
                 created_at=created_val,
                 banned_at=banned_val,
                 email=valid_or_none(p_data.get("email"), validate_email),
+                password=valid_or_none(p_data.get("password"), validate_password),
+                two_fa=normalize_totp_secret(
+                    valid_or_none(p_data.get("two_fa"), validate_two_fa)
+                )
+                or None,
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -1176,6 +1208,8 @@ class ProfileManager:
             "created_at",
             "banned_at",
             "email",
+            "password",
+            "two_fa",
         ]
         with self._lock:
             selected_set = set(names) if names is not None else None
@@ -1192,6 +1226,8 @@ class ProfileManager:
                     {
                         "name": p.name,
                         "email": p.email or "",
+                        "password": p.password or "",
+                        "two_fa": p.two_fa or "",
                         "pinned": "1" if p.pinned else "",
                         "status": p.status or "",
                         "group": p.group or "",
@@ -1264,6 +1300,15 @@ class ProfileManager:
 
                 has_email_col = "email" in row and row.get("email") is not None
                 email_val = valid_or_none(str(row.get("email") or "").strip(), validate_email)
+                has_pass_col = "password" in row and row.get("password") is not None
+                pass_val = valid_or_none(str(row.get("password") or "").strip(), validate_password)
+                has_2fa_col = ("two_fa" in row and row.get("two_fa") is not None) or (
+                    "2fa" in row and row.get("2fa") is not None
+                )
+                raw_2fa_col = str(row.get("two_fa") or row.get("2fa") or "").strip()
+                two_fa_val = (
+                    normalize_totp_secret(valid_or_none(raw_2fa_col, validate_two_fa)) or None
+                )
                 has_created_col = "created_at" in row and row.get("created_at") is not None
                 created_val = parse_flexible_date(row.get("created_at"))
                 has_banned_col = "banned_at" in row and row.get("banned_at") is not None
@@ -1286,6 +1331,10 @@ class ProfileManager:
                     cur.status = st_val
                     if has_email_col:
                         cur.email = email_val
+                    if has_pass_col:
+                        cur.password = pass_val
+                    if has_2fa_col:
+                        cur.two_fa = two_fa_val
                     if has_pinned_col:
                         cur.pinned = pinned_val
                     if canonical_pages:
@@ -1325,6 +1374,8 @@ class ProfileManager:
                             else None
                         ),
                         email=email_val,
+                        password=pass_val,
+                        two_fa=two_fa_val,
                     )
                     created += 1
             if created or updated:
@@ -1540,6 +1591,11 @@ class ProfileManager:
                     created_at=created_val,
                     banned_at=banned_val,
                     email=valid_or_none(p_data.get("email"), validate_email),
+                    password=valid_or_none(p_data.get("password"), validate_password),
+                    two_fa=normalize_totp_secret(
+                        valid_or_none(p_data.get("two_fa"), validate_two_fa)
+                    )
+                    or None,
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1

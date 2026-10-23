@@ -1600,3 +1600,173 @@ def test_session_history_log_parsing_renames_and_persistence(tmp_path):
     persisted = mon2.get_profile_sessions("Monica", is_running=False)
     assert len(persisted) == 1
     assert persisted[0]["port"] == ":46227"
+
+
+def test_totp_2fa_and_password_profile_workflow(isolated_pm, tmp_path):
+    """Test offline RFC 6238 TOTP generation, password/2FA persistence, CSV sync, and card badges."""
+    from src.ui.components.profile_card import build_profile_card
+    from src.utils.totp import extract_totp_params, generate_totp, normalize_totp_secret
+    from src.utils.validation import validate_password, validate_two_fa
+
+    # 1. TOTP normalization & RFC 6238 deterministic verification
+    raw_secret = "jbsw y3dp-ehpk 3pxp"
+    assert normalize_totp_secret(raw_secret) == "JBSWY3DPEHPK3PXP"
+    uri = "otpauth://totp/Meta:vnacc2@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Meta&period=30&digits=6"
+    sec, digits, period = extract_totp_params(uri)
+    assert (sec, digits, period) == ("JBSWY3DPEHPK3PXP", 6, 30)
+    assert normalize_totp_secret("invalid_base32_1890!!!") == ""
+
+    pair_t0 = generate_totp(raw_secret, timestamp=59.0)
+    assert pair_t0 is not None
+    code_59, rem_59 = pair_t0
+    assert len(code_59) == 6 and code_59.isdigit()
+    assert rem_59 == 1
+    # URI and raw secret must produce the exact same 6-digit code at the same timestamp
+    assert generate_totp(uri, timestamp=59.0) == (code_59, rem_59)
+
+    assert validate_two_fa(raw_secret)[0] is True
+    assert validate_two_fa(uri)[0] is True
+    assert validate_two_fa("not-base32-0189")[0] is False
+    assert validate_password("MyPass#2026")[0] is True
+
+    # 2. Profile creation, update, clone, and CSV export/import with password & two_fa
+    assert isolated_pm.add_profile(
+        name="Acc2FA",
+        proxy="http://1.2.3.4:10783",
+        os_type="windows",
+        email="acc2fa@gmail.com",
+        password="SecretPass!123",
+        two_fa=raw_secret,
+    )
+    p = isolated_pm.profiles["Acc2FA"]
+    assert p.password == "SecretPass!123"
+    assert p.two_fa == "JBSWY3DPEHPK3PXP"
+
+    assert isolated_pm.clone_profile("Acc2FA", "Acc2FA Clone")
+    cloned = isolated_pm.profiles["Acc2FA Clone"]
+    assert cloned.password == "SecretPass!123"
+    assert cloned.two_fa == "JBSWY3DPEHPK3PXP"
+
+    csv_file = tmp_path / "profiles_2fa.csv"
+    assert isolated_pm.export_profiles_csv(str(csv_file), names=["Acc2FA"]) == 1
+    isolated_pm.update_profile(
+        "Acc2FA",
+        "Acc2FA",
+        "http://1.2.3.4:10783",
+        "windows",
+        new_password="",
+        new_two_fa="",
+    )
+    assert isolated_pm.profiles["Acc2FA"].password is None
+    assert isolated_pm.profiles["Acc2FA"].two_fa is None
+
+    created, updated, skipped = isolated_pm.import_profiles_csv(str(csv_file))
+    assert (created, updated, skipped) == (0, 1, 0)
+    assert isolated_pm.profiles["Acc2FA"].password == "SecretPass!123"
+    assert isolated_pm.profiles["Acc2FA"].two_fa == "JBSWY3DPEHPK3PXP"
+
+    # 3. Profile card renders 2FA & Pass copy chips and triggers callbacks
+    copied_events: list[tuple[str, str]] = []
+    card = build_profile_card(
+        isolated_pm.profiles["Acc2FA"],
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        on_copy_2fa=lambda n: copied_events.append(("2fa", n)),
+        on_copy_password=lambda n: copied_events.append(("pass", n)),
+    )
+    assert card is not None
+
+
+def test_isp_and_datacenter_ip_type_detection_without_blocking_guard(tmp_path):
+    """Test ISP/DC classification, proxy badge formatting, IP history persistence, and non-blocking guard."""
+    import flet as ft
+
+    from src.services.monitor import MonitorService
+    from src.services.proxy.geo_check import classify_isp_type
+    from src.ui.actions.bulk import format_proxy_badge
+    from src.ui.dialogs import open_session_history_dialog
+
+    # 1. Classify ISP vs Datacenter
+    assert classify_isp_type("The Constant Company, LLC (Vultr)", True) == "DC"
+    assert classify_isp_type("DigitalOcean, LLC", None) == "DC"
+    assert classify_isp_type("AT&T Services, Inc.", False) == "ISP"
+    assert classify_isp_type("", None) == ""
+
+    # 2. Proxy badge formatting with DC / ISP tag
+    assert format_proxy_badge(True, "Proxy hoạt động. IP: 45.76.12.34 (US)") == (
+        "ok",
+        "✓ 45.76.12.34 (US)",
+    )
+    assert format_proxy_badge(
+        True,
+        "Proxy hoạt động. IP: 45.76.12.34 (US)",
+        ip_type="DC",
+        country="US",
+    ) == ("ok", "✓ 45.76.12.34 (US·DC)")
+
+    # 3. MonitorService records ISP & IP type and persists them across reloads
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    p_dc = Profile(
+        name="Monica",
+        proxy="http://u:p@45.76.12.34:46227",
+        os_type="windows",
+        timezone="America/Chicago",
+        locale="en-US",
+    )
+    mon.record_exit_ip(
+        "Monica",
+        "45.76.12.34",
+        country="US",
+        tz="America/Chicago",
+        proxy=p_dc.proxy,
+        isp="Choopa, LLC",
+        ip_type="DC",
+    )
+    snap = mon.snapshot([p_dc], set())
+    info = snap.profiles["Monica"]
+    assert info.last_exit_ip == "45.76.12.34"
+    assert info.last_exit_country == "US"
+    assert info.last_exit_isp == "Choopa, LLC"
+    assert info.last_exit_ip_type == "DC"
+
+    # Datacenter IP must NOT trigger any pre-launch blocking warning
+    assert mon.check_prelaunch(p_dc, [p_dc], set(), snap=snap) == []
+
+    # Reload MonitorService and verify ISP/IP type persisted in monitor_settings.json
+    mon2 = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    hist = mon2.get_ip_history("Monica")
+    assert len(hist) == 1
+    assert hist[0]["isp"] == "Choopa, LLC"
+    assert hist[0]["ip_type"] == "DC"
+
+    # Render IP history dialog with ISP and DC badge
+    class FakePage:
+        def __init__(self):
+            self.dialogs: list[ft.AlertDialog] = []
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+    fp = FakePage()
+    open_session_history_dialog(
+        fp,  # type: ignore[arg-type]
+        "Monica",
+        [],
+        ip_history=hist,
+        initial_tab="ips",
+    )
+    assert len(fp.dialogs) == 1

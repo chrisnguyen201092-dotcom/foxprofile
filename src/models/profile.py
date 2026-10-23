@@ -252,6 +252,8 @@ class Profile:
     created_at: str | None = None
     banned_at: str | None = None
     email: str | None = None
+    password: str | None = None
+    two_fa: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

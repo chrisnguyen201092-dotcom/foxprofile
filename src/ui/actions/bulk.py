@@ -6,7 +6,11 @@ import flet as ft
 from ...core.strings import get_string
 from ...interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ...services.monitor import MonitorService
-from ...services.proxy.geo_check import derive_ip_metadata, extract_ip_from_check_detail
+from ...services.proxy.geo_check import (
+    derive_ip_metadata,
+    extract_ip_from_check_detail,
+    lookup_ip_isp,
+)
 from ..dialogs import open_confirm_dialog
 from ..state import AppState
 from .browser import launch_or_stop
@@ -44,7 +48,13 @@ def bulk_delete_profiles(
     )
 
 
-def format_proxy_badge(ok: bool, detail: str) -> tuple[str, str]:
+def format_proxy_badge(
+    ok: bool,
+    detail: str,
+    *,
+    ip_type: str = "",
+    country: str = "",
+) -> tuple[str, str]:
     if ok:
         ip_part = detail.split("IP:", 1)[-1].strip() if "IP:" in detail else detail
         if ":" in ip_part and len(ip_part) > 22:
@@ -53,6 +63,18 @@ def format_proxy_badge(ok: bool, detail: str) -> tuple[str, str]:
             segs = ip_only.split(":")
             if len(segs) >= 4:
                 ip_part = f"{segs[0]}:..:{segs[-1]}" + (f" {tail}" if tail else "")
+        clean_type = (ip_type or "").strip().upper()
+        clean_country = (country or "").strip().upper()
+        if clean_type:
+            if "(" in ip_part and ip_part.endswith(")"):
+                base_ip, _, paren = ip_part.rpartition("(")
+                inner = paren[:-1].strip()
+                if clean_type not in inner:
+                    ip_part = f"{base_ip.strip()} ({inner}·{clean_type})"
+            elif clean_country:
+                ip_part = f"{ip_part} ({clean_country}·{clean_type})"
+            else:
+                ip_part = f"{ip_part} ({clean_type})"
         return ("ok", f"✓ {ip_part}")
     reason = detail.split(":", 1)[-1].strip() if ":" in detail else detail
     return ("fail", f"✗ {reason[:28]}")
@@ -95,10 +117,10 @@ async def bulk_check_proxies(
         nonlocal ok_count, fail_count
         async with sem:
             ok, detail = await asyncio.to_thread(ps.check_proxy_sync, pstr, 10)
-        badge = format_proxy_badge(ok, detail)
         raw_ip: str | None = None
         country = ""
         auto_tz, auto_loc = (None, None)
+        isp_name, ip_type = ("", "")
         if ok:
             raw_ip = extract_ip_from_check_detail(detail)
             if raw_ip and (auto_pin_geo or monitor is not None):
@@ -107,6 +129,8 @@ async def bulk_check_proxies(
                     raw_ip,
                     detail,
                 )
+                isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+        badge = format_proxy_badge(ok, detail, ip_type=ip_type, country=country)
         for pname in member_names:
             if ok:
                 ok_count += 1
@@ -117,6 +141,8 @@ async def bulk_check_proxies(
                         country=country,
                         tz=auto_tz or "",
                         proxy=pstr,
+                        isp=isp_name,
+                        ip_type=ip_type,
                     )
             else:
                 fail_count += 1

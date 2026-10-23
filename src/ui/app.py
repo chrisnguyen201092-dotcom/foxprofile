@@ -599,6 +599,8 @@ class App:
                     on_ip_history=self.h.on_open_ip_history,
                     on_toggle_pin=self.h.on_toggle_pin,
                     on_edit_dates=self.h.on_edit_dates,
+                    on_copy_2fa=self.h.on_copy_2fa,
+                    on_copy_password=self.h.on_copy_password,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )

@@ -8,7 +8,12 @@ import flet as ft
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.monitor import MonitorService
-from ..services.proxy.geo_check import derive_ip_metadata, extract_ip_from_check_detail
+from ..services.proxy.geo_check import (
+    derive_ip_metadata,
+    extract_ip_from_check_detail,
+    lookup_ip_isp,
+)
+from ..utils.totp import generate_totp
 from ..utils.validation import validate_email, validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
@@ -18,7 +23,7 @@ from .actions.bulk import (
     bulk_stop_profiles,
     format_proxy_badge,
 )
-from .actions.cookies import manage_cookies
+from .actions.cookies import _set_clipboard_text, manage_cookies
 from .actions.profile import add_profile, delete_profile, edit_profile
 from .actions.transfer import export_profile, import_profile
 from .dialogs import (
@@ -510,6 +515,29 @@ class AppHandlers:
             self._log(get_string("quick_saved_email", name=name))
         self._refresh()
 
+    def on_copy_2fa(self, name: str) -> None:
+        p = self._pm.profiles.get(name)
+        if p is None:
+            return
+        pair = generate_totp(getattr(p, "two_fa", None))
+        if pair is None:
+            return
+        code, rem = pair
+        page = self._get_page()
+        if page is not None and hasattr(page, "run_task"):
+            page.run_task(_set_clipboard_text, page, code)
+        self._log(get_string("copied_2fa_log", name=name, code=code, rem=rem))
+        self._refresh()
+
+    def on_copy_password(self, name: str) -> None:
+        p = self._pm.profiles.get(name)
+        if p is None or not getattr(p, "password", None):
+            return
+        page = self._get_page()
+        if page is not None and hasattr(page, "run_task"):
+            page.run_task(_set_clipboard_text, page, str(p.password))
+        self._log(get_string("copied_password_log", name=name))
+
     def on_start_edit_proxy(self, name: str) -> None:
         self._state.editing_note = None
         self._state.editing_email = None
@@ -561,10 +589,10 @@ class AppHandlers:
 
         async def _check() -> None:
             ok, detail = await asyncio.to_thread(self._ps.check_proxy_sync, proxy_str, 10)
-            badge = format_proxy_badge(ok, detail)
             raw_ip: str | None = None
             country = ""
             auto_tz, auto_loc = (None, None)
+            isp_name, ip_type = ("", "")
             if ok:
                 raw_ip = extract_ip_from_check_detail(detail)
                 if raw_ip:
@@ -573,6 +601,8 @@ class AppHandlers:
                         raw_ip,
                         detail,
                     )
+                    isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+            badge = format_proxy_badge(ok, detail, ip_type=ip_type, country=country)
             for sib in siblings:
                 self._state.proxy_status[sib] = badge
                 if ok and raw_ip and self._monitor is not None:
@@ -582,6 +612,8 @@ class AppHandlers:
                         country=country,
                         tz=auto_tz or "",
                         proxy=proxy_str,
+                        isp=isp_name,
+                        ip_type=ip_type,
                     )
                 if (
                     ok

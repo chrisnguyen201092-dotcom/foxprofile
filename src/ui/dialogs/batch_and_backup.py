@@ -1232,6 +1232,8 @@ def open_session_history_dialog(
             tz_val = str(item.get("tz") or "").strip()
             port_val = str(item.get("port") or "-")
             ts_val = str(item.get("ts") or "")
+            isp_val = str(item.get("isp") or "").strip()
+            ip_type_val = str(item.get("ip_type") or "").strip().upper()
             older = ip_items[idx + 1] if idx + 1 < len(ip_items) else None
             older_country = str(older.get("country") or "").strip().upper() if older else ""
             older_ip = str(older.get("ip") or "").strip() if older else ""
@@ -1252,7 +1254,7 @@ def open_session_history_dialog(
                 badge_text = get_string("ip_hist_badge_ip_changed")
                 badge_col = COLORS["accent"]
 
-            meta_parts = [p for p in (country_val, tz_val, ts_val) if p]
+            meta_parts = [p for p in (country_val, isp_val, tz_val, ts_val) if p]
             meta_line = " · ".join(meta_parts)
 
             top_controls: list[ft.Control] = [
@@ -1277,6 +1279,23 @@ def open_session_history_dialog(
                             font_family=FONT_DATA,
                             weight=ft.FontWeight.W_700,
                             color=COLORS["text_main"],
+                        ),
+                    )
+                )
+            if ip_type_val:
+                top_controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=COLORS["card_bg"],
+                        border=ft.Border.all(1, COLORS["rule_strong"]),
+                        tooltip=isp_val or ip_type_val,
+                        content=ft.Text(
+                            ip_type_val,
+                            size=10,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_600,
+                            color=COLORS["text_sub"],
                         ),
                     )
                 )

@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from ..core.strings import get_string
 from .proxy_parser import normalize_proxy
+from .totp import normalize_totp_secret
 
 _INVALID_CHARS = '<>:"/\\|?*'
 _RESERVED_NAMES = {
@@ -65,6 +66,27 @@ def validate_email(value: str) -> tuple[bool, str]:
     found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
     if found_control:
         return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    return True, ""
+
+
+def validate_password(value: str) -> tuple[bool, str]:
+    """Optional account password (up to 160 characters, no control chars)."""
+    if not value:
+        return True, ""
+    if len(value) > 160:
+        return False, get_string("validation_password_too_long")
+    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
+    if found_control:
+        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    return True, ""
+
+
+def validate_two_fa(value: str) -> tuple[bool, str]:
+    """Optional Base32 2FA TOTP secret or otpauth:// URI."""
+    if not value:
+        return True, ""
+    if len(value) > 512 or not normalize_totp_secret(value):
+        return False, get_string("validation_invalid_two_fa")
     return True, ""
 
 

@@ -7,6 +7,7 @@ from datetime import datetime
 from ...core.config import FINGERPRINT_FILE
 from ...core.logging import get_logger
 from ...models.profile import ENGINES, Profile, parse_flexible_date
+from ...utils.totp import normalize_totp_secret
 from ...utils.validation import (
     valid_or_none,
     validate_color,
@@ -14,9 +15,11 @@ from ...utils.validation import (
     validate_group,
     validate_locale,
     validate_notes,
+    validate_password,
     validate_profile_name,
     validate_status,
     validate_timezone,
+    validate_two_fa,
 )
 from ..browser.fingerprint import CHROME_PERSONA_FILE
 
@@ -118,6 +121,11 @@ def import_from_zip(
                 created_at=parse_flexible_date(profile_data.get("created_at")),
                 banned_at=parse_flexible_date(profile_data.get("banned_at")),
                 email=valid_or_none(profile_data.get("email"), validate_email),
+                password=valid_or_none(profile_data.get("password"), validate_password),
+                two_fa=normalize_totp_secret(
+                    valid_or_none(profile_data.get("two_fa"), validate_two_fa)
+                )
+                or None,
             )
 
             data_files = [f for f in zipf.namelist() if f.startswith("data/")]

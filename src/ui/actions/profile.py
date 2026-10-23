@@ -70,6 +70,8 @@ def edit_profile(
         notes: str | None = None,
         status: str | None = None,
         email: str | None = None,
+        password: str | None = None,
+        two_fa: str | None = None,
     ) -> str | None:
         if new_name != original and bl.is_running(original):
             return get_string("stop_before_rename")
@@ -85,6 +87,8 @@ def edit_profile(
             notes,
             new_status=status,
             new_email=email,
+            new_password=password,
+            new_two_fa=two_fa,
         ):
             if new_name != original and monitor is not None and hasattr(monitor, "rename_profile"):
                 monitor.rename_profile(original, new_name)
@@ -124,6 +128,8 @@ def add_profile(
         notes: str | None = None,
         status: str | None = None,
         email: str | None = None,
+        password: str | None = None,
+        two_fa: str | None = None,
     ) -> str | None:
         if engine == "chrome" and (reason := chrome_prefetch.unsupported_reason()):
             return get_string("chrome_engine_unsupported", reason=reason)
@@ -141,6 +147,8 @@ def add_profile(
             pages=init_pages,
             status=status,
             email=email,
+            password=password,
+            two_fa=two_fa,
         ):
             log(get_string("created_profile", name=name))
             if engine == "chrome":

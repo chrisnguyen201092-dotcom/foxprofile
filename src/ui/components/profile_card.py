@@ -13,6 +13,7 @@ from ...models.profile import (
 )
 from ...services.monitor import ProfileMonitorInfo
 from ...utils.proxy_parser import mask_proxy
+from ...utils.totp import generate_totp
 from ..theme.colors import COLORS, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.styles import DANGER_ICON_STYLE, ICON_STYLE
 from .launch_button import build_launch_button
@@ -213,6 +214,8 @@ def build_profile_card(
     on_ip_history: Callable[[str], None] | None = None,
     on_toggle_pin: Callable[[str], None] | None = None,
     on_edit_dates: Callable[[str], None] | None = None,
+    on_copy_2fa: Callable[[str], None] | None = None,
+    on_copy_password: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -364,6 +367,9 @@ def build_profile_card(
     )
 
     email_val = (getattr(profile, "email", None) or "").strip()
+    password_val = (getattr(profile, "password", None) or "").strip()
+    two_fa_val = (getattr(profile, "two_fa", None) or "").strip()
+    totp_pair = generate_totp(two_fa_val) if two_fa_val else None
     if editing_email and on_save_email is not None:
         email_input = ft.TextField(
             value=email_val,
@@ -394,7 +400,7 @@ def build_profile_card(
             on_blur=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
         )
         text_block = _stack(top_line, note_input)
-    elif email_val or profile.notes:
+    elif email_val or password_val or totp_pair is not None or profile.notes:
         sub_parts: list[ft.Control] = []
         if email_val:
             email_widget: ft.Control = ft.Text(
@@ -416,6 +422,48 @@ def build_profile_card(
                     content=email_widget,
                 )
             sub_parts.append(email_widget)
+        if totp_pair is not None:
+            otp_code, otp_rem = totp_pair
+            totp_chip = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["accent"]),
+                ink=on_copy_2fa is not None,
+                tooltip=get_string("tooltip_copy_2fa", code=otp_code, rem=otp_rem),
+                on_click=(
+                    (lambda _, n=profile.name: on_copy_2fa(n)) if on_copy_2fa is not None else None
+                ),
+                content=ft.Text(
+                    f"2FA {otp_code}",
+                    size=10,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_600,
+                    color=COLORS["accent"],
+                ),
+            )
+            sub_parts.append(totp_chip)
+        if password_val:
+            pass_chip = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["rule_strong"]),
+                ink=on_copy_password is not None,
+                tooltip=get_string("tooltip_copy_password"),
+                on_click=(
+                    (lambda _, n=profile.name: on_copy_password(n))
+                    if on_copy_password is not None
+                    else None
+                ),
+                content=ft.Text(
+                    get_string("badge_copy_pass"),
+                    size=10,
+                    font_family=FONT_MEDIUM,
+                    color=COLORS["text_sub"],
+                ),
+            )
+            sub_parts.append(pass_chip)
         if profile.notes:
             single_line_note = " ".join(profile.notes.splitlines()).strip()
             note_widget: ft.Control = ft.Text(
@@ -685,13 +733,16 @@ def _device(
     )
 
 
-def _shorten_ip_label(ip: str, country: str = "") -> str:
+def _shorten_ip_label(ip: str, country: str = "", ip_type: str = "") -> str:
     clean_ip = (ip or "").strip()
     if ":" in clean_ip and len(clean_ip) > 18:
         segs = clean_ip.split(":")
         if len(segs) >= 4:
             clean_ip = f"{segs[0]}:..:{segs[-1]}"
-    return f"{clean_ip} ({country})" if country else clean_ip
+    c_str = (country or "").strip().upper()
+    t_str = (ip_type or "").strip().upper()
+    tag = "·".join(x for x in (c_str, t_str) if x)
+    return f"{clean_ip} ({tag})" if tag else clean_ip
 
 
 def _proxy(
@@ -767,6 +818,7 @@ def _proxy(
         short_ip = _shorten_ip_label(
             monitor_info.last_exit_ip,
             monitor_info.last_exit_country,
+            getattr(monitor_info, "last_exit_ip_type", ""),
         )
         sub_label = f"{scheme.upper()} · {short_ip}"
         sub_color = COLORS["text_sub"]
@@ -785,6 +837,8 @@ def _proxy(
         if on_start_edit_proxy is not None
         else host_text
     )
+    isp_detail = getattr(monitor_info, "last_exit_isp", "") if monitor_info is not None else ""
+    base_tip = f"{sub_label} · {isp_detail}" if isp_detail else sub_label
     line2_text = ft.Text(
         sub_label,
         size=11.5,
@@ -793,9 +847,9 @@ def _proxy(
         no_wrap=True,
         overflow=ft.TextOverflow.ELLIPSIS,
         tooltip=(
-            f"{sub_label} ({get_string('tooltip_ip_history')})"
+            f"{base_tip} ({get_string('tooltip_ip_history')})"
             if on_ip_history is not None
-            else sub_label
+            else base_tip
         ),
     )
     line2: ft.Control = (

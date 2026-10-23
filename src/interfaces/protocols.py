@@ -24,6 +24,8 @@ class IProfileManager(Protocol):
         status: str | None = None,
         pinned: bool = False,
         email: str | None = None,
+        password: str | None = None,
+        two_fa: str | None = None,
     ) -> bool: ...
 
     def update_profile(
@@ -41,6 +43,8 @@ class IProfileManager(Protocol):
         new_status: Any = ...,
         new_pinned: bool | None = None,
         new_email: Any = ...,
+        new_password: Any = ...,
+        new_two_fa: Any = ...,
     ) -> bool: ...
 
     def move_profile(self, name: str, direction: int) -> bool: ...

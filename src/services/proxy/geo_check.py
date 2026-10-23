@@ -36,6 +36,7 @@ class SourceResult:
     city: str | None = None
     timezone: str | None = None
     hosting: bool | None = None
+    isp: str | None = None
     error: str | None = None
 
 
@@ -125,7 +126,106 @@ def _camoufox_geo(ip: str) -> tuple[str, str, str, float]:
 
 
 _DETAIL_IP_RE = re.compile(r"IP:\s*([0-9a-fA-F:\.]+)")
-_DETAIL_COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})\)")
+_DETAIL_COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})(?:\b|[^A-Za-z])")
+_DC_KEYWORDS = (
+    "choopa",
+    "vultr",
+    "constant company",
+    "digitalocean",
+    "amazon",
+    "aws",
+    "google cloud",
+    "google llc",
+    "microsoft",
+    "azure",
+    "hetzner",
+    "ovh",
+    "contabo",
+    "linode",
+    "akamai",
+    "leaseweb",
+    "datacamp",
+    "cdn77",
+    "tzulo",
+    "psychz",
+    "velia",
+    "hostinger",
+    "m247",
+    "cogent",
+    "zenlayer",
+    "frantech",
+    "buyvm",
+    "multacom",
+    "colocrossing",
+    "sharktech",
+    "ionos",
+    "kamatera",
+    "upcloud",
+    "scaleway",
+    "oracle",
+    "alibaba",
+    "tencent",
+    "hosting",
+    "datacenter",
+    "data center",
+    "server",
+    "vps",
+    "cloud",
+    "dedipath",
+    "nocix",
+    "wholesale internet",
+    "quadranet",
+    "performive",
+    "hivelocity",
+)
+_ISP_MEMO: dict[str, tuple[str, str]] = {}
+
+
+def classify_isp_type(isp_or_org: str | None, hosting_flag: bool | None = None) -> str:
+    """Classify an IP as `'DC'` (Datacenter/Hosting) or `'ISP'` (Residential/ISP), or `''`."""
+    clean = (isp_or_org or "").strip()
+    low = clean.lower()
+    if hosting_flag is True:
+        return "DC"
+    if low and any(k in low for k in _DC_KEYWORDS):
+        return "DC"
+    if hosting_flag is False and clean:
+        return "ISP"
+    if clean:
+        return "ISP"
+    return ""
+
+
+def lookup_ip_isp(ip: str | None, timeout: float = 3.5) -> tuple[str, str]:
+    """Return `(isp_name, ip_type)` for `ip` (`ip_type` is `'DC'`, `'ISP'`, or `''`)."""
+    clean_ip = (ip or "").strip()
+    if not clean_ip:
+        return "", ""
+    cached = _ISP_MEMO.get(clean_ip)
+    if cached is not None:
+        return cached
+    try:
+        import requests
+
+        resp = requests.get(
+            f"http://ip-api.com/json/{clean_ip}?fields=status,isp,org,hosting",
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and data.get("status") == "success":
+                raw_isp = str(data.get("isp") or data.get("org") or "").strip()
+                hosting = data.get("hosting")
+                ip_type = classify_isp_type(
+                    raw_isp,
+                    hosting if isinstance(hosting, bool) else None,
+                )
+                res = (raw_isp, ip_type)
+                _ISP_MEMO[clean_ip] = res
+                return res
+    except Exception:
+        pass
+    return "", ""
 
 
 def extract_ip_from_check_detail(detail: str) -> str | None:
@@ -185,21 +285,26 @@ def _cloudflare(proxies: dict[str, str] | None) -> SourceResult:
 
 def _ipinfo(proxies: dict[str, str] | None) -> SourceResult:
     data = _get("https://ipinfo.io/json", proxies).json()
+    org = str(data.get("org") or "").strip()
+    # Strip leading ASN prefix like "AS20473 " if present
+    isp_clean = re.sub(r"^AS\d+\s+", "", org).strip() if org else None
     return SourceResult(
         "ipinfo",
         ip=data.get("ip"),
         country=data.get("country"),
         city=data.get("city"),
         timezone=data.get("timezone"),
+        isp=isp_clean or None,
     )
 
 
 def _ipapi(proxies: dict[str, str] | None) -> SourceResult:
     # The free ip-api endpoint is HTTP only.
-    fields = "status,message,query,countryCode,city,timezone,hosting"
+    fields = "status,message,query,countryCode,city,timezone,isp,org,hosting"
     data = _get(f"http://ip-api.com/json?fields={fields}", proxies).json()
     if data.get("status") != "success":
         return SourceResult("ip-api", error=str(data.get("message") or data))
+    isp_val = str(data.get("isp") or data.get("org") or "").strip() or None
     return SourceResult(
         "ip-api",
         ip=data.get("query"),
@@ -207,6 +312,7 @@ def _ipapi(proxies: dict[str, str] | None) -> SourceResult:
         city=data.get("city"),
         timezone=data.get("timezone"),
         hosting=bool(data.get("hosting")),
+        isp=isp_val,
     )
 
 

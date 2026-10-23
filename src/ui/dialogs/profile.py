@@ -17,9 +17,11 @@ from ...utils.validation import (
     validate_group,
     validate_locale,
     validate_notes,
+    validate_password,
     validate_profile_name,
     validate_proxy_format,
     validate_timezone,
+    validate_two_fa,
 )
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_engine_dropdown, build_os_dropdown
@@ -53,6 +55,20 @@ def open_profile_dialog(
     email_field = ft.TextField(
         value=(getattr(profile, "email", None) or "") if profile is not None else "",
         hint_text=get_string("email_hint"),
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    password_field = ft.TextField(
+        value=(getattr(profile, "password", None) or "") if profile is not None else "",
+        hint_text=get_string("password_hint"),
+        password=True,
+        can_reveal_password=True,
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    two_fa_field = ft.TextField(
+        value=(getattr(profile, "two_fa", None) or "") if profile is not None else "",
+        hint_text=get_string("two_fa_hint"),
         text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
@@ -431,6 +447,8 @@ def open_profile_dialog(
     def on_submit(_: ft.ControlEvent) -> None:
         name = (name_field.value or "").strip()
         email = (email_field.value or "").strip()
+        password = (password_field.value or "").strip()
+        two_fa = (two_fa_field.value or "").strip()
         group = (group_field.value or "").strip()
         notes = (notes_field.value or "").strip()
         proxy = (proxy_field.value or "").strip()
@@ -449,6 +467,8 @@ def open_profile_dialog(
 
         for validate_meta, meta_val in (
             (validate_email, email),
+            (validate_password, password),
+            (validate_two_fa, two_fa),
             (validate_group, group),
             (validate_notes, notes),
         ):
@@ -478,7 +498,23 @@ def open_profile_dialog(
         has_varargs = any(
             p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
         )
-        if has_varargs or len(sig.parameters) >= 11:
+        if has_varargs or len(sig.parameters) >= 13:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+                email or None,
+                password or None,
+                two_fa or None,
+            )
+        elif len(sig.parameters) >= 11:
             error = on_save(
                 name,
                 proxy,
@@ -595,6 +631,20 @@ def open_profile_dialog(
                     *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
                     _field(get_string("email_optional"), email_field),
+                    ft.Row(
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Container(
+                                expand=2,
+                                content=_field(get_string("password_optional"), password_field),
+                            ),
+                            ft.Container(
+                                expand=3,
+                                content=_field(get_string("two_fa_optional"), two_fa_field),
+                            ),
+                        ],
+                    ),
                     _field(get_string("notes_optional"), notes_field),
                     _field(get_string("profile_color"), color_section),
                     ft.Row(
@@ -799,19 +849,17 @@ def _geo_lines(result: GeoCheckResult, use_locale: Callable[[str], None]) -> lis
                 )
             )
         else:
-            lines.append(
-                line(
-                    get_string(
-                        "geo_source",
-                        source=s.source,
-                        ip=s.ip or "?",
-                        country=s.country or "?",
-                        city=s.city or "",
-                        timezone=s.timezone or "-",
-                    ),
-                    COLORS["text_dim"],
-                )
+            src_str = get_string(
+                "geo_source",
+                source=s.source,
+                ip=s.ip or "?",
+                country=s.country or "?",
+                city=s.city or "",
+                timezone=s.timezone or "-",
             )
+            if getattr(s, "isp", None):
+                src_str = f"{src_str} · {s.isp}"
+            lines.append(line(src_str, COLORS["text_dim"]))
     if result.error:
         lines.append(line(result.error, COLORS["error"]))
     for w in result.warnings:

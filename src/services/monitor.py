@@ -96,6 +96,8 @@ class ProfileMonitorInfo:
     last_exit_ip: str = ""
     last_exit_country: str = ""
     last_exit_ts: str = ""
+    last_exit_isp: str = ""
+    last_exit_ip_type: str = ""
     prev_exit_ip: str = ""
     prev_exit_country: str = ""
     ip_country_changed: bool = False
@@ -181,6 +183,8 @@ class MonitorService:
                                         "tz": str(item.get("tz", "")).strip(),
                                         "port": str(item.get("port", "")).strip(),
                                         "ts": str(item.get("ts", "")).strip(),
+                                        "isp": str(item.get("isp", "")).strip(),
+                                        "ip_type": str(item.get("ip_type", "")).strip().upper(),
                                     }
                                 )
                         if items:
@@ -254,6 +258,8 @@ class MonitorService:
         country: str = "",
         tz: str = "",
         proxy: str | None = None,
+        isp: str = "",
+        ip_type: str = "",
     ) -> dict[str, str] | None:
         """Record an exit IP check for `profile_name` (stored outside camoufox_data/<Profile>/)."""
         clean_ip = (ip or "").strip()
@@ -263,6 +269,8 @@ class MonitorService:
         if clean_country in ("XX", "T1"):
             clean_country = ""
         clean_tz = (tz or "").strip()
+        clean_isp = (isp or "").strip()
+        clean_type = (ip_type or "").strip().upper()
         port = extract_proxy_port(proxy)
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         entries = self._ip_history.setdefault(profile_name, [])
@@ -278,6 +286,10 @@ class MonitorService:
                 entries[0]["tz"] = clean_tz
             if port:
                 entries[0]["port"] = port
+            if clean_isp:
+                entries[0]["isp"] = clean_isp
+            if clean_type:
+                entries[0]["ip_type"] = clean_type
             out = dict(entries[0])
         else:
             entry = {
@@ -286,6 +298,8 @@ class MonitorService:
                 "tz": clean_tz,
                 "port": port,
                 "ts": now_str,
+                "isp": clean_isp,
+                "ip_type": clean_type,
             }
             entries.insert(0, entry)
             del entries[20:]
@@ -954,6 +968,8 @@ class MonitorService:
             last_ip = ip_entries[0].get("ip", "") if ip_entries else ""
             last_country = ip_entries[0].get("country", "") if ip_entries else ""
             last_ts = ip_entries[0].get("ts", "") if ip_entries else ""
+            last_isp = ip_entries[0].get("isp", "") if ip_entries else ""
+            last_ip_type = ip_entries[0].get("ip_type", "") if ip_entries else ""
             prev_ip = ip_entries[1].get("ip", "") if len(ip_entries) > 1 else ""
             prev_country = ""
             for prev_entry in ip_entries[1:]:
@@ -988,6 +1004,8 @@ class MonitorService:
                 last_exit_ip=last_ip,
                 last_exit_country=last_country,
                 last_exit_ts=last_ts,
+                last_exit_isp=last_isp,
+                last_exit_ip_type=last_ip_type,
                 prev_exit_ip=prev_ip,
                 prev_exit_country=prev_country,
                 ip_country_changed=ip_country_changed,
