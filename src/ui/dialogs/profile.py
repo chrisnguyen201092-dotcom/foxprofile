@@ -11,11 +11,19 @@ from ...models.profile import PROFILE_COLOR_PALETTES, Profile
 from ...services.monitor import extract_proxy_port
 from ...services.proxy.geo_check import GeoCheckResult, check_geo
 from ...utils.proxy_parser import mask_proxy
+from ...utils.totp import (
+    fetch_hotmail_messages,
+    format_mail_credentials_line,
+    format_oauth_reader_line,
+    generate_totp,
+    parse_mail_credentials_line,
+)
 from ...utils.validation import (
     validate_color,
     validate_email,
     validate_group,
     validate_locale,
+    validate_mail_token,
     validate_notes,
     validate_password,
     validate_profile_name,
@@ -52,11 +60,12 @@ def open_profile_dialog(
         hint_text="" if profile is not None else get_string("enter_profile_name"),
         **DLG_FIELD_KWARGS,
     )
-    email_field = ft.TextField(
-        value=(getattr(profile, "email", None) or "") if profile is not None else "",
-        hint_text=get_string("email_hint"),
-        text_style=_DATA,
-        **DLG_FIELD_KWARGS,
+    existing_email = (getattr(profile, "email", None) or "") if profile is not None else ""
+    existing_recovery_email = (
+        (getattr(profile, "recovery_email", None) or "") if profile is not None else ""
+    )
+    existing_mail_token = (
+        (getattr(profile, "mail_token", None) or "") if profile is not None else ""
     )
     password_field = ft.TextField(
         value=(getattr(profile, "password", None) or "") if profile is not None else "",
@@ -257,11 +266,13 @@ def open_profile_dialog(
     def _rebuild_color_section() -> None:
         cur = selected_color[0]
         is_def = cur is None
-        quick_colors = PROFILE_COLOR_PALETTES[0][1][:6]
+        quick_colors = PROFILE_COLOR_PALETTES[0][1]
+        extra_colors = [c for _, grp in PROFILE_COLOR_PALETTES[1:] for c in grp]
+        cur_in_extra = bool(cur and cur.upper() not in {c.upper() for c in quick_colors})
         top_controls: list[ft.Control] = [
             ft.Container(
-                height=30,
-                padding=ft.Padding.symmetric(horizontal=10),
+                height=28,
+                padding=ft.Padding.symmetric(horizontal=9),
                 border_radius=6,
                 bgcolor=COLORS["sidebar"] if is_def else COLORS["card_bg"],
                 border=ft.Border.all(1, COLORS["sidebar"] if is_def else COLORS["rule_strong"]),
@@ -269,48 +280,46 @@ def open_profile_dialog(
                 on_click=lambda _: _pick_color(None),
                 content=ft.Text(
                     get_string("color_default"),
-                    size=12,
+                    size=11.5,
                     font_family=FONT_MEDIUM,
                     color=COLORS["cover_ink"] if is_def else COLORS["text_main"],
                 ),
             ),
-            *[_make_swatch(c, cur, size=24) for c in quick_colors],
+            *[_make_swatch(c, cur, size=22) for c in quick_colors],
             ft.Container(
-                height=30,
-                padding=ft.Padding.symmetric(horizontal=10),
+                height=28,
+                padding=ft.Padding.symmetric(horizontal=8),
                 border_radius=6,
                 bgcolor=COLORS["input_bg"] if palettes_open[0] else COLORS["card_bg"],
                 border=ft.Border.all(
-                    1.5 if palettes_open[0] or (cur and cur.upper() not in quick_colors) else 1,
-                    COLORS["sidebar"]
-                    if palettes_open[0] or (cur and cur.upper() not in quick_colors)
-                    else COLORS["rule_strong"],
+                    1.5 if palettes_open[0] or cur_in_extra else 1,
+                    COLORS["sidebar"] if palettes_open[0] or cur_in_extra else COLORS["rule_strong"],
                 ),
                 alignment=ft.Alignment(0, 0),
                 on_click=_toggle_palettes,
                 content=ft.Row(
-                    spacing=6,
+                    spacing=4,
                     tight=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     controls=[
                         ft.Container(
-                            width=12,
-                            height=12,
+                            width=11,
+                            height=11,
                             border_radius=6,
                             bgcolor=cur,
                             border=ft.Border.all(1, COLORS["rule_strong"]),
                         )
-                        if cur
-                        else ft.Icon(ft.Icons.PALETTE_OUTLINED, size=15, color=COLORS["text_main"]),
+                        if cur_in_extra
+                        else ft.Icon(ft.Icons.PALETTE_OUTLINED, size=14, color=COLORS["text_main"]),
                         ft.Text(
-                            cur.upper() if cur else get_string("color_more_palettes"),
-                            size=12,
-                            font_family=FONT_DATA if cur else FONT_MEDIUM,
+                            cur.upper() if cur_in_extra else get_string("color_more_palettes"),
+                            size=11.5,
+                            font_family=FONT_DATA if cur_in_extra else FONT_MEDIUM,
                             color=COLORS["text_main"],
                         ),
                         ft.Icon(
                             ft.Icons.EXPAND_LESS if palettes_open[0] else ft.Icons.EXPAND_MORE,
-                            size=16,
+                            size=15,
                             color=COLORS["text_sub"],
                         ),
                     ],
@@ -320,90 +329,75 @@ def open_profile_dialog(
 
         children: list[ft.Control] = [
             ft.Row(
-                spacing=7,
+                spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=top_controls,
             )
         ]
 
         if palettes_open[0]:
-            palette_rows: list[ft.Control] = []
-            for label_key, group in PROFILE_COLOR_PALETTES:
-                palette_rows.append(
-                    ft.Row(
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            ft.Container(
-                                width=115,
-                                content=ft.Text(
-                                    get_string(label_key),
-                                    size=11.5,
-                                    font_family=FONT_MEDIUM,
-                                    color=COLORS["text_sub"],
-                                ),
-                            ),
-                            ft.Row(
-                                spacing=8,
-                                controls=[_make_swatch(c, cur, size=24) for c in group],
-                            ),
-                        ],
-                    )
-                )
-            palette_rows.append(
-                ft.Row(
-                    spacing=8,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[
-                        ft.Container(
-                            width=115,
-                            content=ft.Text(
-                                get_string("color_custom_hex"),
-                                size=11.5,
-                                font_family=FONT_MEDIUM,
-                                color=COLORS["text_sub"],
-                            ),
-                        ),
-                        ft.Container(
-                            width=22,
-                            height=22,
-                            border_radius=11,
-                            bgcolor=cur or COLORS["card_bg"],
-                            border=ft.Border.all(1, COLORS["rule_strong"]),
-                        ),
-                        ft.Container(
-                            width=110,
-                            height=30,
-                            padding=ft.Padding.symmetric(horizontal=8),
-                            border_radius=6,
-                            bgcolor=COLORS["card_bg"],
-                            border=ft.Border.all(1, COLORS["rule_strong"]),
-                            alignment=ft.Alignment(0, 0),
-                            content=ft.TextField(
-                                value=cur or "",
-                                hint_text="#RRGGBB",
-                                border=ft.InputBorder.NONE,
-                                collapsed=True,
-                                dense=True,
-                                text_size=12,
-                                text_style=_DATA,
-                                color=COLORS["text_main"],
-                                cursor_color=COLORS["accent"],
-                                hint_style=ft.TextStyle(color=COLORS["text_dim"], size=11.5),
-                                on_submit=_on_hex_submit,
-                                on_blur=_on_hex_submit,
-                            ),
-                        ),
-                    ],
-                )
-            )
             children.append(
                 ft.Container(
-                    padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                     border_radius=8,
                     bgcolor=COLORS["input_bg"],
                     border=ft.Border.all(1, COLORS["rule_strong"]),
-                    content=ft.Column(spacing=8, tight=True, controls=palette_rows),
+                    content=ft.Column(
+                        spacing=6,
+                        tight=True,
+                        controls=[
+                            ft.Row(
+                                spacing=6,
+                                wrap=True,
+                                run_spacing=6,
+                                controls=[_make_swatch(c, cur, size=22) for c in extra_colors],
+                            ),
+                            ft.Row(
+                                spacing=6,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text(
+                                        get_string("color_custom_hex"),
+                                        size=11,
+                                        font_family=FONT_MEDIUM,
+                                        color=COLORS["text_sub"],
+                                    ),
+                                    ft.Container(
+                                        width=18,
+                                        height=18,
+                                        border_radius=9,
+                                        bgcolor=cur or COLORS["card_bg"],
+                                        border=ft.Border.all(1, COLORS["rule_strong"]),
+                                    ),
+                                    ft.Container(
+                                        width=96,
+                                        height=26,
+                                        padding=ft.Padding.symmetric(horizontal=8),
+                                        border_radius=5,
+                                        bgcolor=COLORS["card_bg"],
+                                        border=ft.Border.all(1, COLORS["rule_strong"]),
+                                        alignment=ft.Alignment(0, 0),
+                                        content=ft.TextField(
+                                            value=cur or "",
+                                            hint_text="#RRGGBB",
+                                            border=ft.InputBorder.NONE,
+                                            collapsed=True,
+                                            dense=True,
+                                            text_size=11.5,
+                                            text_style=_DATA,
+                                            color=COLORS["text_main"],
+                                            cursor_color=COLORS["accent"],
+                                            hint_style=ft.TextStyle(
+                                                color=COLORS["text_dim"], size=11
+                                            ),
+                                            on_submit=_on_hex_submit,
+                                            on_blur=_on_hex_submit,
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
                 )
             )
 
@@ -446,9 +440,10 @@ def open_profile_dialog(
 
     def on_submit(_: ft.ControlEvent) -> None:
         name = (name_field.value or "").strip()
-        email = (email_field.value or "").strip()
+        email = existing_email
         password = (password_field.value or "").strip()
         two_fa = (two_fa_field.value or "").strip()
+        recovery_email = existing_recovery_email
         group = (group_field.value or "").strip()
         notes = (notes_field.value or "").strip()
         proxy = (proxy_field.value or "").strip()
@@ -466,7 +461,6 @@ def open_profile_dialog(
             return
 
         for validate_meta, meta_val in (
-            (validate_email, email),
             (validate_password, password),
             (validate_two_fa, two_fa),
             (validate_group, group),
@@ -498,7 +492,42 @@ def open_profile_dialog(
         has_varargs = any(
             p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
         )
-        if has_varargs or len(sig.parameters) >= 13:
+        if has_varargs or len(sig.parameters) >= 15:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+                email or None,
+                password or None,
+                two_fa or None,
+                recovery_email or None,
+                existing_mail_token or None,
+            )
+        elif len(sig.parameters) >= 14:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+                email or None,
+                password or None,
+                two_fa or None,
+                recovery_email or None,
+            )
+        elif len(sig.parameters) >= 13:
             error = on_save(
                 name,
                 proxy,
@@ -630,18 +659,23 @@ def open_profile_dialog(
                     ),
                     *([group_chips_row] if group_chips_row is not None else []),
                     name_error,
-                    _field(get_string("email_optional"), email_field),
                     ft.Row(
                         spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.START,
                         controls=[
                             ft.Container(
                                 expand=2,
-                                content=_field(get_string("password_optional"), password_field),
+                                content=_field(
+                                    get_string("muse_password_optional"),
+                                    password_field,
+                                ),
                             ),
                             ft.Container(
                                 expand=3,
-                                content=_field(get_string("two_fa_optional"), two_fa_field),
+                                content=_field(
+                                    get_string("muse_two_fa_optional"),
+                                    two_fa_field,
+                                ),
                             ),
                         ],
                     ),
@@ -874,3 +908,705 @@ def _geo_lines(result: GeoCheckResult, use_locale: Callable[[str], None]) -> lis
             )
         )
     return lines
+
+
+def open_mail_credentials_dialog(
+    page: ft.Page,
+    profile: Profile,
+    on_save_single: Callable[..., bool],
+    on_bulk_import: Callable[[str], tuple[int, int]] | None = None,
+    on_copy_text: Callable[[str, str], None] | None = None,
+    *,
+    initial_tab: str = "single",
+    preloaded_messages: list[dict[str, str]] | None = None,
+) -> None:
+    """Dedicated Mail Login Credentials manager dialog (single profile + inbox OTP + bulk import)."""
+    active_tab: list[str] = [initial_tab if initial_tab in ("single", "inbox", "bulk") else "single"]
+
+    email_field = ft.TextField(
+        value=(getattr(profile, "email", None) or ""),
+        hint_text=get_string("email_hint"),
+        text_style=_DATA,
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    password_field = ft.TextField(
+        value=(getattr(profile, "password", None) or ""),
+        hint_text=get_string("password_hint"),
+        password=True,
+        can_reveal_password=True,
+        text_style=_DATA,
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    mail_token_field = ft.TextField(
+        value=(getattr(profile, "mail_token", None) or ""),
+        hint_text=get_string("mail_token_hint"),
+        text_style=_DATA,
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    two_fa_field = ft.TextField(
+        value=(getattr(profile, "two_fa", None) or ""),
+        hint_text=get_string("two_fa_hint"),
+        text_style=_DATA,
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    recovery_field = ft.TextField(
+        value=(getattr(profile, "recovery_email", None) or ""),
+        hint_text=get_string("recovery_email_hint"),
+        text_style=_DATA,
+        expand=True,
+        **DLG_FIELD_KWARGS,
+    )
+    notes_field = ft.TextField(
+        value=(profile.notes or ""),
+        hint_text=get_string("notes_hint"),
+        multiline=True,
+        min_lines=1,
+        max_lines=2,
+        **DLG_FIELD_KWARGS,
+    )
+    quick_paste_field = ft.TextField(
+        value="",
+        hint_text=get_string("mail_smart_paste_hint"),
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    bulk_field = ft.TextField(
+        value="",
+        hint_text=get_string("mail_bulk_hint"),
+        multiline=True,
+        min_lines=7,
+        max_lines=10,
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+
+    feedback_text = ft.Text("", size=12, color=COLORS["success"], visible=False)
+    otp_preview_slot = ft.Container()
+
+    def _copy_val(val: str, log_msg: str) -> None:
+        clean = (val or "").strip()
+        if not clean:
+            return
+        if on_copy_text is not None:
+            on_copy_text(clean, log_msg)
+        feedback_text.value = f"✓ {log_msg}"
+        feedback_text.color = COLORS["success"]
+        feedback_text.visible = True
+        page.update()
+
+    def _refresh_otp_preview() -> None:
+        raw_secret = (two_fa_field.value or "").strip()
+        pair = generate_totp(raw_secret) if raw_secret else None
+        if pair is None:
+            otp_preview_slot.content = None
+            otp_preview_slot.visible = False
+            return
+        code, rem = pair
+        otp_preview_slot.visible = True
+        otp_preview_slot.content = ft.Container(
+            height=42,
+            padding=ft.Padding.symmetric(horizontal=10),
+            border_radius=8,
+            bgcolor=COLORS["input_bg"],
+            border=ft.Border.all(1.5, COLORS["accent"]),
+            ink=True,
+            tooltip=get_string("tooltip_copy_2fa", code=code, rem=rem),
+            on_click=lambda _: _copy_val(
+                code,
+                get_string("copied_2fa_log", name=profile.name, code=code, rem=rem),
+            ),
+            content=ft.Row(
+                spacing=6,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(ft.Icons.KEY_ROUNDED, size=14, color=COLORS["accent"]),
+                    ft.Text(
+                        f"{code} ({rem}s)",
+                        size=13,
+                        font_family=FONT_DATA,
+                        weight=ft.FontWeight.W_700,
+                        color=COLORS["accent"],
+                    ),
+                ],
+            ),
+        )
+
+    def _on_two_fa_change(_: ft.ControlEvent) -> None:
+        _refresh_otp_preview()
+        page.update()
+
+    two_fa_field.on_change = _on_two_fa_change
+    _refresh_otp_preview()
+
+    def _copy_icon_btn(get_val: Callable[[], str], log_msg_fn: Callable[[], str]) -> ft.IconButton:
+        return ft.IconButton(
+            icon=ft.Icons.CONTENT_COPY_ROUNDED,
+            icon_size=16,
+            tooltip="Copy",
+            style=OUTLINE_STYLE,
+            on_click=lambda _: _copy_val(get_val(), log_msg_fn()),
+        )
+
+    two_fa_section = _field(
+        get_string("two_fa_optional"),
+        ft.Row(
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                two_fa_field,
+                otp_preview_slot,
+                _copy_icon_btn(
+                    lambda: two_fa_field.value or "",
+                    lambda: f"[{profile.name}] Copied 2FA Secret",
+                ),
+            ],
+        ),
+    )
+    two_fa_section.visible = bool((two_fa_field.value or "").strip())
+
+    def _on_quick_paste_change(_: ft.ControlEvent) -> None:
+        raw = (quick_paste_field.value or "").strip()
+        if not raw:
+            return
+        if "|" in raw or "\t" in raw or ";" in raw or (":" in raw and "@" in raw):
+            parsed = parse_mail_credentials_line(raw)
+            if parsed["email"]:
+                email_field.value = parsed["email"]
+            if parsed["password"]:
+                password_field.value = parsed["password"]
+            if parsed["two_fa"]:
+                two_fa_field.value = parsed["two_fa"]
+                two_fa_section.visible = True
+            if parsed.get("mail_token"):
+                mail_token_field.value = parsed["mail_token"]
+            if parsed["recovery_email"]:
+                recovery_field.value = parsed["recovery_email"]
+            if parsed["notes"] and not (notes_field.value or "").strip():
+                notes_field.value = parsed["notes"]
+            quick_paste_field.value = ""
+            _refresh_otp_preview()
+            em_v = (email_field.value or "").strip() or None
+            pw_v = (password_field.value or "").strip() or None
+            tfa_v = (two_fa_field.value or "").strip() or None
+            rec_v = (recovery_field.value or "").strip() or None
+            tok_v = (mail_token_field.value or "").strip() or None
+            nt_v = (notes_field.value or "").strip() or None
+            sig_qp = inspect.signature(on_save_single)
+            if len(sig_qp.parameters) >= 6:
+                on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v, tok_v)
+            else:
+                on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v)
+            feedback_text.value = f"✓ {get_string('mail_saved_log', name=profile.name)}"
+            feedback_text.color = COLORS["success"]
+            feedback_text.visible = True
+            page.update()
+
+    quick_paste_field.on_change = _on_quick_paste_change
+
+    def _copy_full_line(_: ft.ControlEvent) -> None:
+        full_str = format_mail_credentials_line(
+            email_field.value,
+            password_field.value,
+            two_fa_field.value,
+            recovery_field.value,
+            mail_token_field.value,
+        )
+        if not full_str.strip("|"):
+            return
+        _copy_val(
+            full_str,
+            get_string("copied_full_mail_log", name=profile.name),
+        )
+
+    single_body = ft.Column(
+        tight=True,
+        spacing=6,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            _field(get_string("mail_smart_paste_label"), quick_paste_field),
+            _field(
+                get_string("email_optional"),
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        email_field,
+                        _copy_icon_btn(
+                            lambda: email_field.value or "",
+                            lambda: get_string(
+                                "copied_email_log",
+                                name=profile.name,
+                                email=(email_field.value or "").strip(),
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            _field(
+                get_string("mail_password_optional"),
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        password_field,
+                        _copy_icon_btn(
+                            lambda: password_field.value or "",
+                            lambda: get_string("copied_password_log", name=profile.name),
+                        ),
+                    ],
+                ),
+            ),
+            _field(
+                get_string("mail_token_optional"),
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        mail_token_field,
+                        _copy_icon_btn(
+                            lambda: format_oauth_reader_line(
+                                email_field.value,
+                                password_field.value,
+                                mail_token_field.value,
+                            ),
+                            lambda: get_string("copied_token_log", name=profile.name),
+                        ),
+                    ],
+                ),
+            ),
+            _field(
+                get_string("recovery_email_optional"),
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        recovery_field,
+                        _copy_icon_btn(
+                            lambda: recovery_field.value or "",
+                            lambda: get_string(
+                                "copied_recovery_log",
+                                name=profile.name,
+                                email=(recovery_field.value or "").strip(),
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            two_fa_section,
+        ],
+    )
+
+    inbox_list_col = ft.Column(
+        tight=True,
+        spacing=8,
+        scroll=ft.ScrollMode.AUTO,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    refresh_inbox_btn = ft.OutlinedButton(
+        get_string("mail_read_inbox_btn"),
+        icon=ft.Icons.REFRESH_ROUNDED,
+        height=34,
+        style=OUTLINE_STYLE,
+        on_click=lambda _: _trigger_read_inbox(),
+    )
+    inbox_body = ft.Column(
+        tight=True,
+        spacing=8,
+        visible=False,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Row(
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text(
+                        email_field.value or profile.email or "",
+                        size=12.5,
+                        font_family=FONT_DATA,
+                        color=COLORS["text_sub"],
+                    ),
+                    refresh_inbox_btn,
+                ],
+            ),
+            inbox_list_col,
+        ],
+    )
+
+    def _render_inbox_messages(msgs: list[dict[str, str]]) -> None:
+        if not msgs:
+            inbox_list_col.controls = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=24, horizontal=12),
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("mail_inbox_empty"),
+                        size=12.5,
+                        color=COLORS["text_dim"],
+                    ),
+                )
+            ]
+            return
+        cards: list[ft.Control] = []
+        for m in msgs:
+            otp_code = m.get("otp") or ""
+            subj_str = m.get("subject") or ""
+            sender_str = m.get("sender") or ""
+            time_str = m.get("time") or ""
+            prev_str = m.get("preview") or ""
+            top_row_controls: list[ft.Control] = [
+                ft.Text(
+                    subj_str,
+                    size=12.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_main"],
+                    expand=True,
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                    tooltip=subj_str,
+                )
+            ]
+            if otp_code:
+                top_row_controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                        border_radius=5,
+                        bgcolor=COLORS["input_bg"],
+                        border=ft.Border.all(1.5, COLORS["accent"]),
+                        ink=True,
+                        on_click=lambda _, c=otp_code, s=subj_str: _copy_val(
+                            c,
+                            get_string(
+                                "mail_otp_found_log",
+                                name=profile.name,
+                                otp=c,
+                                subject=s[:40],
+                            ),
+                        ),
+                        content=ft.Text(
+                            get_string("mail_copy_otp_pill", otp=otp_code),
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_700,
+                            color=COLORS["accent"],
+                        ),
+                    )
+                )
+            cards.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                    border_radius=8,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1.5 if otp_code else 1,
+                        COLORS["accent"] if otp_code else COLORS["rule_strong"],
+                    ),
+                    content=ft.Column(
+                        tight=True,
+                        spacing=3,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        controls=[
+                            ft.Row(
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=top_row_controls,
+                            ),
+                            ft.Text(
+                                f"{sender_str} · {time_str}".strip(" ·"),
+                                size=11,
+                                font_family=FONT_DATA,
+                                color=COLORS["text_dim"],
+                                no_wrap=True,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            *(
+                                [
+                                    ft.Text(
+                                        prev_str,
+                                        size=11.5,
+                                        color=COLORS["text_sub"],
+                                        selectable=True,
+                                    )
+                                ]
+                                if prev_str
+                                else []
+                            ),
+                        ],
+                    ),
+                )
+            )
+        inbox_list_col.controls = cards
+
+    def _trigger_read_inbox() -> None:
+        if active_tab[0] != "inbox":
+            _switch_tab("inbox", auto_fetch=False)
+        em_addr = (email_field.value or "").strip()
+        tok_str = (mail_token_field.value or "").strip()
+        feedback_text.value = get_string("mail_reading_inbox")
+        feedback_text.color = COLORS["accent"]
+        feedback_text.visible = True
+        refresh_inbox_btn.disabled = True
+        page.update()
+
+        def _worker() -> None:
+            ok, otp_or_err, msgs = fetch_hotmail_messages(em_addr, tok_str, top=8, timeout=12)
+            refresh_inbox_btn.disabled = False
+            if not ok:
+                feedback_text.value = otp_or_err
+                feedback_text.color = COLORS["error"]
+                feedback_text.visible = True
+            else:
+                _render_inbox_messages(msgs)
+                if otp_or_err:
+                    first_subj = next(
+                        (m.get("subject", "") for m in msgs if m.get("otp") == otp_or_err),
+                        "",
+                    )
+                    log_msg = get_string(
+                        "mail_otp_found_log",
+                        name=profile.name,
+                        otp=otp_or_err,
+                        subject=first_subj[:40],
+                    )
+                    if on_copy_text is not None:
+                        on_copy_text(otp_or_err, log_msg)
+                    feedback_text.value = f"✓ {log_msg}"
+                    feedback_text.color = COLORS["success"]
+                    feedback_text.visible = True
+                else:
+                    feedback_text.value = (
+                        get_string("mail_inbox_no_otp", count=len(msgs))
+                        if msgs
+                        else get_string("mail_inbox_empty")
+                    )
+                    feedback_text.color = COLORS["text_sub"]
+                    feedback_text.visible = True
+            with contextlib.suppress(Exception):
+                page.update()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    if preloaded_messages is not None:
+        _render_inbox_messages(preloaded_messages)
+
+    bulk_body = ft.Column(
+        tight=True,
+        spacing=8,
+        visible=False,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Text(
+                get_string("mail_bulk_label"),
+                size=12,
+                color=COLORS["text_sub"],
+            ),
+            bulk_field,
+        ],
+    )
+
+    copy_all_btn = ft.OutlinedButton(
+        get_string("mail_copy_line_btn"),
+        icon=ft.Icons.COPY_ALL_ROUNDED,
+        height=36,
+        style=OUTLINE_STYLE,
+        on_click=_copy_full_line,
+    )
+
+    save_btn = ft.Button(
+        get_string("save_changes"),
+        icon=ft.Icons.SAVE,
+        style=ACCENT_STYLE,
+    )
+
+    tab_row_slot = ft.Container()
+
+    def _switch_tab(tab: str, *, auto_fetch: bool = True) -> None:
+        active_tab[0] = tab
+        single_body.visible = tab == "single"
+        inbox_body.visible = tab == "inbox"
+        bulk_body.visible = tab == "bulk"
+        copy_all_btn.visible = tab == "single"
+        save_btn.visible = tab in ("single", "bulk")
+        save_btn.content = ft.Text(
+            get_string("save_changes") if tab == "single" else get_string("mail_bulk_apply_btn")
+        )
+        feedback_text.visible = False
+        _rebuild_tabs()
+        page.update()
+        if tab == "inbox" and auto_fetch and not inbox_list_col.controls:
+            _trigger_read_inbox()
+
+    def _rebuild_tabs() -> None:
+        cur = active_tab[0]
+
+        def _tab_pill(code: str, label_str: str, icon: ft.IconData) -> ft.Container:
+            is_act = cur == code
+            return ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                border_radius=6,
+                bgcolor=COLORS["sidebar"] if is_act else COLORS["input_bg"],
+                border=ft.Border.all(
+                    1, COLORS["sidebar"] if is_act else COLORS["rule_strong"]
+                ),
+                ink=True,
+                on_click=lambda _, c=code: _switch_tab(c),
+                content=ft.Row(
+                    spacing=5,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Icon(
+                            icon,
+                            size=14,
+                            color=COLORS["cover_ink"] if is_act else COLORS["text_sub"],
+                        ),
+                        ft.Text(
+                            label_str,
+                            size=11.5,
+                            font_family=FONT_SEMIBOLD if is_act else FONT_MEDIUM,
+                            color=COLORS["cover_ink"] if is_act else COLORS["text_main"],
+                        ),
+                    ],
+                ),
+            )
+
+        pills: list[ft.Control] = [
+            _tab_pill(
+                "single",
+                get_string("mail_tab_single", name=profile.name),
+                ft.Icons.LOCK_OUTLINE,
+            ),
+            _tab_pill(
+                "inbox",
+                get_string("mail_tab_inbox"),
+                ft.Icons.MARK_EMAIL_UNREAD_OUTLINED,
+            ),
+        ]
+        if on_bulk_import is not None:
+            pills.append(
+                _tab_pill("bulk", get_string("mail_tab_bulk"), ft.Icons.PLAYLIST_ADD_CHECK)
+            )
+        tab_row_slot.content = ft.Row(spacing=6, wrap=True, controls=pills)
+
+    _switch_tab(active_tab[0], auto_fetch=False)
+
+    def _on_submit(_: ft.ControlEvent) -> None:
+        if active_tab[0] == "bulk" and on_bulk_import is not None:
+            raw_bulk = (bulk_field.value or "").strip()
+            if not raw_bulk:
+                return
+            updated, skipped = on_bulk_import(raw_bulk)
+            feedback_text.value = (
+                f"✓ {get_string('mail_bulk_saved_log', updated=updated, skipped=skipped)}"
+            )
+            feedback_text.color = COLORS["success"] if updated > 0 else COLORS["warning"]
+            feedback_text.visible = True
+            page.update()
+            return
+
+        em = (email_field.value or "").strip()
+        pw = (password_field.value or "").strip()
+        tfa = (two_fa_field.value or "").strip()
+        rec = (recovery_field.value or "").strip()
+        tok = (mail_token_field.value or "").strip()
+        nt = (notes_field.value or "").strip()
+        for validate_fn, val in (
+            (validate_email, em),
+            (validate_password, pw),
+            (validate_two_fa, tfa),
+            (validate_email, rec),
+            (validate_mail_token, tok),
+            (validate_notes, nt),
+        ):
+            ok, err = validate_fn(val)
+            if not ok:
+                feedback_text.value = err
+                feedback_text.color = COLORS["error"]
+                feedback_text.visible = True
+                page.update()
+                return
+
+        sig_single = inspect.signature(on_save_single)
+        if len(sig_single.parameters) >= 6:
+            saved_ok = on_save_single(
+                em or None,
+                pw or None,
+                tfa or None,
+                rec or None,
+                nt or None,
+                tok or None,
+            )
+        else:
+            saved_ok = on_save_single(
+                em or None,
+                pw or None,
+                tfa or None,
+                rec or None,
+                nt or None,
+            )
+        if saved_ok:
+            page.pop_dialog()
+
+    save_btn.on_click = _on_submit
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
+        title=ft.Column(
+            spacing=6,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("mail_dlg_title", name=profile.name),
+                    size=18,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                ft.Text(
+                    get_string("mail_dlg_subtitle"),
+                    size=12.5,
+                    color=COLORS["text_sub"],
+                ),
+                tab_row_slot,
+            ],
+        ),
+        content=ft.Container(
+            width=480,
+            content=ft.Column(
+                tight=True,
+                spacing=6,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    single_body,
+                    inbox_body,
+                    bulk_body,
+                    feedback_text,
+                ],
+            ),
+        ),
+        actions=[
+            copy_all_btn,
+            ft.TextButton(
+                get_string("cancel"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            save_btn,
+        ],
+    )
+    page.show_dialog(dlg)
+    if (
+        active_tab[0] == "inbox"
+        and preloaded_messages is None
+        and (mail_token_field.value or "").strip()
+    ):
+        _trigger_read_inbox()

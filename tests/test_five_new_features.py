@@ -1774,3 +1774,184 @@ def test_isp_and_datacenter_ip_type_detection_without_blocking_guard(tmp_path):
         initial_tab="ips",
     )
     assert len(fp.dialogs) == 1
+
+
+def test_mail_credentials_storage_bulk_import_and_dialog(isolated_pm, tmp_path):
+    """Test parsing mail|pass|2fa|recovery, update_profile_credentials, bulk_import_credentials, and dialog."""
+    import flet as ft
+
+    from src.ui.components.profile_card import build_profile_card
+    from src.ui.dialogs import open_mail_credentials_dialog
+    from src.utils.totp import (
+        extract_otp_from_text,
+        format_mail_credentials_line,
+        parse_mail_credentials_line,
+        split_mail_token,
+    )
+
+    assert extract_otp_from_text("Your verification code is 849201", "Hello") == "849201"
+    assert extract_otp_from_text("Mã xác nhận tài khoản", "Mã OTP của bạn là: 583920") == "583920"
+    assert (
+        extract_otp_from_text("New app(s) connected to your Microsoft account", "2026-10-02") == ""
+    )
+    rt_part, cid_part = split_mail_token("M.C540_BAY_TOKEN|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+    assert rt_part == "M.C540_BAY_TOKEN"
+    assert cid_part == "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+    # 1. Parse and format single-line mail credentials
+    parsed1 = parse_mail_credentials_line(
+        "user1@gmail.com|MyPass#1|JBSWY3DPEHPK3PXP|rec1@outlook.com"
+    )
+    assert (
+        parsed1["email"],
+        parsed1["password"],
+        parsed1["two_fa"],
+        parsed1["recovery_email"],
+    ) == (
+        "user1@gmail.com",
+        "MyPass#1",
+        "JBSWY3DPEHPK3PXP",
+        "rec1@outlook.com",
+    )
+    assert (
+        format_mail_credentials_line(
+            parsed1["email"],
+            parsed1["password"],
+            parsed1["two_fa"],
+            parsed1["recovery_email"],
+        )
+        == "user1@gmail.com|MyPass#1|JBSWY3DPEHPK3PXP|rec1@outlook.com"
+    )
+
+    # Smart detection when 3rd field is recovery email instead of 2FA
+    parsed2 = parse_mail_credentials_line("user2@gmail.com|Pass2|backup@yahoo.com")
+    assert (
+        parsed2["email"],
+        parsed2["password"],
+        parsed2["two_fa"],
+        parsed2["recovery_email"],
+    ) == (
+        "user2@gmail.com",
+        "Pass2",
+        "",
+        "backup@yahoo.com",
+    )
+
+    # 1b. Parse 5-part Hotmail OAuth2 line: email|pass|refresh_token|client_id|recovery_email
+    sample_hotmail = (
+        "dpicjfq@hotmail.com|Juslti5%|"
+        "M.C540_BAY.0.U.MsaArtifacts.-Cm9lgCyy*2tAKfgnqTimM9vTUG6AFyb7d*6rB45*iejOYLM34PhJ76WeCLKKeICZdfpDeSS7MHPj5S!MVAwFDqp0h*KTOPTdbAjZba9aRrOt*CKdK2wzpzPO2lFxVcqtNP90knZgoCFKfStWilr1P8Eevu3uwcPn28d3PLfi2xdf*3u5LGHxLEy973R9UzEvlSiDblLIEdyQCelRCpex29pmDTMqWfZ5wNvXWAeSND53ic!*WcTMapBhx9ETo!Q68jJpfDZoPmsK4jnGyiL*91f7sM!v76Xru1QHw*ZiED4*zvCm7uF7IKTT0FGoQ21e2YmHxu5xXF4nAznmbQPYLBAfu8xtqDmqW0Nj0l1JitRT0Dbdp7q0yzW1L54qfmt4fA$$|"
+        "9e5f94bc-e8a4-4e73-b8be-63364c29d753|bbf209@smvmail.com"
+    )
+    parsed_hm = parse_mail_credentials_line(sample_hotmail)
+    assert parsed_hm["email"] == "dpicjfq@hotmail.com"
+    assert parsed_hm["password"] == "Juslti5%"
+    assert parsed_hm["recovery_email"] == "bbf209@smvmail.com"
+    assert parsed_hm["two_fa"] == ""
+    assert parsed_hm["client_id"] == "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+    assert parsed_hm["refresh_token"].startswith("M.C540_BAY.0.U.MsaArtifacts.")
+    assert parsed_hm["mail_token"].endswith("|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+    assert parsed_hm["notes"] == ""
+    assert (
+        format_mail_credentials_line(
+            parsed_hm["email"],
+            parsed_hm["password"],
+            parsed_hm["two_fa"],
+            parsed_hm["recovery_email"],
+            parsed_hm["mail_token"],
+        )
+        == sample_hotmail
+    )
+
+    # 2. Single profile credentials update & persistence
+    isolated_pm.add_profile("MailAcc1", "http://1.2.3.4:10783", "windows", email="user1@gmail.com")
+    isolated_pm.add_profile("MailAcc2", "http://1.2.3.4:10784", "windows", email="user2@gmail.com")
+
+    assert isolated_pm.update_profile_credentials(
+        "MailAcc1",
+        email="user1@gmail.com",
+        password="MyPass#1",
+        two_fa="JBSWY3DPEHPK3PXP",
+        recovery_email="rec1@outlook.com",
+        notes="VIP Gmail",
+    )
+    p1 = isolated_pm.profiles["MailAcc1"]
+    assert p1.email == "user1@gmail.com"
+    assert p1.password == "MyPass#1"
+    assert p1.two_fa == "JBSWY3DPEHPK3PXP"
+    assert p1.recovery_email == "rec1@outlook.com"
+    assert p1.notes == "VIP Gmail"
+
+    # 3. Bulk import credentials matching by email or profile name
+    bulk_text = "\n".join(
+        [
+            "user2@gmail.com|PassTwo!|JBSWY3DPEHPK3PXP|rec2@hotmail.com",
+            "MailAcc1|user1@gmail.com|NewPass#1|JBSWY3DPEHPK3PXP|rec1_new@outlook.com",
+            "unknown@gmail.com|Nope|JBSWY3DPEHPK3PXP",
+        ]
+    )
+    updated, skipped = isolated_pm.bulk_import_credentials(bulk_text)
+    assert (updated, skipped) == (2, 1)
+    assert isolated_pm.profiles["MailAcc2"].password == "PassTwo!"
+    assert isolated_pm.profiles["MailAcc2"].recovery_email == "rec2@hotmail.com"
+    assert isolated_pm.profiles["MailAcc1"].password == "NewPass#1"
+    assert isolated_pm.profiles["MailAcc1"].recovery_email == "rec1_new@outlook.com"
+
+    # 4. CSV export/import preserves recovery_email
+    csv_file = tmp_path / "profiles_mail.csv"
+    assert isolated_pm.export_profiles_csv(str(csv_file), names=["MailAcc1"]) == 1
+    isolated_pm.update_profile_credentials("MailAcc1", recovery_email="")
+    assert isolated_pm.profiles["MailAcc1"].recovery_email is None
+    c_cnt, u_cnt, s_cnt = isolated_pm.import_profiles_csv(str(csv_file))
+    assert (c_cnt, u_cnt, s_cnt) == (0, 1, 0)
+    assert isolated_pm.profiles["MailAcc1"].recovery_email == "rec1_new@outlook.com"
+
+    # 5. Profile card & open_mail_credentials_dialog
+    card = build_profile_card(
+        isolated_pm.profiles["MailAcc1"],
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        on_copy_email=lambda _: None,
+        on_copy_2fa=lambda _: None,
+        on_copy_password=lambda _: None,
+        on_copy_recovery=lambda _: None,
+        on_open_mail_credentials=lambda _: None,
+    )
+    assert card is not None
+
+    class FakePage:
+        def __init__(self):
+            self.dialogs: list[ft.AlertDialog] = []
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+    fp = FakePage()
+    open_mail_credentials_dialog(
+        fp,  # type: ignore[arg-type]
+        isolated_pm.profiles["MailAcc1"],
+        lambda em, pw, tfa, rec, nt, tok=None: True,
+        on_bulk_import=isolated_pm.bulk_import_credentials,
+        on_copy_text=lambda val, msg: None,
+        initial_tab="inbox",
+        preloaded_messages=[
+            {
+                "subject": "Your verification code is 849201",
+                "sender": "security@facebookmail.com",
+                "time": "2026-10-23 23:00",
+                "preview": "Use code 849201 to verify your login.",
+                "otp": "849201",
+            }
+        ],
+    )
+    assert len(fp.dialogs) == 1

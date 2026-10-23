@@ -17,7 +17,7 @@ from .cookies import open_cookie_dialog
 from .custom_page import open_add_to_page_dialog, open_custom_page_dialog
 from .export import open_export_dialog
 from .log import open_log_dialog
-from .profile import open_profile_dialog
+from .profile import open_mail_credentials_dialog, open_profile_dialog
 from .safety_guard import (
     open_bulk_prelaunch_guard_dialog,
     open_cooldown_settings_dialog,
@@ -41,6 +41,7 @@ __all__ = [
     "open_custom_page_dialog",
     "open_export_dialog",
     "open_log_dialog",
+    "open_mail_credentials_dialog",
     "open_prelaunch_guard_dialog",
     "open_profile_dates_dialog",
     "open_profile_dialog",

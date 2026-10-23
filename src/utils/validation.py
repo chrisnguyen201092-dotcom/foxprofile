@@ -90,6 +90,18 @@ def validate_two_fa(value: str) -> tuple[bool, str]:
     return True, ""
 
 
+def validate_mail_token(value: str) -> tuple[bool, str]:
+    """Optional OAuth2 Refresh Token / Client ID string (up to 2048 chars, no control chars)."""
+    if not value:
+        return True, ""
+    if len(value) > 2048:
+        return False, get_string("validation_mail_token_too_long")
+    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
+    if found_control:
+        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    return True, ""
+
+
 def validate_status(value: str) -> tuple[bool, str]:
     """Optional quick status tag for a profile (up to 32 characters, no control chars)."""
     if not value:

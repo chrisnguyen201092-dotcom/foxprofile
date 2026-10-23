@@ -13,7 +13,11 @@ from ..services.proxy.geo_check import (
     extract_ip_from_check_detail,
     lookup_ip_isp,
 )
-from ..utils.totp import generate_totp
+from ..utils.totp import (
+    format_oauth_reader_line,
+    generate_totp,
+    parse_mail_credentials_line,
+)
 from ..utils.validation import validate_email, validate_notes, validate_proxy_format
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
@@ -36,6 +40,7 @@ from .dialogs import (
     open_clone_dialog,
     open_cooldown_settings_dialog,
     open_log_dialog,
+    open_mail_credentials_dialog,
     open_prelaunch_guard_dialog,
     open_profile_dates_dialog,
     open_proxy_pool_dialog,
@@ -504,6 +509,25 @@ class AppHandlers:
             self._refresh()
             return
         clean = raw_email.strip()
+        if "|" in clean or "\t" in clean:
+            parsed = parse_mail_credentials_line(clean)
+            em = parsed["email"]
+            pw = parsed["password"]
+            tfa = parsed["two_fa"]
+            rec = parsed["recovery_email"]
+            tok = parsed.get("mail_token", "")
+            if em and validate_email(em)[0] and hasattr(self._pm, "update_profile_credentials"):
+                self._pm.update_profile_credentials(
+                    name,
+                    email=em,
+                    password=pw or getattr(p, "password", None),
+                    two_fa=tfa or getattr(p, "two_fa", None),
+                    recovery_email=rec or getattr(p, "recovery_email", None),
+                    mail_token=tok or getattr(p, "mail_token", None),
+                )
+                self._log(get_string("mail_saved_log", name=name))
+                self._refresh()
+                return
         if clean and not validate_email(clean)[0]:
             self._refresh()
             return
@@ -514,6 +538,16 @@ class AppHandlers:
                 p.email = clean or None
             self._log(get_string("quick_saved_email", name=name))
         self._refresh()
+
+    def on_copy_email(self, name: str) -> None:
+        p = self._pm.profiles.get(name)
+        if p is None or not getattr(p, "email", None):
+            return
+        em = str(p.email).strip()
+        page = self._get_page()
+        if page is not None and hasattr(page, "run_task"):
+            page.run_task(_set_clipboard_text, page, em)
+        self._log(get_string("copied_email_log", name=name, email=em))
 
     def on_copy_2fa(self, name: str) -> None:
         p = self._pm.profiles.get(name)
@@ -537,6 +571,88 @@ class AppHandlers:
         if page is not None and hasattr(page, "run_task"):
             page.run_task(_set_clipboard_text, page, str(p.password))
         self._log(get_string("copied_password_log", name=name))
+
+    def on_copy_recovery(self, name: str) -> None:
+        p = self._pm.profiles.get(name)
+        if p is None or not getattr(p, "recovery_email", None):
+            return
+        rec = str(p.recovery_email).strip()
+        page = self._get_page()
+        if page is not None and hasattr(page, "run_task"):
+            page.run_task(_set_clipboard_text, page, rec)
+        self._log(get_string("copied_recovery_log", name=name, email=rec))
+
+    def on_copy_token(self, name: str) -> None:
+        p = self._pm.profiles.get(name)
+        if p is None or not getattr(p, "mail_token", None):
+            return
+        oauth_str = format_oauth_reader_line(
+            getattr(p, "email", None),
+            getattr(p, "password", None),
+            getattr(p, "mail_token", None),
+        )
+        page = self._get_page()
+        if page is not None and hasattr(page, "run_task"):
+            page.run_task(_set_clipboard_text, page, oauth_str)
+        self._log(get_string("copied_token_log", name=name))
+
+    def on_fetch_mail_otp(self, name: str) -> None:
+        self.on_open_mail_credentials(name, initial_tab="inbox")
+
+    def on_open_mail_credentials(self, name: str, initial_tab: str = "single") -> None:
+        page = self._get_page()
+        p = self._pm.profiles.get(name)
+        if page is None or p is None:
+            return
+
+        def _save_single(
+            email: str | None,
+            password: str | None,
+            two_fa: str | None,
+            recovery_email: str | None,
+            notes: str | None,
+            mail_token: str | None = None,
+        ) -> bool:
+            ok = False
+            if hasattr(self._pm, "update_profile_credentials"):
+                ok = self._pm.update_profile_credentials(
+                    name,
+                    email=email,
+                    password=password,
+                    two_fa=two_fa,
+                    recovery_email=recovery_email,
+                    notes=notes,
+                    mail_token=mail_token,
+                )
+            if ok:
+                self._log(get_string("mail_saved_log", name=name))
+                self._refresh()
+            return ok
+
+        def _bulk_import(raw_lines: str) -> tuple[int, int]:
+            if not hasattr(self._pm, "bulk_import_credentials"):
+                return (0, 0)
+            updated, skipped = self._pm.bulk_import_credentials(raw_lines)
+            if updated > 0:
+                self._log(
+                    get_string("mail_bulk_saved_log", updated=updated, skipped=skipped)
+                )
+                self._refresh()
+            return (updated, skipped)
+
+        def _copy_text(val: str, log_msg: str) -> None:
+            if page is not None and hasattr(page, "run_task"):
+                page.run_task(_set_clipboard_text, page, val)
+            self._log(log_msg)
+
+        open_mail_credentials_dialog(
+            page,
+            p,
+            _save_single,
+            on_bulk_import=_bulk_import,
+            on_copy_text=_copy_text,
+            initial_tab=initial_tab,
+        )
 
     def on_start_edit_proxy(self, name: str) -> None:
         self._state.editing_note = None

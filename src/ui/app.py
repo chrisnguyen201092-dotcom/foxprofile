@@ -420,6 +420,7 @@ class App:
                 for p in all_profiles
                 if q in p.name.lower()
                 or q in (getattr(p, "email", None) or "").lower()
+                or q in (getattr(p, "recovery_email", None) or "").lower()
                 or q in (p.proxy or "").lower()
                 or q in (p.group or "").lower()
                 or q in (p.status or "").lower()
@@ -618,8 +619,13 @@ class App:
                     on_ip_history=self.h.on_open_ip_history,
                     on_toggle_pin=self.h.on_toggle_pin,
                     on_edit_dates=self.h.on_edit_dates,
+                    on_copy_email=self.h.on_copy_email,
                     on_copy_2fa=self.h.on_copy_2fa,
                     on_copy_password=self.h.on_copy_password,
+                    on_copy_recovery=self.h.on_copy_recovery,
+                    on_copy_token=self.h.on_copy_token,
+                    on_fetch_mail_otp=self.h.on_fetch_mail_otp,
+                    on_open_mail_credentials=self.h.on_open_mail_credentials,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )

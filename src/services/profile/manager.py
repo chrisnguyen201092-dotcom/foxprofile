@@ -22,13 +22,14 @@ from ...models.profile import (
 )
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
-from ...utils.totp import normalize_totp_secret
+from ...utils.totp import normalize_totp_secret, parse_mail_credentials_line
 from ...utils.validation import (
     valid_or_none,
     validate_color,
     validate_email,
     validate_group,
     validate_locale,
+    validate_mail_token,
     validate_notes,
     validate_password,
     validate_profile_name,
@@ -344,6 +345,14 @@ class ProfileManager:
                                 valid_or_none(p_data.get("two_fa"), validate_two_fa)
                             )
                             or None,
+                            "recovery_email": valid_or_none(
+                                p_data.get("recovery_email"),
+                                validate_email,
+                            ),
+                            "mail_token": valid_or_none(
+                                p_data.get("mail_token"),
+                                validate_mail_token,
+                            ),
                         }
                         self.profiles[name] = Profile(**clean_data)
                 logger.info("Loaded %d profiles", len(self.profiles))
@@ -414,6 +423,8 @@ class ProfileManager:
         email: str | None = None,
         password: str | None = None,
         two_fa: str | None = None,
+        recovery_email: str | None = None,
+        mail_token: str | None = None,
     ) -> bool:
         with self._lock:
             if self._find_by_casefold(name) is not None:
@@ -448,6 +459,8 @@ class ProfileManager:
                 email=valid_or_none(email, validate_email),
                 password=valid_or_none(password, validate_password),
                 two_fa=normalize_totp_secret(valid_or_none(two_fa, validate_two_fa)) or None,
+                recovery_email=valid_or_none(recovery_email, validate_email),
+                mail_token=valid_or_none(mail_token, validate_mail_token),
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -470,6 +483,8 @@ class ProfileManager:
         new_email: object = _UNSET,
         new_password: object = _UNSET,
         new_two_fa: object = _UNSET,
+        new_recovery_email: object = _UNSET,
+        new_mail_token: object = _UNSET,
     ) -> bool:
         """Replace every field; a None/empty timezone or locale means automatic."""
         with self._lock:
@@ -547,6 +562,16 @@ class ProfileManager:
                     validate_two_fa,
                 )
                 profile.two_fa = normalize_totp_secret(raw_2fa) or None
+            if new_recovery_email is not _UNSET:
+                profile.recovery_email = valid_or_none(
+                    new_recovery_email if isinstance(new_recovery_email, str) else None,
+                    validate_email,
+                )
+            if new_mail_token is not _UNSET:
+                profile.mail_token = valid_or_none(
+                    new_mail_token if isinstance(new_mail_token, str) else None,
+                    validate_mail_token,
+                )
             if not profile.created_at:
                 profile.created_at = self._infer_created_at(new_name)
             self._sync_ban_state(profile, was_banned=was_banned)
@@ -755,6 +780,8 @@ class ProfileManager:
                 email=src.email,
                 password=src.password,
                 two_fa=src.two_fa,
+                recovery_email=src.recovery_email,
+                mail_token=src.mail_token,
             )
 
     def trash_profile(self, name: str) -> bool:
@@ -846,6 +873,14 @@ class ProfileManager:
                     valid_or_none(p_data.get("two_fa"), validate_two_fa)
                 )
                 or None,
+                recovery_email=valid_or_none(
+                    p_data.get("recovery_email"),
+                    validate_email,
+                ),
+                mail_token=valid_or_none(
+                    p_data.get("mail_token"),
+                    validate_mail_token,
+                ),
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -961,6 +996,144 @@ class ProfileManager:
             p.email = clean_email
             self.save_profiles()
             return True
+
+    def update_profile_credentials(
+        self,
+        name: str,
+        email: object = _UNSET,
+        password: object = _UNSET,
+        two_fa: object = _UNSET,
+        recovery_email: object = _UNSET,
+        notes: object = _UNSET,
+        mail_token: object = _UNSET,
+    ) -> bool:
+        clean_email: str | None = None
+        if email is not _UNSET:
+            clean_email = (str(email) if isinstance(email, str) else "").strip() or None
+            if clean_email is not None and not validate_email(clean_email)[0]:
+                return False
+        clean_pass: str | None = None
+        if password is not _UNSET:
+            clean_pass = (str(password) if isinstance(password, str) else "").strip() or None
+            if clean_pass is not None and not validate_password(clean_pass)[0]:
+                return False
+        clean_2fa: str | None = None
+        if two_fa is not _UNSET:
+            raw_2fa = (str(two_fa) if isinstance(two_fa, str) else "").strip() or None
+            if raw_2fa is not None and not validate_two_fa(raw_2fa)[0]:
+                return False
+            clean_2fa = normalize_totp_secret(raw_2fa) or None if raw_2fa else None
+        clean_rec: str | None = None
+        if recovery_email is not _UNSET:
+            clean_rec = (
+                str(recovery_email) if isinstance(recovery_email, str) else ""
+            ).strip() or None
+            if clean_rec is not None and not validate_email(clean_rec)[0]:
+                return False
+        clean_tok: str | None = None
+        if mail_token is not _UNSET:
+            clean_tok = (str(mail_token) if isinstance(mail_token, str) else "").strip() or None
+            if clean_tok is not None and not validate_mail_token(clean_tok)[0]:
+                return False
+        clean_notes: str | None = None
+        if notes is not _UNSET:
+            clean_notes = (str(notes) if isinstance(notes, str) else "").strip() or None
+            if clean_notes is not None and not validate_notes(clean_notes)[0]:
+                return False
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            if email is not _UNSET:
+                p.email = clean_email
+            if password is not _UNSET:
+                p.password = clean_pass
+            if two_fa is not _UNSET:
+                p.two_fa = clean_2fa
+            if recovery_email is not _UNSET:
+                p.recovery_email = clean_rec
+            if mail_token is not _UNSET:
+                p.mail_token = clean_tok
+            if notes is not _UNSET:
+                p.notes = clean_notes
+            self.save_profiles()
+            return True
+
+    def bulk_import_credentials(self, raw_lines: list[str] | str) -> tuple[int, int]:
+        """Match credential lines (`email|pass|2fa|recovery` or `name|email|pass|...`) to profiles and save."""
+        updated = 0
+        skipped = 0
+        lines_list = raw_lines.splitlines() if isinstance(raw_lines, str) else list(raw_lines)
+        with self._lock:
+            for raw_line in lines_list:
+                line = (raw_line or "").strip()
+                if not line:
+                    continue
+                parsed = parse_mail_credentials_line(line)
+                p_name = parsed["name"].strip()
+                p_email = parsed["email"].strip()
+                p_pass = parsed["password"].strip()
+                p_2fa = parsed["two_fa"].strip()
+                p_rec = parsed["recovery_email"].strip()
+                p_tok = parsed.get("mail_token", "").strip()
+                if not p_email and not p_name:
+                    skipped += 1
+                    continue
+
+                target_prof: Profile | None = None
+                if p_name:
+                    key = self._find_by_casefold(p_name)
+                    if key is not None:
+                        target_prof = self.profiles[key]
+                if target_prof is None and p_email:
+                    low_email = p_email.casefold()
+                    local_part = low_email.split("@", 1)[0]
+                    for cand in self.profiles.values():
+                        c_mail = (cand.email or "").strip().casefold()
+                        if c_mail and c_mail == low_email:
+                            target_prof = cand
+                            break
+                    if target_prof is None and local_part:
+                        for cand in self.profiles.values():
+                            c_mail = (cand.email or "").strip().casefold()
+                            if c_mail and c_mail.split("@", 1)[0] == local_part:
+                                target_prof = cand
+                                break
+                            if cand.name.casefold() == local_part:
+                                target_prof = cand
+                                break
+
+                if target_prof is None:
+                    skipped += 1
+                    continue
+
+                changed = False
+                if p_email and validate_email(p_email)[0] and target_prof.email != p_email:
+                    target_prof.email = p_email
+                    changed = True
+                if p_pass and validate_password(p_pass)[0] and target_prof.password != p_pass:
+                    target_prof.password = p_pass
+                    changed = True
+                if p_2fa and validate_two_fa(p_2fa)[0]:
+                    norm_2fa = normalize_totp_secret(p_2fa) or None
+                    if norm_2fa and target_prof.two_fa != norm_2fa:
+                        target_prof.two_fa = norm_2fa
+                        changed = True
+                if p_rec and validate_email(p_rec)[0] and target_prof.recovery_email != p_rec:
+                    target_prof.recovery_email = p_rec
+                    changed = True
+                if p_tok and validate_mail_token(p_tok)[0] and target_prof.mail_token != p_tok:
+                    target_prof.mail_token = p_tok
+                    changed = True
+
+                if changed or (p_pass or p_2fa or p_rec or p_tok):
+                    updated += 1
+                else:
+                    skipped += 1
+
+            if updated:
+                self.save_profiles()
+        return updated, skipped
 
     def toggle_pin_profile(self, name: str) -> bool | None:
         with self._lock:
@@ -1210,6 +1383,8 @@ class ProfileManager:
             "email",
             "password",
             "two_fa",
+            "recovery_email",
+            "mail_token",
         ]
         with self._lock:
             selected_set = set(names) if names is not None else None
@@ -1228,6 +1403,8 @@ class ProfileManager:
                         "email": p.email or "",
                         "password": p.password or "",
                         "two_fa": p.two_fa or "",
+                        "recovery_email": p.recovery_email or "",
+                        "mail_token": p.mail_token or "",
                         "pinned": "1" if p.pinned else "",
                         "status": p.status or "",
                         "group": p.group or "",
@@ -1309,6 +1486,16 @@ class ProfileManager:
                 two_fa_val = (
                     normalize_totp_secret(valid_or_none(raw_2fa_col, validate_two_fa)) or None
                 )
+                has_rec_col = "recovery_email" in row and row.get("recovery_email") is not None
+                rec_val = valid_or_none(
+                    str(row.get("recovery_email") or "").strip(),
+                    validate_email,
+                )
+                has_tok_col = "mail_token" in row and row.get("mail_token") is not None
+                tok_val = valid_or_none(
+                    str(row.get("mail_token") or "").strip(),
+                    validate_mail_token,
+                )
                 has_created_col = "created_at" in row and row.get("created_at") is not None
                 created_val = parse_flexible_date(row.get("created_at"))
                 has_banned_col = "banned_at" in row and row.get("banned_at") is not None
@@ -1335,6 +1522,10 @@ class ProfileManager:
                         cur.password = pass_val
                     if has_2fa_col:
                         cur.two_fa = two_fa_val
+                    if has_rec_col:
+                        cur.recovery_email = rec_val
+                    if has_tok_col:
+                        cur.mail_token = tok_val
                     if has_pinned_col:
                         cur.pinned = pinned_val
                     if canonical_pages:
@@ -1376,6 +1567,8 @@ class ProfileManager:
                         email=email_val,
                         password=pass_val,
                         two_fa=two_fa_val,
+                        recovery_email=rec_val,
+                        mail_token=tok_val,
                     )
                     created += 1
             if created or updated:
@@ -1596,6 +1789,14 @@ class ProfileManager:
                         valid_or_none(p_data.get("two_fa"), validate_two_fa)
                     )
                     or None,
+                    recovery_email=valid_or_none(
+                        p_data.get("recovery_email"),
+                        validate_email,
+                    ),
+                    mail_token=valid_or_none(
+                        p_data.get("mail_token"),
+                        validate_mail_token,
+                    ),
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1

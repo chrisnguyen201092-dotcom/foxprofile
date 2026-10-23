@@ -26,6 +26,7 @@ class IProfileManager(Protocol):
         email: str | None = None,
         password: str | None = None,
         two_fa: str | None = None,
+        recovery_email: str | None = None,
     ) -> bool: ...
 
     def update_profile(
@@ -45,6 +46,7 @@ class IProfileManager(Protocol):
         new_email: Any = ...,
         new_password: Any = ...,
         new_two_fa: Any = ...,
+        new_recovery_email: Any = ...,
     ) -> bool: ...
 
     def move_profile(self, name: str, direction: int) -> bool: ...
@@ -101,6 +103,19 @@ class IProfileManager(Protocol):
     ) -> bool: ...
 
     def update_profile_email(self, name: str, email: str | None) -> bool: ...
+
+    def update_profile_credentials(
+        self,
+        name: str,
+        email: Any = ...,
+        password: Any = ...,
+        two_fa: Any = ...,
+        recovery_email: Any = ...,
+        notes: Any = ...,
+        mail_token: Any = ...,
+    ) -> bool: ...
+
+    def bulk_import_credentials(self, raw_lines: list[str] | str) -> tuple[int, int]: ...
 
     def toggle_pin_profile(self, name: str) -> bool | None: ...
 

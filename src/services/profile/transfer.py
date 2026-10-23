@@ -14,6 +14,7 @@ from ...utils.validation import (
     validate_email,
     validate_group,
     validate_locale,
+    validate_mail_token,
     validate_notes,
     validate_password,
     validate_profile_name,
@@ -126,6 +127,14 @@ def import_from_zip(
                     valid_or_none(profile_data.get("two_fa"), validate_two_fa)
                 )
                 or None,
+                recovery_email=valid_or_none(
+                    profile_data.get("recovery_email"),
+                    validate_email,
+                ),
+                mail_token=valid_or_none(
+                    profile_data.get("mail_token"),
+                    validate_mail_token,
+                ),
             )
 
             data_files = [f for f in zipf.namelist() if f.startswith("data/")]

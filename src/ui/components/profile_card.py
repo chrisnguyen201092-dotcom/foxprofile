@@ -214,8 +214,13 @@ def build_profile_card(
     on_ip_history: Callable[[str], None] | None = None,
     on_toggle_pin: Callable[[str], None] | None = None,
     on_edit_dates: Callable[[str], None] | None = None,
+    on_copy_email: Callable[[str], None] | None = None,
     on_copy_2fa: Callable[[str], None] | None = None,
     on_copy_password: Callable[[str], None] | None = None,
+    on_copy_recovery: Callable[[str], None] | None = None,
+    on_copy_token: Callable[[str], None] | None = None,
+    on_fetch_mail_otp: Callable[[str], None] | None = None,
+    on_open_mail_credentials: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -369,7 +374,10 @@ def build_profile_card(
     email_val = (getattr(profile, "email", None) or "").strip()
     password_val = (getattr(profile, "password", None) or "").strip()
     two_fa_val = (getattr(profile, "two_fa", None) or "").strip()
+    recovery_val = (getattr(profile, "recovery_email", None) or "").strip()
+    token_val = (getattr(profile, "mail_token", None) or "").strip()
     totp_pair = generate_totp(two_fa_val) if two_fa_val else None
+    has_saved_creds = bool(password_val or two_fa_val or recovery_val or token_val)
     if editing_email and on_save_email is not None:
         email_input = ft.TextField(
             value=email_val,
@@ -400,9 +408,26 @@ def build_profile_card(
             on_blur=lambda e, n=profile.name: on_save_note(n, e.control.value or ""),
         )
         text_block = _stack(top_line, note_input)
-    elif email_val or password_val or totp_pair is not None or profile.notes:
+    elif (
+        email_val
+        or password_val
+        or totp_pair is not None
+        or recovery_val
+        or token_val
+        or profile.notes
+        or on_open_mail_credentials is not None
+    ):
         sub_parts: list[ft.Control] = []
         if email_val:
+            email_tip = (
+                get_string("tooltip_copy_email", email=email_val)
+                if on_copy_email is not None
+                else (
+                    f"{email_val}\n({get_string('tooltip_quick_edit_email')})"
+                    if on_start_edit_email
+                    else email_val
+                )
+            )
             email_widget: ft.Control = ft.Text(
                 email_val,
                 size=11.5,
@@ -410,15 +435,14 @@ def build_profile_card(
                 color=COLORS["text_dim"],
                 no_wrap=True,
                 overflow=ft.TextOverflow.ELLIPSIS,
-                tooltip=(
-                    f"{email_val}\n({get_string('tooltip_quick_edit_email')})"
-                    if on_start_edit_email
-                    else email_val
-                ),
+                tooltip=email_tip,
             )
-            if on_start_edit_email is not None:
+            email_click_fn = on_copy_email or on_start_edit_email
+            if email_click_fn is not None:
                 email_widget = ft.Container(
-                    on_click=lambda _, n=profile.name: on_start_edit_email(n),
+                    ink=True,
+                    border_radius=3,
+                    on_click=lambda _, n=profile.name, fn=email_click_fn: fn(n),
                     content=email_widget,
                 )
             sub_parts.append(email_widget)
@@ -464,6 +488,63 @@ def build_profile_card(
                 ),
             )
             sub_parts.append(pass_chip)
+        if token_val and on_fetch_mail_otp is not None:
+            otp_mail_chip = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["accent"]),
+                ink=True,
+                tooltip=get_string("tooltip_fetch_mail_otp"),
+                on_click=lambda _, n=profile.name: on_fetch_mail_otp(n),
+                content=ft.Text(
+                    get_string("badge_fetch_mail_otp"),
+                    size=10,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["accent"],
+                ),
+            )
+            sub_parts.append(otp_mail_chip)
+        if recovery_val:
+            rec_chip = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1, COLORS["rule_strong"]),
+                ink=on_copy_recovery is not None,
+                tooltip=get_string("tooltip_copy_recovery", email=recovery_val),
+                on_click=(
+                    (lambda _, n=profile.name: on_copy_recovery(n))
+                    if on_copy_recovery is not None
+                    else None
+                ),
+                content=ft.Text(
+                    get_string("badge_copy_recovery"),
+                    size=10,
+                    font_family=FONT_MEDIUM,
+                    color=COLORS["text_sub"],
+                ),
+            )
+            sub_parts.append(rec_chip)
+        if on_open_mail_credentials is not None:
+            vault_chip = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(
+                    1,
+                    COLORS["accent"] if has_saved_creds else COLORS["rule_strong"],
+                ),
+                ink=True,
+                tooltip=get_string("tooltip_mail_credentials"),
+                on_click=lambda _, n=profile.name: on_open_mail_credentials(n),
+                content=ft.Icon(
+                    ft.Icons.KEY_ROUNDED if has_saved_creds else ft.Icons.MAIL_LOCK_OUTLINED,
+                    size=12,
+                    color=COLORS["accent"] if has_saved_creds else COLORS["text_dim"],
+                ),
+            )
+            sub_parts.append(vault_chip)
         if profile.notes:
             single_line_note = " ".join(profile.notes.splitlines()).strip()
             note_widget: ft.Control = ft.Text(
