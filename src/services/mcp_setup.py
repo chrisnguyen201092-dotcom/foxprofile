@@ -8,7 +8,20 @@ import sys
 from dataclasses import asdict, dataclass
 
 TOKEN_PLACEHOLDER = "<FOXPROFILE_API_TOKEN>"
-MCP_SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "foxprofile_mcp.py"
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+MCP_SCRIPT = PROJECT_ROOT / "foxprofile_mcp.py"
+
+
+def _default_python() -> str:
+    """Prefer the repository's .venv Python interpreter when present."""
+    candidates = (
+        PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+        PROJECT_ROOT / ".venv" / "bin" / "python",
+    )
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return sys.executable
 
 
 @dataclass
@@ -32,16 +45,81 @@ def build_configs(
     python: str | None = None,
     api_url: str | None = None,
 ) -> list[ClientConfig]:
-    """Configs for common MCP clients.
+    """Configs for common MCP clients (Antigravity, Codex, Hermes, Claude, Cursor, VS Code).
 
     `token` is the real token, a placeholder, or None when the API has none.
-    `local` adds a Claude Desktop config that starts FoxProfile's stdio MCP
-    server on this machine; otherwise Claude Desktop goes through mcp-remote.
+    `local` adds stdio configurations that start FoxProfile's stdio MCP
+    server on this machine; otherwise clients use HTTP or mcp-remote.
     """
     auth = {"Authorization": f"Bearer {token}"} if token else {}
     header_flag = f' --header "Authorization: Bearer {token}"' if token else ""
+    py_cmd = python or _default_python()
+
+    desktop_where = (
+        "%APPDATA%\\Claude\\claude_desktop_config.json"
+        if sys.platform == "win32"
+        else "~/Library/Application Support/Claude/claude_desktop_config.json"
+    )
+    antigravity_where = (
+        "%USERPROFILE%\\.gemini\\antigravity\\mcp_config.json"
+        if sys.platform == "win32"
+        else "~/.gemini/antigravity/mcp_config.json"
+    )
+
+    if local:
+        env = {"FOXPROFILE_URL": api_url or mcp_url.rsplit("/mcp", 1)[0]}
+        if token:
+            env["FOXPROFILE_API_TOKEN"] = token
+        stdio_server: dict = {
+            "command": py_cmd,
+            "args": [str(MCP_SCRIPT)],
+            "env": env,
+        }
+        antigravity_server: dict = stdio_server
+        codex_env_flag = f' --env "FOXPROFILE_API_TOKEN={token}"' if token else ""
+        codex_cmd = f'codex mcp add foxprofile{codex_env_flag} -- "{py_cmd}" "{MCP_SCRIPT}"'
+    else:
+        # Remote HTTP bridge
+        args = ["-y", "mcp-remote", mcp_url]
+        stdio_server = {"command": "npx", "args": args}
+        if token:
+            args += ["--header", "Authorization:${FOXPROFILE_AUTH}"]
+            stdio_server["env"] = {"FOXPROFILE_AUTH": f"Bearer {token}"}
+        antigravity_server = {"serverUrl": mcp_url, **({"headers": auth} if auth else {})}
+        codex_cmd = f"codex mcp add --url {mcp_url}{header_flag} foxprofile"
 
     configs = [
+        ClientConfig(
+            id="antigravity",
+            name="Antigravity",
+            where=antigravity_where,
+            language="json",
+            code=_json({"mcpServers": {"foxprofile": antigravity_server}}),
+        ),
+        ClientConfig(
+            id="codex",
+            name="Codex CLI",
+            where="Terminal",
+            language="bash",
+            code=codex_cmd,
+        ),
+        ClientConfig(
+            id="hermes",
+            name="Hermes Agent",
+            where="mcp_config.json / mcpServers",
+            language="json",
+            code=_json(
+                {
+                    "mcpServers": {
+                        "foxprofile": (
+                            stdio_server
+                            if local
+                            else {"url": mcp_url, **({"headers": auth} if auth else {})}
+                        )
+                    }
+                },
+            ),
+        ),
         ClientConfig(
             id="claude-code",
             name="Claude Code",
@@ -79,39 +157,14 @@ def build_configs(
                 },
             ),
         ),
-    ]
-
-    desktop_where = (
-        "%APPDATA%\\Claude\\claude_desktop_config.json"
-        if sys.platform == "win32"
-        else "~/Library/Application Support/Claude/claude_desktop_config.json"
-    )
-    if local:
-        env = {"FOXPROFILE_URL": api_url or mcp_url.rsplit("/mcp", 1)[0]}
-        if token:
-            env["FOXPROFILE_API_TOKEN"] = token
-        server = {
-            "command": python or sys.executable,
-            "args": [str(MCP_SCRIPT)],
-            "env": env,
-        }
-    else:
-        # Claude Desktop's config file only starts local (stdio) servers;
-        # mcp-remote bridges it to the HTTP endpoint.
-        args = ["-y", "mcp-remote", mcp_url]
-        server = {"command": "npx", "args": args}
-        if token:
-            args += ["--header", "Authorization:${FOXPROFILE_AUTH}"]
-            server["env"] = {"FOXPROFILE_AUTH": f"Bearer {token}"}
-    configs.append(
         ClientConfig(
             id="claude-desktop",
             name="Claude Desktop",
             where=desktop_where,
             language="json",
-            code=_json({"mcpServers": {"foxprofile": server}}),
+            code=_json({"mcpServers": {"foxprofile": stdio_server}}),
         ),
-    )
+    ]
     return configs
 
 

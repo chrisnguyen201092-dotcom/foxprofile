@@ -13,6 +13,7 @@ from ...models.profile import ENGINES
 from ...services.browser import chrome_prefetch, cookies, fingerprint
 from ...services.browser.launcher import ProfileBusyError
 from ...services.proxy.geo_check import check_geo
+from ...utils.totp import fetch_hotmail_messages, generate_totp
 from ...utils.validation import (
     validate_color,
     validate_group,
@@ -22,10 +23,17 @@ from ...utils.validation import (
     validate_proxy_format,
     validate_timezone,
 )
-from ..dependencies import get_browser_launcher, get_event_bus, get_profile_manager
+from ...utils.warmup_sites import load_warmup_text, parse_warmup_groups
+from ..dependencies import (
+    get_browser_launcher,
+    get_event_bus,
+    get_monitor_service,
+    get_profile_manager,
+)
 from ..helpers import build_profile_response, profile_response, require_profile
 from ..schemas.common import ErrorResponse, SuccessResponse
 from ..schemas.profiles import (
+    BulkProfileOpsRequest,
     CookieImportRequest,
     CookieImportResponse,
     CustomPageMembersRequest,
@@ -49,6 +57,7 @@ from ..schemas.proxy import GeoCheckResponse
 if TYPE_CHECKING:
     from ...core.events import EventBus
     from ...interfaces import IBrowserLauncher, IProfileManager
+    from ...services.monitor import MonitorService
 
 logger = get_logger("api.profiles")
 
@@ -106,6 +115,141 @@ def list_profiles(
         total=len(profiles),
         custom_pages=pm.list_custom_pages(),
     )
+
+
+@router.get("/monitor/overview")
+def monitor_overview(
+    page: str | None = Query(None, description="Filter by custom page name"),
+    status: str | None = Query(None, description="Filter by status tag"),
+    only_ready: bool = Query(
+        False,
+        description="If true, only return profiles that are ready to launch safely",
+    ),
+    pm: IProfileManager = Depends(get_profile_manager),
+    bl: IBrowserLauncher = Depends(get_browser_launcher),
+    mon: MonitorService = Depends(get_monitor_service),
+) -> dict:
+    """Operational overview of all profiles (cooldowns, port collisions, exit IPs, readiness)."""
+    all_profiles = pm.list_profiles()
+    running = bl.running_profile_names()
+    snap = mon.snapshot(all_profiles, running)
+    cd_target = mon.cooldown_minutes
+
+    items: list[dict] = []
+    ready_count = 0
+    cooldown_count = 0
+    warning_count = 0
+
+    for p in all_profiles:
+        if page and not any(pg.casefold() == page.strip().casefold() for pg in p.pages):
+            continue
+        if status and (p.status or "").strip().casefold() != status.strip().casefold():
+            continue
+        info = snap.profiles.get(p.name)
+        is_run = p.name in running
+        in_cooldown = bool(
+            info
+            and not is_run
+            and (
+                info.busy_by
+                or info.port_cooldown_by is not None
+                or (
+                    cd_target > 0
+                    and info.cooldown_mins is not None
+                    and info.cooldown_mins < cd_target
+                )
+            )
+        )
+        has_warn = bool(info and info.has_warning)
+        is_ready = bool(p.proxy and not is_run and not in_cooldown and not has_warn)
+
+        if is_ready:
+            ready_count += 1
+        if in_cooldown:
+            cooldown_count += 1
+        if has_warn:
+            warning_count += 1
+
+        if only_ready and not is_ready:
+            continue
+
+        items.append(
+            {
+                "name": p.name,
+                "status": p.status,
+                "group": p.group,
+                "pages": list(p.pages),
+                "pinned": bool(getattr(p, "pinned", False)),
+                "proxy_port": info.port if info else "",
+                "is_running": is_run,
+                "ready_to_launch": is_ready,
+                "in_cooldown": in_cooldown,
+                "cooldown_mins": info.cooldown_mins if info else None,
+                "busy_by": list(info.busy_by) if info else [],
+                "port_cooldown_by": (
+                    {"profile": info.port_cooldown_by[0], "minutes_left": info.port_cooldown_by[1]}
+                    if info and info.port_cooldown_by
+                    else None
+                ),
+                "has_warning": has_warn,
+                "last_exit_ip": info.last_exit_ip if info else "",
+                "last_exit_country": info.last_exit_country if info else "",
+                "last_exit_ip_type": info.last_exit_ip_type if info else "",
+                "today_minutes": info.today_minutes if info else 0,
+            }
+        )
+
+    return {
+        "total_matched": len(items),
+        "running_count": len(running),
+        "ready_count": ready_count,
+        "cooldown_count": cooldown_count,
+        "warning_count": warning_count,
+        "cooldown_target_minutes": cd_target,
+        "proxy_collisions": [
+            {"port": port, "profiles": names} for port, names in snap.proxy_collisions
+        ],
+        "profiles": items,
+    }
+
+
+@router.get("/warmup-sites")
+def get_warmup_sites() -> dict:
+    """List categorized IPv6 & _GRECAPTCHA warmup websites."""
+    groups = parse_warmup_groups(load_warmup_text())
+    return {"groups": groups, "total_groups": len(groups)}
+
+
+@router.post("/bulk-ops")
+def bulk_profile_ops(
+    body: BulkProfileOpsRequest,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bus: EventBus = Depends(get_event_bus),
+) -> dict:
+    """Update status, group, pinned state, or page membership for one or more profiles."""
+    supplied = body.model_dump(exclude_unset=True)
+    names = [n for n in body.names if n in pm.profiles]
+    if not names:
+        raise HTTPException(status_code=404, detail="No matching profiles found")
+
+    updated: dict[str, int] = {}
+    if "status" in supplied:
+        st = (body.status or "").strip() or None
+        updated["status"] = pm.bulk_update_status(names, st)
+    if "group" in supplied:
+        grp = (body.group or "").strip() or None
+        updated["group"] = pm.bulk_update_group(names, grp)
+    if "pinned" in supplied and body.pinned is not None:
+        updated["pinned"] = pm.bulk_update_pinned(names, bool(body.pinned))
+    if body.add_to_page:
+        ok = pm.add_profiles_to_page(body.add_to_page.strip(), names)
+        updated["added_to_page"] = len(names) if ok else 0
+    if body.remove_from_page:
+        ok = pm.remove_profiles_from_page(body.remove_from_page.strip(), names)
+        updated["removed_from_page"] = len(names) if ok else 0
+
+    bus.emit()
+    return {"success": True, "profiles": names, "updated": updated}
 
 
 @router.post("/pages", response_model=SuccessResponse)
@@ -249,6 +393,93 @@ def move_profile(
     pm.move_profile(name, body.direction)
     bus.emit()
     return SuccessResponse(message=f"Moved profile '{name}'")
+
+
+@router.get(
+    "/{name}/totp",
+    responses={404: {"model": ErrorResponse}},
+)
+def get_profile_totp(
+    name: str,
+    pm: IProfileManager = Depends(get_profile_manager),
+) -> dict:
+    """Generate the current 6-digit RFC 6238 2FA code for a profile."""
+    profile = require_profile(name, pm)
+    pair = generate_totp(getattr(profile, "two_fa", None))
+    if pair is None:
+        return {
+            "name": name,
+            "has_2fa": False,
+            "code": None,
+            "remaining_seconds": 0,
+        }
+    code, rem = pair
+    return {
+        "name": name,
+        "has_2fa": True,
+        "code": code,
+        "remaining_seconds": rem,
+    }
+
+
+@router.post(
+    "/{name}/mail-otp",
+    responses={404: {"model": ErrorResponse}},
+)
+def fetch_profile_mail_otp(
+    name: str,
+    top: int = Query(8, ge=1, le=20),
+    pm: IProfileManager = Depends(get_profile_manager),
+) -> dict:
+    """Read the profile's Hotmail/Outlook inbox via Microsoft OAuth2 and extract the latest OTP."""
+    profile = require_profile(name, pm)
+    ok, otp_or_err, messages = fetch_hotmail_messages(
+        getattr(profile, "email", None),
+        getattr(profile, "mail_token", None),
+        top=top,
+    )
+    if not ok:
+        return {
+            "name": name,
+            "email": getattr(profile, "email", None),
+            "success": False,
+            "error": otp_or_err,
+            "latest_otp": "",
+            "messages": [],
+        }
+    return {
+        "name": name,
+        "email": getattr(profile, "email", None),
+        "success": True,
+        "error": "",
+        "latest_otp": otp_or_err,
+        "messages": messages,
+    }
+
+
+@router.get(
+    "/{name}/history",
+    responses={404: {"model": ErrorResponse}},
+)
+def get_profile_history(
+    name: str,
+    pm: IProfileManager = Depends(get_profile_manager),
+    bl: IBrowserLauncher = Depends(get_browser_launcher),
+    mon: MonitorService = Depends(get_monitor_service),
+) -> dict:
+    """Return session history and exit IP history for a profile."""
+    profile = require_profile(name, pm)
+    sessions = mon.get_profile_sessions(
+        name,
+        is_running=bl.is_running(name),
+        current_proxy=profile.proxy,
+    )
+    ip_history = mon.get_ip_history(name)
+    return {
+        "name": name,
+        "sessions": sessions,
+        "ip_history": ip_history,
+    }
 
 
 @router.get(

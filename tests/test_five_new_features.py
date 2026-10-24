@@ -2007,3 +2007,193 @@ def test_warmup_sites_vault_and_dialog(tmp_path):
     open_warmup_sites_dialog(fp, on_copy_text=lambda u, m: None)  # type: ignore[arg-type]
     assert len(fp.dialogs) == 1
 
+
+def test_mcp_and_api_anti_detect_ops_endpoints(isolated_pm, tmp_path, monkeypatch):
+    """Test upgraded MCP tools & API endpoints: Pre-Launch Safety Guard, Monitor Overview, TOTP, Pool, Bulk Ops."""
+    from fastapi.testclient import TestClient
+
+    import src.api.auth as auth_mod
+    from src.api.app import create_app
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.mcp_server.server import mcp
+    from src.services.monitor import MonitorService
+
+    monkeypatch.setattr(auth_mod, "API_TOKEN", "")
+
+    isolated_pm.add_profile(
+        "ReadyAcc",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Chicago",
+        locale="en-US",
+        status="ready",
+        pages=["Live"],
+        two_fa="JBSWY3DPEHPK3PXP",
+        email="ready@hotmail.com",
+    )
+    isolated_pm.add_profile(
+        "SamePortAcc",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        timezone="America/Chicago",
+        locale="en-US",
+        status="ready",
+        pages=["Live"],
+    )
+    isolated_pm.add_profile(
+        "NoProxyAcc",
+        "",
+        "windows",
+        pages=["Live"],
+    )
+
+    class FakeBL:
+        def __init__(self):
+            self.running: set[str] = set()
+
+        def is_running(self, name: str) -> bool:
+            return name in self.running
+
+        def running_profile_names(self) -> set[str]:
+            return set(self.running)
+
+        def running_count(self) -> int:
+            return len(self.running)
+
+        def start_thread(self, profile, log_callback, on_start=None, on_ready=None, on_stop=None):
+            self.running.add(profile.name)
+            if on_ready:
+                on_ready()
+            return True
+
+        def wait_for_launch(self, name: str, timeout: float = 30.0):
+            return True, None
+
+        def stop_profile(self, name: str, timeout: float = 2.0):
+            self.running.discard(name)
+            return True
+
+        def arrange_windows(self, names=None) -> int:
+            return len(self.running)
+
+        def focus_profile(self, name: str) -> bool:
+            return name in self.running
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str: str, timeout: int = 10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+    c._instances["mon"] = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    app = create_app(c)
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+
+    # 1. Verify all new MCP tools are registered
+    tool_names = {t.name for t in asyncio.run(mcp.list_tools())}
+    assert {
+        "get_monitor_overview",
+        "check_prelaunch_safety",
+        "get_profile_2fa",
+        "fetch_hotmail_otp",
+        "get_profile_history",
+        "list_warmup_sites",
+        "list_proxy_pool",
+        "add_proxies_to_pool",
+        "assign_proxy_from_pool",
+        "bulk_update_profiles",
+        "arrange_browser_windows",
+        "focus_browser_window",
+    } <= tool_names
+
+    # 2. Pre-launch check & Safety Guard on launch
+    r_check_noproxy = client.get("/api/v1/browser/NoProxyAcc/prelaunch-check")
+    assert r_check_noproxy.status_code == 200
+    assert r_check_noproxy.json()["safe"] is False
+
+    # Launching NoProxyAcc is blocked by default (409)
+    r_launch_blocked = client.post("/api/v1/browser/NoProxyAcc/launch")
+    assert r_launch_blocked.status_code == 409
+    assert "no_proxy" in r_launch_blocked.json()["detail"]
+
+    # Launching ReadyAcc succeeds (200)
+    r_launch_ok = client.post("/api/v1/browser/ReadyAcc/launch")
+    assert r_launch_ok.status_code == 200
+    assert r_launch_ok.json()["success"] is True
+
+    # Launching SamePortAcc while ReadyAcc is running on :10001 is blocked (409 port_busy)
+    r_collision = client.post("/api/v1/browser/SamePortAcc/launch")
+    assert r_collision.status_code == 409
+    assert "port_busy" in r_collision.json()["detail"]
+
+    # Arrange & focus running windows
+    assert client.post("/api/v1/browser/arrange").json()["arranged"] == 1
+    assert client.post("/api/v1/browser/ReadyAcc/focus").json()["success"] is True
+
+    # Stop ReadyAcc -> SamePortAcc now blocked by 15m port_cooldown unless force=true
+    assert client.post("/api/v1/browser/ReadyAcc/stop").status_code == 200
+    r_cooldown = client.post("/api/v1/browser/SamePortAcc/launch")
+    assert r_cooldown.status_code == 409
+    assert "port_cooldown" in r_cooldown.json()["detail"]
+
+    r_force = client.post("/api/v1/browser/SamePortAcc/launch?force=true")
+    assert r_force.status_code == 200
+    client.post("/api/v1/browser/SamePortAcc/stop")
+
+    # 3. Monitor overview, TOTP, Mail OTP, History, Warmup sites
+    ov = client.get("/api/v1/profiles/monitor/overview?page=Live").json()
+    assert ov["total_matched"] == 3
+
+    totp_res = client.get("/api/v1/profiles/ReadyAcc/totp").json()
+    assert totp_res["has_2fa"] is True
+    assert len(totp_res["code"]) == 6
+
+    mail_res = client.post("/api/v1/profiles/ReadyAcc/mail-otp").json()
+    assert mail_res["success"] is False  # No refresh token configured yet
+
+    hist_res = client.get("/api/v1/profiles/ReadyAcc/history").json()
+    assert len(hist_res["sessions"]) >= 1
+
+    warmup_res = client.get("/api/v1/profiles/warmup-sites").json()
+    assert warmup_res["total_groups"] == 6
+
+    # 4. Proxy Pool & Bulk Ops
+    pool_add = client.post(
+        "/api/v1/proxy/pool",
+        json={"proxies": ["1.2.3.4:20001:u:p", "1.2.3.4:20002:u:p"]},
+    ).json()
+    assert pool_add["added"] == 2
+    assert client.get("/api/v1/proxy/pool").json()["unassigned_count"] == 2
+
+    assign_res = client.post(
+        "/api/v1/proxy/pool/assign",
+        json={"profile": "NoProxyAcc", "new_proxy": "http://u:p@1.2.3.4:20001"},
+    ).json()
+    assert assign_res["success"] is True
+    assert isolated_pm.profiles["NoProxyAcc"].proxy == "http://u:p@1.2.3.4:20001"
+
+    bulk_res = client.post(
+        "/api/v1/profiles/bulk-ops",
+        json={
+            "names": ["NoProxyAcc"],
+            "status": "hold",
+            "group": "TeamHold",
+            "pinned": True,
+            "add_to_page": "Disconnected",
+        },
+    ).json()
+    assert bulk_res["success"] is True
+    assert isolated_pm.profiles["NoProxyAcc"].status == "hold"
+    assert isolated_pm.profiles["NoProxyAcc"].group == "TeamHold"
+    assert isolated_pm.profiles["NoProxyAcc"].pinned is True
+    assert "Disconnected" in isolated_pm.profiles["NoProxyAcc"].pages
+
+

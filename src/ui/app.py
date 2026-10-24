@@ -35,7 +35,7 @@ from .state import AppState
 from .theme import COLORS, configure_page
 from .theme.colors import FONT_SEMIBOLD
 from .theme.page import ASSETS_DIR, setup_windows_taskbar_icon
-from .theme.styles import OUTLINE_STYLE, RAIL_STYLE
+from .theme.styles import OUTLINE_STYLE
 
 logger = get_logger("app")
 
@@ -57,18 +57,26 @@ class App:
         )
         self._live_since: dict[str, str] = {}
         self._alerted_token_bursts: set[str] = set()
-        self.monitor = MonitorService()
+        self.monitor: MonitorService = c.monitor_service
         self._last_monitor_snap: MonitorSnapshot | None = None
         self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
-        self._trash_btn = ft.OutlinedButton(
-            get_string("trash_button", count=0),
-            icon=ft.Icons.DELETE_OUTLINE,
-            expand=True,
+        self._trash_btn = ft.Container(
+            width=34,
             height=34,
-            style=RAIL_STYLE,
+            border_radius=7,
+            bgcolor=COLORS["cover_deep"],
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
+            alignment=ft.Alignment(0, 0),
+            ink=True,
+            tooltip=get_string("trash_button", count=0),
+            content=ft.Icon(
+                ft.Icons.DELETE_OUTLINE,
+                size=16,
+                color=COLORS["cover_ink"],
+            ),
         )
         self._arrange_btn = ft.OutlinedButton(
             get_string("arrange_windows_btn"),
@@ -169,13 +177,21 @@ class App:
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
-        self._trash_btn = ft.OutlinedButton(
-            get_string("trash_button", count=len(self.pm.list_trashed_profiles())),
-            icon=ft.Icons.DELETE_OUTLINE,
-            expand=True,
+        self._trash_btn = ft.Container(
+            width=34,
             height=34,
-            style=RAIL_STYLE,
+            border_radius=7,
+            bgcolor=COLORS["cover_deep"],
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
+            alignment=ft.Alignment(0, 0),
+            ink=True,
+            tooltip=get_string("trash_button", count=len(self.pm.list_trashed_profiles())),
             on_click=lambda _: self.h.on_open_trash(),
+            content=ft.Icon(
+                ft.Icons.DELETE_OUTLINE,
+                size=16,
+                color=COLORS["cover_ink"],
+            ),
         )
         self._arrange_btn = ft.OutlinedButton(
             get_string("arrange_windows_btn"),
@@ -521,7 +537,7 @@ class App:
             )
         self._arrange_btn.visible = len(running) >= 1
         if hasattr(self.pm, "list_trashed_profiles"):
-            self._trash_btn.content = get_string(
+            self._trash_btn.tooltip = get_string(
                 "trash_button",
                 count=len(self.pm.list_trashed_profiles()),
             )

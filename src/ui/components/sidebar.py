@@ -175,6 +175,22 @@ def build_sidebar(
     trash_btn: ft.Control | None = None,
 ) -> ft.Container:
     log_toggle_btn.on_click = on_toggle_log
+    log_icon_btn = ft.Container(
+        width=34,
+        height=34,
+        border_radius=7,
+        bgcolor=COLORS["cover_deep"],
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip=get_string("activity_log"),
+        on_click=on_fullscreen_log,
+        content=ft.Icon(
+            ft.Icons.RECEIPT_LONG_OUTLINED,
+            size=16,
+            color=COLORS["cover_ink"],
+        ),
+    )
     mcp_icon_btn = ft.Container(
         width=34,
         height=34,
@@ -194,7 +210,13 @@ def build_sidebar(
     bottom_row_controls: list[ft.Control] = []
     if trash_btn is not None:
         bottom_row_controls.append(trash_btn)
-    bottom_row_controls.extend([mcp_icon_btn, _language_switch(language, on_language)])
+    bottom_row_controls.extend(
+        [
+            log_icon_btn,
+            mcp_icon_btn,
+            _language_switch(language, on_language),
+        ]
+    )
     return ft.Container(
         width=240,
         bgcolor=COLORS["sidebar"],
@@ -276,19 +298,6 @@ def build_sidebar(
                 ft.Container(
                     expand=True,
                     content=filter_column or ft.Column(),
-                ),
-                ft.Row(
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    controls=[
-                        log_toggle_btn,
-                        ft.IconButton(
-                            icon=ft.Icons.OPEN_IN_FULL,
-                            icon_size=16,
-                            icon_color=COLORS["cover_muted"],
-                            tooltip=get_string("activity_log"),
-                            on_click=on_fullscreen_log,
-                        ),
-                    ],
                 ),
                 log_column,
                 ft.Container(height=8),

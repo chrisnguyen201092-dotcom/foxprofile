@@ -2,7 +2,12 @@ import asyncio
 
 import pytest
 
-from src.services.browser.control import ControlError, PageController, _check_url
+from src.services.browser.control import (
+    ControlError,
+    PageController,
+    _check_url,
+    is_protected_anti_detect_url,
+)
 
 
 @pytest.mark.parametrize(
@@ -55,6 +60,9 @@ class FakePage:
     async def bring_to_front(self):
         pass
 
+    async def evaluate(self, script):
+        return f"eval:{script}"
+
 
 class FakeContext:
     def __init__(self, n=1):
@@ -97,6 +105,32 @@ def test_tabs_select_and_close():
         run(c.dispatch("tab_close", {"index": 0}))
     with pytest.raises(ControlError, match="No tab"):
         run(c.dispatch("tab_select", {"index": 5}))
+
+
+def test_protected_anti_detect_dom_guard():
+    assert is_protected_anti_detect_url("https://muse.ai/chat")[0] is True
+    assert is_protected_anti_detect_url("https://auth.meta.com/login")[0] is True
+    assert is_protected_anti_detect_url("https://www.google.com/recaptcha/api2/anchor")[0] is True
+    assert is_protected_anti_detect_url("https://www.cnn.com/us")[0] is False
+
+    ctx = FakeContext(1)
+    c = PageController(ctx)
+    # Normal domain -> evaluate succeeds
+    res = run(c.dispatch("evaluate", {"script": "1+1"}))
+    assert res == {"result": "eval:1+1"}
+
+    # Protected domain (muse.ai) -> DOM actions (click, type, evaluate, press) are blocked!
+    ctx.pages[0].url = "https://muse.ai/thread/123"
+    for act, params in (
+        ("click", {"selector": "button"}),
+        ("type", {"selector": "input", "text": "hi"}),
+        ("press", {"key": "Enter"}),
+        ("click_at", {"x": 10, "y": 20}),
+        ("keyboard_type", {"text": "abc"}),
+        ("evaluate", {"script": "document.title"}),
+    ):
+        with pytest.raises(ControlError, match="Anti-Detect Safety Guard"):
+            run(c.dispatch(act, params))
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ def _code_box(text: ft.Text) -> ft.Container:
 
 def open_mcp_guide(page: ft.Page, clipboard: ft.Clipboard) -> None:
     """Step-by-step MCP setup with ready-to-paste configs for common AI apps."""
-    state = {"client": "claude-code", "real_token": False}
+    state = {"client": "antigravity", "real_token": False}
 
     status = ft.Text(get_string("mcp_endpoint", url=_MCP_URL), size=12, color=COLORS["text_sub"])
     health = ft.Text("", size=12, color=COLORS["text_dim"])
@@ -64,7 +64,7 @@ def open_mcp_guide(page: ft.Page, clipboard: ft.Clipboard) -> None:
         ]
         where.value = get_string("mcp_paste_into", where=current.where)
         code.value = current.code
-        note.visible = current.id == "claude-desktop"
+        note.visible = current.id in ("claude-desktop", "antigravity", "hermes")
         note.value = get_string("mcp_desktop_note")
         copied.value = ""
         page.update()

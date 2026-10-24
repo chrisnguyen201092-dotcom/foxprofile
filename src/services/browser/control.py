@@ -8,6 +8,7 @@ stdout as "CONTROL:<port>:<token>" so the launcher can forward API calls.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import secrets
 from typing import Any
@@ -20,12 +21,44 @@ MAX_FULL_PAGE_HEIGHT = 16_384
 MAX_TEXT = 40_000
 TOKEN_HEADER = "X-Control-Token"
 
+PROTECTED_ANTI_DETECT_DOMAINS = (
+    "muse.ai",
+    "hatch.io",
+    "meta.com",
+    "facebook.com",
+    "instagram.com",
+    "challenges.cloudflare.com",
+    "accounts.google.com",
+    "login.live.com",
+    "account.live.com",
+)
+
 
 class ControlError(Exception):
     pass
 
 
 _SCHEME = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$", re.S)
+
+
+def is_protected_anti_detect_url(url: str) -> tuple[bool, str]:
+    """Return (is_protected, matched_domain_or_reason) for sensitive anti-detect URLs."""
+    if not url:
+        return False, ""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().strip(".")
+        path = (parsed.path or "").lower()
+    except ValueError:
+        return False, ""
+    if not host:
+        return False, ""
+    for dom in PROTECTED_ANTI_DETECT_DOMAINS:
+        if host == dom or host.endswith("." + dom):
+            return True, dom
+    if "/recaptcha" in path or "turnstile" in path:
+        return True, f"{host}{path}"
+    return False, ""
 
 
 def _check_url(url: str) -> str:
@@ -71,6 +104,10 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
 class PageController:
     """Executes control actions against a Playwright BrowserContext."""
 
+    DOM_MUTATION_ACTIONS = frozenset(
+        {"click", "type", "press", "click_at", "keyboard_type", "evaluate"}
+    )
+
     def __init__(self, context: Any) -> None:
         self._context = context
         self._current: Any = None
@@ -89,6 +126,19 @@ class PageController:
             return self._current
         self._current = await self._context.new_page()
         return self._current
+
+    async def _guard_dom_action(self, action: str) -> Any:
+        page = await self._page()
+        if os.getenv("FOXPROFILE_ALLOW_PROTECTED_DOM") == "1":
+            return page
+        blocked, reason = is_protected_anti_detect_url(getattr(page, "url", "") or "")
+        if blocked:
+            raise ControlError(
+                f"Anti-Detect Safety Guard: DOM automation '{action}' is blocked on "
+                f"protected domain '{reason}' to prevent bot detection and protect "
+                "_GRECAPTCHA / Cloudflare trust scores. Please interact manually in the browser."
+            )
+        return page
 
     async def _describe(self, page: Any) -> dict[str, Any]:
         return {"url": page.url, "title": await page.title()}
@@ -119,7 +169,7 @@ class PageController:
         return {"text": content, "truncated": truncated}
 
     async def click(self, selector: str, timeout: int = 10_000) -> dict[str, Any]:
-        page = await self._page()
+        page = await self._guard_dom_action("click")
         await page.locator(selector).first.click(timeout=timeout)
         return await self._describe(page)
 
@@ -131,7 +181,7 @@ class PageController:
         clear: bool = True,
         timeout: int = 10_000,
     ) -> dict[str, Any]:
-        page = await self._page()
+        page = await self._guard_dom_action("type")
         field = page.locator(selector).first
         if clear:
             await field.fill(text, timeout=timeout)
@@ -142,7 +192,7 @@ class PageController:
         return await self._describe(page)
 
     async def press(self, key: str, selector: str | None = None) -> dict[str, Any]:
-        page = await self._page()
+        page = await self._guard_dom_action("press")
         if selector:
             await page.locator(selector).first.press(key)
         else:
@@ -151,13 +201,13 @@ class PageController:
 
     async def click_at(self, x: float, y: float) -> dict[str, Any]:
         """Click viewport coordinates, as seen on a screenshot of the active tab."""
-        page = await self._page()
+        page = await self._guard_dom_action("click_at")
         await page.mouse.click(x, y)
         return await self._describe(page)
 
     async def keyboard_type(self, text: str) -> dict[str, Any]:
         """Type into whatever element has focus."""
-        page = await self._page()
+        page = await self._guard_dom_action("keyboard_type")
         await page.keyboard.type(text)
         return await self._describe(page)
 
@@ -179,7 +229,7 @@ class PageController:
         return {**await self._describe(page), "png_base64": base64.b64encode(png).decode()}
 
     async def evaluate(self, script: str) -> dict[str, Any]:
-        page = await self._page()
+        page = await self._guard_dom_action("evaluate")
         return {"result": await page.evaluate(script)}
 
     async def tabs(self) -> dict[str, Any]:

@@ -18,6 +18,22 @@ class ProxyCheckResponse(BaseModel):
     message: str
 
 
+class ProxyPoolAddRequest(BaseModel):
+    proxies: list[str]
+
+
+class ProxyPoolAssignRequest(BaseModel):
+    new_proxy: str
+    profile: str | None = Field(
+        None,
+        description="Assign to a single stopped profile name",
+    )
+    old_target: str | None = Field(
+        None,
+        description="Or replace an existing proxy / port (e.g. ':44200') across all stopped profiles",
+    )
+
+
 class GeoCheckRequest(BaseModel):
     proxy: str | None = None
     timezone: str | None = None

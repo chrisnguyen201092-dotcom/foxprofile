@@ -43,6 +43,15 @@ class ProfileUpdate(BaseModel):
     pinned: bool | None = Field(None, description="Pin or unpin profile")
 
 
+class BulkProfileOpsRequest(BaseModel):
+    names: list[str]
+    status: str | None = Field(None, description="Set status tag (pass '' to clear)")
+    group: str | None = Field(None, description="Set group (pass '' to clear)")
+    pinned: bool | None = Field(None, description="Pin or unpin profiles")
+    add_to_page: str | None = Field(None, description="Add profiles to a custom page")
+    remove_from_page: str | None = Field(None, description="Remove profiles from a custom page")
+
+
 class CustomPageRequest(BaseModel):
     name: str
     profile_names: list[str] | None = None

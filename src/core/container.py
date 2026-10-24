@@ -46,3 +46,9 @@ class Container:
         from ..services.proxy.service import ProxyService
 
         return self._get("ps", ProxyService)
+
+    @property
+    def monitor_service(self):
+        from ..services.monitor import MonitorService
+
+        return self._get("mon", MonitorService)

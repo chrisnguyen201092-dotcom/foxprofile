@@ -14,17 +14,33 @@ def _by_id(configs):
 
 def test_configs_without_token_have_no_auth():
     configs = _by_id(mcp_setup.build_configs(URL, None, local=False))
-    assert set(configs) == {"claude-code", "cursor", "vscode", "claude-desktop"}
+    assert set(configs) == {
+        "antigravity",
+        "codex",
+        "hermes",
+        "claude-code",
+        "cursor",
+        "vscode",
+        "claude-desktop",
+    }
     assert configs["claude-code"].code == f"claude mcp add --transport http foxprofile {URL}"
+    assert configs["codex"].code == f"codex mcp add --url {URL} foxprofile"
     assert "headers" not in json.loads(configs["cursor"].code)["mcpServers"]["foxprofile"]
+    assert "headers" not in json.loads(configs["hermes"].code)["mcpServers"]["foxprofile"]
+    assert "headers" not in json.loads(configs["antigravity"].code)["mcpServers"]["foxprofile"]
     assert "Authorization" not in configs["claude-desktop"].code
 
 
 def test_configs_with_token_are_valid_json_and_carry_header():
     configs = _by_id(mcp_setup.build_configs(URL, "tok", local=False))
     assert '--header "Authorization: Bearer tok"' in configs["claude-code"].code
+    assert '--header "Authorization: Bearer tok"' in configs["codex"].code
     cursor = json.loads(configs["cursor"].code)["mcpServers"]["foxprofile"]
     assert cursor == {"url": URL, "headers": {"Authorization": "Bearer tok"}}
+    hermes = json.loads(configs["hermes"].code)["mcpServers"]["foxprofile"]
+    assert hermes == {"url": URL, "headers": {"Authorization": "Bearer tok"}}
+    antigravity = json.loads(configs["antigravity"].code)["mcpServers"]["foxprofile"]
+    assert antigravity == {"serverUrl": URL, "headers": {"Authorization": "Bearer tok"}}
     vscode = json.loads(configs["vscode"].code)["servers"]["foxprofile"]
     assert vscode["type"] == "http" and vscode["headers"]["Authorization"] == "Bearer tok"
     desktop = json.loads(configs["claude-desktop"].code)["mcpServers"]["foxprofile"]
@@ -42,10 +58,12 @@ def test_local_desktop_config_uses_stdio_bridge():
             api_url="http://127.0.0.1:8000",
         ),
     )
-    desktop = json.loads(configs["claude-desktop"].code)["mcpServers"]["foxprofile"]
-    assert desktop["command"] == "py"
-    assert desktop["args"] == [str(mcp_setup.MCP_SCRIPT)]
-    assert desktop["env"] == {"FOXPROFILE_URL": "http://127.0.0.1:8000"}
+    for cid in ("claude-desktop", "antigravity", "hermes"):
+        srv = json.loads(configs[cid].code)["mcpServers"]["foxprofile"]
+        assert srv["command"] == "py"
+        assert srv["args"] == [str(mcp_setup.MCP_SCRIPT)]
+        assert srv["env"] == {"FOXPROFILE_URL": "http://127.0.0.1:8000"}
+    assert 'codex mcp add foxprofile -- "py"' in configs["codex"].code
     assert mcp_setup.MCP_SCRIPT.exists()
 
 

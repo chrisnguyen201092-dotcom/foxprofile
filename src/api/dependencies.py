@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from ..core.container import Container
     from ..core.events import EventBus
     from ..interfaces import IBrowserLauncher, IProfileManager, IProxyService
+    from ..services.monitor import MonitorService
 
 
 def _container(request: Request) -> Container:
@@ -36,3 +37,9 @@ def get_event_bus(
     container: Container = Depends(_container),
 ) -> EventBus:
     return container.event_bus
+
+
+def get_monitor_service(
+    container: Container = Depends(_container),
+) -> MonitorService:
+    return container.monitor_service

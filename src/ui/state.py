@@ -12,7 +12,7 @@ class AppState:
         self.items_per_page: int = ITEMS_PER_PAGE
         self.sort_by: str = "custom"
         self.search_query: str = ""
-        self.log_collapsed: bool = False
+        self.log_collapsed: bool = True
 
         self._log_lines: list[str] = []
         self._loading_profiles: set[str] = set()
