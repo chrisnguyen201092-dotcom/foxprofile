@@ -1004,7 +1004,7 @@ def _geo_score_badge(monitor_info: ProfileMonitorInfo | None) -> ft.Control | No
             )
         )
     )
-    text_val = f"{tier_sym} {t_score}"
+    text_val = "✕ Ban" if t_tier == "banned" else f"{tier_sym} {t_score}"
     datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
     act_d = int(getattr(monitor_info, "active_days", 0) or 0)
     f_score = getattr(monitor_info, "ip_fraud_score", None)

@@ -2154,7 +2154,7 @@ def open_trust_monitor_dialog(
                         color=COLORS["text_dim"],
                     ),
                     ft.Text(
-                        "TRẠNG THÁI NUÔI & PHIÊN",
+                        "GỢI Ý TĂNG ĐIỂM",
                         expand=True,
                         size=11,
                         font_family=FONT_SEMIBOLD,
@@ -2184,24 +2184,93 @@ def open_trust_monitor_dialog(
 
         score_rows: list[ft.Control] = []
         for p, info in infos:
-            # Build clean 1-line human summary for Col 3
-            summary_parts: list[str] = []
-            if info.hatch_gw:
-                summary_parts.append("Đã vào Muse")
-            elif info.hatch_sess:
-                summary_parts.append("Thiếu GW")
+            # Build concise, actionable next-steps suggestion for Col 3
+            action_color = COLORS["text_sub"]
+            if info.is_banned:
+                summary_str = "Đang tạm ngưng / Ban"
+                action_color = COLORS["error"]
+            elif info.trust_tier == "diamond":
+                summary_str = "✦ Đạt chuẩn — Sẵn sàng treo cả ngày"
+                action_color = "#15803D"
+            elif info.cookie_count == 0 and info.session_count == 0 and info.history_pages == 0:
+                summary_str = "Mở trình duyệt · Lướt 3–4 web ngoài"
+                action_color = COLORS["text_dim"]
             else:
-                summary_parts.append("Chưa vào Muse")
+                steps: list[str] = []
+                if info.has_meta_checkpoint:
+                    steps.append("⚠ Vết Checkpoint")
+                    action_color = COLORS["error"]
+                if info.ip_country_changed:
+                    steps.append("⚠ Khác quốc gia IP cũ")
+                    action_color = COLORS["warning"]
+                if info.proxy_port_changed:
+                    steps.append("⚠ Đổi port proxy")
+                    action_color = COLORS["warning"]
 
-            if info.datr_age_days >= 0.5:
-                summary_parts.append(f"Cookie {info.datr_age_days:.0f}d")
-            elif info.cookie_count > 0:
-                summary_parts.append(f"{info.cookie_count} cookie")
+                if info.trust_tier == "trusted":
+                    if info.has_meta and info.ext_domains < 4:
+                        steps.append(f"Lướt thêm {4 - info.ext_domains} web ngoài")
+                    if info.active_days < 6:
+                        steps.append(f"Mở thêm {6 - info.active_days} ngày")
+                    elif info.session_count < 10:
+                        steps.append(f"Thêm {10 - info.session_count} phiên")
+                    if info.total_minutes < 300:
+                        steps.append(f"Treo thêm {300 - info.total_minutes}p")
+                    elif (
+                        info.total_minutes / max(1, info.session_count)
+                    ) < 10.0 and info.total_minutes < 600:
+                        steps.append("Treo phiên dài ≥20p")
+                    if info.datr_age_days < 10.0 and len(steps) < 3:
+                        steps.append(
+                            f"Đợi cookie +{max(1, int(round(10.0 - info.datr_age_days)))}d"
+                        )
+                    if (
+                        info.ip_fraud_score is not None
+                        and info.ip_fraud_score >= 70
+                        and len(steps) < 3
+                    ):
+                        steps.append("Đổi IP sạch (<70pt)")
+                    if not steps and not info.has_thread_url:
+                        steps.append("Mở 1 hội thoại Muse")
+                    if not steps:
+                        steps.append("Đổi IP sạch (≤25pt) để lên Kim Cương")
+                else:
+                    if not p.proxy:
+                        steps.append("Gắn Proxy")
+                    elif not (p.timezone and p.locale):
+                        steps.append("Điền Timezone/Locale")
+                    if not info.hatch_gw:
+                        steps.append("Đăng nhập Muse")
+                    if info.has_meta and info.ext_domains < 2:
+                        steps.append(f"Lướt thêm {max(2, 4 - info.ext_domains)} web ngoài")
+                    elif info.has_meta and not info.has_ps_l:
+                        steps.append("Vào web Nhóm 1 lấy Pixel")
+                    if (
+                        info.session_count >= 3
+                        and (info.total_minutes / max(1, info.session_count)) < 5.0
+                    ):
+                        steps.append("Giữ phiên >10p (tránh tắt nhanh)")
+                    if info.active_days < 4:
+                        steps.append(f"Mở thêm {4 - info.active_days} ngày")
+                    elif info.session_count < 5:
+                        steps.append(f"Thêm {5 - info.session_count} phiên")
+                    if info.total_minutes < 90:
+                        steps.append(f"Treo thêm {90 - info.total_minutes}p")
+                    if info.datr_age_days < 6.0 and len(steps) < 3:
+                        steps.append(
+                            f"Đợi cookie +{max(1, int(round(6.0 - info.datr_age_days)))}d"
+                        )
+                    if not steps and not info.has_thread_url:
+                        steps.append("Mở 1 hội thoại Muse")
+                    if not steps and info.ext_domains < 4:
+                        steps.append(f"Lướt thêm {4 - info.ext_domains} web ngoài")
+                summary_str = " · ".join(steps[:3]) if steps else "Tiếp tục duy trì phiên"
 
-            if info.active_days > 0:
-                summary_parts.append(f"Mở {info.active_days}d ({info.session_count} phiên)")
-
-            summary_str = " · ".join(summary_parts)
+            detail_tip = (
+                f"Cần làm: {summary_str}\n"
+                f"Hiện tại: Cookie {info.datr_age_days:.1f}d · {info.active_days}d mở "
+                f"({info.session_count} phiên, {info.total_minutes}p) · {info.ext_domains} web ngoài"
+            )
 
             right_controls: list[ft.Control] = []
             if info.last_exit_ip:
@@ -2316,10 +2385,10 @@ def open_trust_monitor_dialog(
                                 summary_str,
                                 expand=True,
                                 size=11.5,
-                                color=COLORS["text_sub"],
+                                color=action_color,
                                 no_wrap=True,
                                 overflow=ft.TextOverflow.ELLIPSIS,
-                                tooltip=summary_str,
+                                tooltip=detail_tip,
                             ),
                             ft.Container(
                                 width=215,

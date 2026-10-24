@@ -2439,4 +2439,137 @@ def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
     assert _geo_score_badge(d_info) is not None
 
 
+def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    now_ts = time.time()
+    now_exp = int(now_ts + 86400 * 30)
+    datr_10d = int((now_ts - 86400 * 10.2) * 1_000_000)
+
+    # 1. Unopened profile (has proxy + geo, but 0 cookies / 0 sessions / 0 history) -> 0 score, no geo badge
+    (data_dir / "Unopened").mkdir()
+
+    # 2. Workspace profile with __Host-hatch_one_tap + layout_state + /thread/ + duplicate www subdomains + scanners
+    ws_dir = data_dir / "WorkspaceAcc"
+    ws_dir.mkdir()
+    (ws_dir / "cache2").mkdir()
+    (ws_dir / "tabs.json").write_text('{"tabs": ["https://muse.ai/thread/123"]}', encoding="utf-8")
+    ck_conn = sqlite3.connect(str(ws_dir / "cookies.sqlite"))
+    ck_conn.execute(
+        "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
+    )
+    ck_conn.executemany(
+        "INSERT INTO moz_cookies VALUES (?, ?, ?, ?)",
+        [
+            ("muse.ai", "__Host-hatch_one_tap", datr_10d, now_exp),
+            (".muse.ai", "layout_state", datr_10d, now_exp),
+            (".muse.ai", "hatch_sess", datr_10d, now_exp),
+            (".muse.ai", "datr", datr_10d, now_exp),
+            (".auth.meta.com", "datr", datr_10d, now_exp),
+            (".accountscenter.meta.com", "datr", datr_10d, now_exp),
+            (".facebook.com", "datr", datr_10d, now_exp),
+            (".facebook.com", "ps_l", datr_10d, now_exp),
+        ],
+    )
+    ck_conn.commit()
+    ck_conn.close()
+
+    pl_conn = sqlite3.connect(str(ws_dir / "places.sqlite"))
+    pl_conn.execute("CREATE TABLE moz_places (url TEXT, rev_host TEXT, visit_count INTEGER)")
+    # amazon.com + www.amazon.com should deduplicate to 1 root domain; browserscan & mozilla should be ignored
+    pl_conn.executemany(
+        "INSERT INTO moz_places VALUES (?, ?, ?)",
+        [
+            ("https://amazon.com/", "moc.nozama.", 1),
+            ("https://www.amazon.com/dp/1", "moc.nozama.www.", 2),
+            ("https://www.cnet.com/news", "moc.tenc.www.", 1),
+            ("https://www.cntraveler.com/", "moc.relevartnc.www.", 1),
+            ("https://www.self.com/", "moc.fles.www.", 1),
+            ("https://www.browserscan.net/", "ten.nacsresworb.www.", 3),
+            ("https://addons.mozilla.org/", "gro.allizom.snodda.", 1),
+        ],
+    )
+    pl_conn.commit()
+    pl_conn.close()
+
+    # 3. Third-party Cloudflare cookie (__cf_bm on .jezebel.com) must NOT count as hatch_gw
+    cf_dir = data_dir / "ThirdPartyCF"
+    cf_dir.mkdir()
+    cf_conn = sqlite3.connect(str(cf_dir / "cookies.sqlite"))
+    cf_conn.execute(
+        "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
+    )
+    cf_conn.executemany(
+        "INSERT INTO moz_cookies VALUES (?, ?, ?, ?)",
+        [
+            (".jezebel.com", "__cf_bm", datr_10d, now_exp),
+            (".muse.ai", "hatch_sess", datr_10d, now_exp),
+        ],
+    )
+    cf_conn.commit()
+    cf_conn.close()
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    # Seed 6 active days, 10 sessions, 300 total minutes for WorkspaceAcc
+    mon._live_sessions["WorkspaceAcc"] = [
+        {
+            "start": f"2026-10-{10 + (idx % 6):02d} 10:{idx:02d}:00",
+            "end": f"2026-10-{10 + (idx % 6):02d} 10:{idx:02d}:00",
+            "duration_mins": 30,
+            "port": ":10001",
+            "is_live": False,
+        }
+        for idx in range(10)
+    ]
+    mon.record_exit_ip("WorkspaceAcc", "1.2.3.4", country="US", proxy="http://u:p@1.2.3.4:10001")
+    mon.record_ip_risk("1.2.3.4", {"fraud_score": 51, "proxy_flag": True})
+
+    profiles = [
+        Profile(
+            name="Unopened",
+            proxy="http://u:p@1.2.3.4:10001",
+            timezone="America/Chicago",
+            locale="en-US",
+        ),
+        Profile(
+            name="WorkspaceAcc",
+            proxy="http://u:p@1.2.3.4:10001",
+            timezone="America/Chicago",
+            locale="en-US",
+        ),
+        Profile(
+            name="ThirdPartyCF",
+            proxy="http://u:p@1.2.3.4:10002",
+            timezone="America/Chicago",
+            locale="en-US",
+        ),
+    ]
+
+    snap = mon.snapshot(profiles, running_names=set())
+    u_info = snap.profiles["Unopened"]
+    w_info = snap.profiles["WorkspaceAcc"]
+    cf_info = snap.profiles["ThirdPartyCF"]
+
+    from src.ui.components.profile_card import _geo_score_badge
+
+    assert u_info.trust_score == 0
+    assert u_info.trust_tier == "cold"
+    assert _geo_score_badge(u_info) is None
+
+    assert w_info.hatch_gw is True
+    assert w_info.ext_domains == 4
+    assert w_info.active_days == 6
+    assert w_info.session_count == 10
+    assert w_info.total_minutes == 300
+    assert w_info.trust_score >= 80
+    assert w_info.trust_tier == "diamond"
+
+    assert cf_info.hatch_gw is False
+    assert cf_info.trust_score <= 45
+
+
+
 

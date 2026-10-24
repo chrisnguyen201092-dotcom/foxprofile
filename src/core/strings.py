@@ -577,14 +577,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_cold": "○ {score}pt · New",
         "trust_tier_banned": "✕ Banned / Hold",
         "trust_breakdown_tooltip": (
-            "Meta Sigma & Hatch OIDC Trust Score: {score}/100\n"
+            "Meta Sigma & Hatch OIDC Trust Score (Strict Safety Buffer): {score}/100\n"
             "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} domain(s)\n"
             "• Multi-Day Login Rhythm: {act_days} active day(s) · {sess_cnt} session(s) ({mins}m)\n"
             "• Hatch VM Session (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookies)\n"
             "• Meta Off-Site Pixel (`ps_l`/`ps_n`): {ps_l} · External Web: {ext_doms} domain(s) ({hpages} pages)\n"
             "• Prior Meta Checkpoint Scar: {chk_scar}\n"
             "• HTTP Cache2 ETag Sync: {cache2}\n"
-            "── Meta Gates: 🛡️ Trusted requires hatch_gw + datr ≥3d + ≥2 active days; 💎 Diamond requires datr ≥7d + ≥4 active days + 0 Checkpoint"
+            "── Strict Safety Gates: ◈ Trusted requires hatch_gw + datr ≥6d + ≥4d/5sess/90m + Pixel ≥2 ext sites; ✦ Diamond requires datr ≥10d + ≥6d/10sess/300m (5h) + ≥4 ext sites"
         ),
         "trust_yes": "✦ Ready",
         "trust_no": "○ None",
@@ -1197,14 +1197,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_cold": "○ {score}đ · Mới",
         "trust_tier_banned": "✕ Tạm ngưng / Ban",
         "trust_breakdown_tooltip": (
-            "Điểm Trust Meta Sigma & Hatch OIDC: {score}/100\n"
+            "Điểm Trust Meta Sigma & Hatch OIDC (Chuẩn Siết Chặt An Toàn): {score}/100\n"
             "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày tuổi · đồng bộ {datr_doms} miền\n"
             "• Nhịp đăng nhập nhiều ngày: {act_days} ngày mở · {sess_cnt} phiên ({mins}p)\n"
             "• Phiên Hatch VM (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookie)\n"
             "• Tín hiệu Meta Pixel (`ps_l`/`ps_n`): {ps_l} · Web ngoài: {ext_doms} miền ({hpages} trang)\n"
             "• Vết sẹo Checkpoint Meta: {chk_scar}\n"
             "• Đồng bộ ETag HTTP Cache2: {cache2}\n"
-            "── Chuẩn Meta: 🛡️ Tin cậy cần có hatch_gw + datr ≥3 ngày + ≥2 ngày mở; 💎 Kim Cương cần datr ≥7 ngày + ≥4 ngày mở + 0 Checkpoint"
+            "── Khoảng đệm an toàn: ◈ Tin cậy cần hatch_gw + datr ≥6 ngày + ≥4 ngày mở (≥5 phiên, ≥90p) + ≥2 web Pixel ngoài; ✦ Kim Cương cần datr ≥10 ngày + ≥6 ngày mở (≥10 phiên, ≥300p / 5h) + ≥4 web ngoài"
         ),
         "trust_yes": "✦ Đã có",
         "trust_no": "○ Chưa có",

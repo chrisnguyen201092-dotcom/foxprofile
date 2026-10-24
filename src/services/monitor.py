@@ -69,6 +69,91 @@ _RE_LAUNCH_FAILED = re.compile(
 _RE_RENAME_PROFILE = re.compile(r"^Updated profile:\s*(?P<old>.+?)\s*->\s*(?P<new>.+)$")
 _RE_TRASH_PROFILE = re.compile(r"^(?:Moved profile to trash|Deleted profile):\s*(?P<prof>.+)$")
 
+_MULTI_PART_TLDS = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "ac.uk",
+        "gov.uk",
+        "com.au",
+        "net.au",
+        "org.au",
+        "co.jp",
+        "ne.jp",
+        "or.jp",
+        "com.vn",
+        "net.vn",
+        "org.vn",
+        "edu.vn",
+        "gov.vn",
+        "com.br",
+        "com.sg",
+        "co.kr",
+        "co.in",
+        "co.nz",
+        "com.tw",
+        "com.hk",
+    }
+)
+
+_NON_WARMUP_ROOT_DOMAINS = frozenset(
+    {
+        "muse.ai",
+        "muse.vn",
+        "hatch.io",
+        "meta.com",
+        "facebook.com",
+        "instagram.com",
+        "meta.ai",
+        "fbcdn.net",
+        "fbsbx.com",
+        "whatsapp.com",
+        "threads.net",
+        "live.com",
+        "microsoft.com",
+        "outlook.com",
+        "office.com",
+        "microsoftonline.com",
+        "msauth.net",
+        "msftauth.net",
+        "sfx.ms",
+        "msn.com",
+        "bing.com",
+        "google.com",
+        "doodles.google",
+        "gstatic.com",
+        "googleapis.com",
+        "googleusercontent.com",
+        "mozilla.org",
+        "mozilla.com",
+        "firefox.com",
+        "cloudflare.com",
+        "browserscan.net",
+        "browserscan.com",
+        "broserscan.net",
+        "pixelscan.net",
+        "iphey.com",
+        "whoer.net",
+        "amiunique.org",
+    }
+)
+
+
+def _extract_root_domain(host: str) -> str:
+    """Normalize a hostname to its registrable root domain (eTLD+1), e.g. 'www.amazon.com' -> 'amazon.com'."""
+    h = (host or "").strip().lower().strip(".")
+    if h.startswith("www."):
+        h = h[4:]
+    if not h or "." not in h or h.replace(".", "").isdigit() or ":" in h:
+        return ""
+    parts = [p for p in h.split(".") if p]
+    if len(parts) < 2:
+        return ""
+    last_two = f"{parts[-2]}.{parts[-1]}"
+    if len(parts) >= 3 and last_two in _MULTI_PART_TLDS:
+        return f"{parts[-3]}.{last_two}"
+    return last_two
+
 
 def extract_proxy_port(proxy_str: str | None) -> str:
     if not proxy_str:
@@ -861,6 +946,7 @@ class MonitorService:
                 "has_thread_url": False,
                 "tab_count": 0,
                 "hatch_gw": False,
+                "hatch_vml": False,
                 "hatch_sess": False,
                 "sess_exp": "-",
                 "burst_10m": 0,
@@ -869,6 +955,11 @@ class MonitorService:
                 "has_meta": False,
                 "has_microsoft": False,
                 "has_cache2": False,
+                "has_ps_l": False,
+                "has_meta_checkpoint": False,
+                "datr_age_days": 0.0,
+                "datr_domains": 0,
+                "ext_domains": 0,
                 "cookie_count": 0,
                 "cookie_domains": 0,
                 "history_pages": 0,
@@ -1022,6 +1113,8 @@ class MonitorService:
                 hatch_gw = False
                 hatch_vml = False
                 hatch_sess = False
+                has_muse_onetap = False
+                has_muse_layout = False
                 has_grecaptcha = False
                 has_meta = False
                 has_microsoft = False
@@ -1035,7 +1128,8 @@ class MonitorService:
                 for _host, cname, ctime, exp in rows:
                     host_l = str(_host or "").lower().lstrip(".")
                     if host_l:
-                        cookie_hosts.add(host_l)
+                        cookie_hosts.add(_extract_root_domain(host_l) or host_l)
+                    is_hatch_host = "muse" in host_l or "hatch" in host_l
                     cname_s = str(cname or "")
                     cname_l = cname_s.lower()
                     if cname_s == "_GRECAPTCHA" or "recaptcha" in cname_l:
@@ -1051,6 +1145,10 @@ class MonitorService:
                         has_ps_l = True
                     if "checkpoint" in cname_l:
                         has_chk_cookie = True
+                    if is_hatch_host and cname_s == "__Host-hatch_one_tap":
+                        has_muse_onetap = True
+                    if is_hatch_host and cname_s == "layout_state":
+                        has_muse_layout = True
                     if cname_s == "datr":
                         if host_l:
                             datr_hosts.add(host_l)
@@ -1067,7 +1165,9 @@ class MonitorService:
                                     earliest_datr_ct = ct_val
                     if cname_s == "hatch_vml":
                         hatch_vml = True
-                    elif cname_s in ("hatch_gw", "cf_clearance", "__cf_bm"):
+                    elif cname_s == "hatch_gw" or (
+                        is_hatch_host and cname_s in ("cf_clearance", "__cf_bm")
+                    ):
                         hatch_gw = True
                     elif cname_s == "hatch_sess" or (
                         "checkpoint" not in cname_l
@@ -1089,6 +1189,14 @@ class MonitorService:
                             while exp_val > 10_000_000_000:
                                 exp_val /= 1000.0
                             latest_exp = max(latest_exp, exp_val)
+                if (
+                    not hatch_gw
+                    and has_muse_onetap
+                    and has_muse_layout
+                    and (hatch_vml or result["has_thread_url"])
+                ):
+                    hatch_gw = True
+                    hatch_vml = True
                 if rows and not hatch_sess and len(rows) > 1:
                     hatch_sess = True
 
@@ -1140,32 +1248,25 @@ class MonitorService:
                 all_rev_hosts: set[str] = set()
                 ext_rev_hosts: set[str] = set()
                 has_chk_url = False
-                internal_domains = (
-                    "muse.ai",
-                    "meta.com",
-                    "facebook.com",
-                    "instagram.com",
-                    "meta.ai",
-                    "live.com",
-                    "microsoft.com",
-                    "outlook.com",
-                    "office.com",
-                    "google.com",
-                    "doodles.google",
-                )
                 for u, rh in pl_rows:
                     u_l = str(u or "").lower()
                     rh_s = str(rh or "")
-                    if rh_s:
-                        all_rev_hosts.add(rh_s)
                     if (
                         "auth.meta.com/checkpoint" in u_l
                         or "oidc/start?checkpoint=1" in u_l
                         or "auth.meta.com/recover" in u_l
                     ):
                         has_chk_url = True
-                    if rh_s and not any(d in u_l for d in internal_domains):
-                        ext_rev_hosts.add(rh_s)
+                    host_cand = (
+                        rh_s.rstrip(".")[::-1].lower()
+                        if rh_s
+                        else (urllib.parse.urlsplit(u_l).hostname or "")
+                    )
+                    rd = _extract_root_domain(host_cand)
+                    if rd:
+                        all_rev_hosts.add(rd)
+                        if rd not in _NON_WARMUP_ROOT_DOMAINS:
+                            ext_rev_hosts.add(rd)
                 result["history_domains"] = len(all_rev_hosts)
                 result["ext_domains"] = len(ext_rev_hosts)
                 if has_chk_url:
@@ -1297,17 +1398,21 @@ class MonitorService:
             secs = 0.0
             total_all_mins = 0
             active_dates_set: set[str] = set()
+            midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
             for s_item in completed:
                 en_str = str(s_item.get("end", ""))
                 st_str = str(s_item.get("start", ""))
                 if len(st_str) >= 10:
                     active_dates_set.add(st_str[:10])
+                if len(en_str) >= 10:
+                    active_dates_set.add(en_str[:10])
                 total_all_mins += max(1, int(s_item.get("duration_mins") or 0))
                 if en_str.startswith(today_str) or st_str.startswith(today_str):
                     try:
                         st_dt = dt.datetime.strptime(st_str, "%Y-%m-%d %H:%M:%S")
                         en_dt = dt.datetime.strptime(en_str, "%Y-%m-%d %H:%M:%S")
-                        secs += max(0.0, (en_dt - st_dt).total_seconds())
+                        eff_st = max(st_dt, midnight_today)
+                        secs += max(0.0, (en_dt - eff_st).total_seconds())
                     except ValueError:
                         secs += float(s_item.get("duration_mins") or 0) * 60.0
             sess_cnt = len(completed)
@@ -1315,10 +1420,12 @@ class MonitorService:
                 sess_cnt += 1
                 active_dates_set.add(today_str)
                 start_dt = self._live_started_at.get(p.name) or h.get("_open_start")
-                if start_dt and start_dt.date() == now.date():
+                if start_dt is not None:
+                    active_dates_set.add(start_dt.strftime("%Y-%m-%d"))
                     run_s = max(0.0, (now - start_dt).total_seconds())
-                    secs += run_s
                     total_all_mins += int(run_s // 60)
+                    today_st = max(start_dt, midnight_today)
+                    secs += max(0.0, (now - today_st).total_seconds())
             today_mins_map[p.name] = int(secs // 60)
             sess_stats_map[p.name] = (sess_cnt, len(active_dates_set), total_all_mins)
 
@@ -1457,10 +1564,11 @@ class MonitorService:
             history_pages = int(disk.get("history_pages") or 0)
             history_domains = int(disk.get("history_domains") or 0)
             age_days = compute_days_since(p.created_at) or 0
-            eff_datr_age = (
+            eff_datr_age = round(
                 datr_age_days
                 if datr_age_days > 0
-                else (float(age_days) if (not has_meta and cookie_count > 0) else 0.0)
+                else (float(age_days) if (not has_meta and cookie_count > 0) else 0.0),
+                1,
             )
             sess_cnt, active_days, total_mins = sess_stats_map.get(p.name, (0, 0, 0))
             if sess_cnt == 0 and (cookie_count > 0 or history_pages > 0):
@@ -1469,12 +1577,13 @@ class MonitorService:
             if (
                 active_days <= 1
                 and eff_datr_age >= 10.0
-                and cookie_count >= 40
-                and ext_domains >= 3
+                and cookie_count >= 50
+                and ext_domains >= 6
             ):
                 # Veteran profile whose local session logs were rotated
-                active_days = 4
-                sess_cnt = max(sess_cnt, 6)
+                active_days = 7
+                sess_cnt = max(sess_cnt, 10)
+                total_mins = max(total_mins, 300)
             is_banned = bool(
                 p.banned_at
                 or is_ban_status(p.status)
@@ -1482,50 +1591,58 @@ class MonitorService:
                 or is_ban_page(p.group)
             )
 
-            # Calculate Meta Sigma & Hatch OIDC Trust Score (0 - 100)
+            # Calculate Strict Meta Sigma & Hatch OIDC Trust Score with Safety Buffer (0 - 100)
             score = 0
-            # 1. Meta `datr` Device-Identity Age, AYMH Cross-Domain Sync & Multi-Day Rhythm (max 35)
+            # 1. Meta `datr` Device-Identity Age, AYMH Cross-Domain Sync & Multi-Day Rhythm (max 40)
             if eff_datr_age >= 10.0:
-                score += 16
-            elif eff_datr_age >= 7.0:
-                score += 13
-            elif eff_datr_age >= 4.0:
-                score += 9
-            elif eff_datr_age >= 2.0:
+                score += 18
+            elif eff_datr_age >= 8.0:
+                score += 14
+            elif eff_datr_age >= 6.0:
+                score += 10
+            elif eff_datr_age >= 3.0:
                 score += 5
+            elif eff_datr_age >= 1.0:
+                score += 2
             elif eff_datr_age > 0.0:
-                score += 2
+                score += 1
 
-            if datr_domains >= 3 or (not has_meta and has_grecaptcha):
-                score += 4
-            elif datr_domains >= 1:
-                score += 2
+            if datr_domains >= 4 or (not has_meta and has_grecaptcha):
+                score += 3
+            elif datr_domains >= 2:
+                score += 1
 
-            if active_days >= 6:
+            if active_days >= 6 and total_mins >= 300:
+                score += 19
+            elif active_days >= 5 and total_mins >= 180:
                 score += 15
-            elif active_days >= 4:
-                score += 12
-            elif active_days >= 3:
-                score += 8
-            elif active_days >= 2:
-                score += 5
-            elif active_days >= 1:
-                score += 2
-
-            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 25)
-            if disk["hatch_gw"]:
-                score += 12
-            if hatch_vml or (disk["hatch_gw"] and not has_meta):
-                score += 5
-            if disk["hatch_sess"]:
+            elif active_days >= 4 and total_mins >= 90:
+                score += 11
+            elif active_days >= 3 and total_mins >= 45:
+                score += 7
+            elif active_days >= 2 and total_mins >= 25:
                 score += 4
+            elif active_days >= 1:
+                score += 1
+
+            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 20)
+            if disk["hatch_gw"]:
+                score += 9
+            if hatch_vml or (disk["hatch_gw"] and not has_meta):
+                score += 4
+            if disk["hatch_sess"]:
+                score += 3
             if disk["has_thread_url"]:
                 score += 4
 
-            # 3. Meta Pixel (`ps_l`/`ps_n`), Non-Meta External Domains & HTTP Cache2 ETag Sync (max 15)
+            # 3. Meta Pixel (`ps_l`/`ps_n`), Non-Meta External Domains & HTTP Cache2 ETag Sync (max 20)
             if has_ps_l or (not has_meta and has_grecaptcha):
                 score += 5
-            if ext_domains >= 4:
+            if ext_domains >= 5:
+                score += 11
+            elif ext_domains >= 4:
+                score += 9
+            elif ext_domains >= 3:
                 score += 6
             elif ext_domains >= 2:
                 score += 4
@@ -1534,44 +1651,69 @@ class MonitorService:
             if has_cache2 and cookie_count > 0:
                 score += 4
 
-            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 25)
+            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 20)
             if p.proxy:
                 if p.timezone and p.locale:
-                    score += 10
+                    score += 6
                 else:
-                    score += 4
+                    score += 2
                 if ip_fraud_score is not None:
-                    if ip_fraud_score <= 10 and not ip_proxy_flag:
-                        score += 15
-                    elif ip_fraud_score <= 29 and not ip_proxy_flag:
-                        score += 12
-                    elif ip_fraud_score <= 60:
-                        score += 6
+                    if ip_fraud_score <= 15 and not ip_proxy_flag:
+                        score += 14
+                    elif ip_fraud_score <= 30 and not ip_proxy_flag:
+                        score += 10
+                    elif ip_fraud_score <= 55:
+                        score += 3
                 elif last_ip:
-                    score += 8
+                    score += 3
 
-            # 5. Meta Sigma Risk Penalties & Hard Device Gates
+            # 5. Strict Meta Sigma Risk Penalties & Hard Device Gates (Safety Buffer)
             if has_meta_checkpoint:
-                score -= 20
+                score -= 25
             if disk["hatch_sess"] and not disk["hatch_gw"]:
                 score -= 15
             if proxy_port_changed or ip_country_changed:
                 score -= 20
-            if today_mins_map.get(p.name, 0) > 180 or disk["burst_10m"] >= 3:
+            if disk["burst_10m"] >= TOKEN_BURST_THRESHOLD:
                 score -= 15
+            if sess_cnt >= 3 and (total_mins / max(1, sess_cnt)) < 5.0:
+                # Ping-check bot pattern (opening & closing in < 5m per session)
+                score -= 10
+            if has_meta and ext_domains == 0:
+                # Single-purpose bot pattern (zero off-site web activity)
+                score -= 10
 
             score = max(0, min(100, score))
 
-            if cookie_count == 0 and sess_cnt == 0:
-                trust_score = min(12, score)
-            elif not disk["hatch_gw"]:
-                trust_score = min(48, score)
-            elif eff_datr_age < 3.0 or active_days < 2:
-                trust_score = min(55, score)
-            elif eff_datr_age < 7.0 or active_days < 4 or has_meta_checkpoint:
-                trust_score = min(78, score)
+            if is_banned or (cookie_count == 0 and sess_cnt == 0 and history_pages == 0):
+                trust_score = 0
             else:
-                trust_score = score
+                if not disk["hatch_gw"]:
+                    trust_score = min(45, score)
+                elif (
+                    eff_datr_age < 6.0
+                    or active_days < 4
+                    or sess_cnt < 5
+                    or total_mins < 90
+                    or (has_meta and (ext_domains < 2 or not has_ps_l))
+                    or has_meta_checkpoint
+                    or proxy_port_changed
+                    or ip_country_changed
+                ):
+                    trust_score = min(56, score)
+                elif (
+                    eff_datr_age < 10.0
+                    or active_days < 6
+                    or sess_cnt < 10
+                    or total_mins < 300
+                    or ((total_mins / max(1, sess_cnt)) < 10.0 and total_mins < 600)
+                    or (has_meta and ext_domains < 4)
+                    or (ip_fraud_score is not None and ip_fraud_score >= 70)
+                ):
+                    trust_score = min(76, score)
+                else:
+                    trust_score = score
+                trust_score = max(1, trust_score)
 
             if is_banned:
                 trust_tier = "banned"
@@ -1625,7 +1767,7 @@ class MonitorService:
                 hatch_vml=hatch_vml,
                 has_ps_l=has_ps_l,
                 has_meta_checkpoint=has_meta_checkpoint,
-                datr_age_days=datr_age_days,
+                datr_age_days=round(eff_datr_age, 2),
                 datr_domains=datr_domains,
                 ext_domains=ext_domains,
                 cookie_count=cookie_count,
