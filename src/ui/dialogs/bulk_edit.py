@@ -63,6 +63,7 @@ def open_bulk_group_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -73,7 +74,7 @@ def open_bulk_group_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=440,
+            width=560,
             content=ft.Column(
                 tight=True,
                 spacing=10,
@@ -151,6 +152,7 @@ def open_bulk_color_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -161,7 +163,7 @@ def open_bulk_color_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=400,
+            width=500,
             padding=ft.Padding.symmetric(vertical=8),
             content=ft.Row(
                 wrap=True,
@@ -210,7 +212,7 @@ def open_bulk_proxy_dialog(
     )
     preview_col = ft.Column(
         spacing=4,
-        height=175,
+        height=280,
         scroll=ft.ScrollMode.AUTO,
     )
 
@@ -323,6 +325,7 @@ def open_bulk_proxy_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -333,7 +336,7 @@ def open_bulk_proxy_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=500,
+            width=720,
             content=ft.Column(
                 spacing=8,
                 tight=True,
@@ -712,6 +715,7 @@ def open_status_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -729,7 +733,7 @@ def open_status_dialog(
             ],
         ),
         content=ft.Container(
-            width=460,
+            width=600,
             content=body_col,
         ),
         actions=[
@@ -833,6 +837,7 @@ def open_profile_dates_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=12, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -843,7 +848,7 @@ def open_profile_dates_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=440,
+            width=560,
             content=ft.Column(
                 spacing=8,
                 tight=True,

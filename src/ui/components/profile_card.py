@@ -53,6 +53,8 @@ def build_header_row(
     cooldown_chip_label: str = "",
     on_open_cooldown: Callable[[], None] | None = None,
     on_open_warmup_sites: Callable[[], None] | None = None,
+    on_open_trust_monitor: Callable[[], None] | None = None,
+    audit_alert: bool = False,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
         return ft.Text(
@@ -64,20 +66,30 @@ def build_header_row(
         text: str,
         tooltip: str,
         on_click: Callable[[], None],
+        *,
+        alert: bool = False,
     ) -> ft.Container:
         full_tip = f"{text}: {tooltip}" if text and text not in tooltip else tooltip
+        chip_color = COLORS["warning"] if alert else COLORS["text_sub"]
         return ft.Container(
             padding=ft.Padding.symmetric(horizontal=5, vertical=3),
             border_radius=4,
-            bgcolor=COLORS["input_bg"],
-            border=ft.Border.all(1, COLORS["rule_strong"]),
+            bgcolor=(
+                ft.Colors.with_opacity(0.14, COLORS["warning"])
+                if alert
+                else COLORS["input_bg"]
+            ),
+            border=ft.Border.all(
+                1,
+                COLORS["warning"] if alert else COLORS["rule_strong"],
+            ),
             ink=True,
             tooltip=full_tip,
             on_click=lambda _: on_click(),
             content=ft.Icon(
                 icon,
                 size=13,
-                color=COLORS["text_sub"],
+                color=chip_color,
             ),
         )
 
@@ -120,21 +132,32 @@ def build_header_row(
         if on_open_proxy_pool is not None
         else label("col_proxy")
     )
+    geo_chips: list[ft.Control] = [label("col_geo")]
+    if on_open_cooldown is not None and cooldown_chip_label:
+        geo_chips.append(
+            _head_chip(
+                ft.Icons.TIMER_OUTLINED,
+                cooldown_chip_label,
+                get_string("cooldown_setting_title"),
+                on_open_cooldown,
+            )
+        )
+    if on_open_trust_monitor is not None:
+        geo_chips.append(
+            _head_chip(
+                ft.Icons.VERIFIED_USER_OUTLINED,
+                get_string("trust_monitor_btn"),
+                get_string("trust_monitor_title"),
+                on_open_trust_monitor,
+            )
+        )
     geo_header: ft.Control = (
         ft.Row(
-            spacing=6,
+            spacing=5,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[
-                label("col_geo"),
-                _head_chip(
-                    ft.Icons.TIMER_OUTLINED,
-                    cooldown_chip_label,
-                    get_string("cooldown_setting_title"),
-                    on_open_cooldown,
-                ),
-            ],
+            controls=geo_chips,
         )
-        if on_open_cooldown is not None and cooldown_chip_label
+        if len(geo_chips) > 1
         else label("col_geo")
     )
     return ft.Container(
@@ -952,6 +975,58 @@ def _proxy(
     return _stack(line1, line2)
 
 
+def _geo_score_badge(monitor_info: ProfileMonitorInfo | None) -> ft.Control | None:
+    if monitor_info is None:
+        return None
+    t_score = int(getattr(monitor_info, "trust_score", 0) or 0)
+    t_tier = str(getattr(monitor_info, "trust_tier", "cold") or "cold")
+    if t_score <= 0 and t_tier != "banned":
+        return None
+
+    tier_sym = {
+        "diamond": "✦",
+        "trusted": "◈",
+        "warming": "◇",
+        "cold": "○",
+        "banned": "✕",
+    }.get(t_tier, "◈")
+
+    col = (
+        COLORS["error"]
+        if t_tier == "banned"
+        else (
+            "#15803D"
+            if t_tier == "diamond"
+            else (
+                "#1D4ED8"
+                if t_tier == "trusted"
+                else (COLORS["accent"] if t_tier == "warming" else COLORS["text_dim"])
+            )
+        )
+    )
+    text_val = f"{tier_sym} {t_score}"
+    datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
+    act_d = int(getattr(monitor_info, "active_days", 0) or 0)
+    f_score = getattr(monitor_info, "ip_fraud_score", None)
+    ip_part = f" · IP Risk {f_score}/100" if f_score is not None and f_score >= 0 else ""
+    tip = f"Meta Trust: {tier_sym} {t_score}/100 · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+        border_radius=4,
+        bgcolor=ft.Colors.with_opacity(0.11, col),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.55, col)),
+        tooltip=tip,
+        content=ft.Text(
+            text_val,
+            size=10,
+            font_family=FONT_DATA,
+            weight=ft.FontWeight.W_700,
+            color=col,
+            no_wrap=True,
+        ),
+    )
+
+
 def _geo(
     profile: Profile,
     monitor_info: ProfileMonitorInfo | None = None,
@@ -962,11 +1037,12 @@ def _geo(
     on_session_history: Callable[[str], None] | None = None,
 ) -> ft.Column:
     follow = get_string("follows_ip")
-    tz = (
+    tz: ft.Control = (
         _data(profile.timezone)
         if profile.timezone
         else ft.Text(follow, size=12.5, color=COLORS["text_dim"])
     )
+    score_chip = _geo_score_badge(monitor_info)
     if is_running:
         run_mins = monitor_info.running_mins if monitor_info is not None else None
         dur = _format_running(run_mins, since)
@@ -994,6 +1070,11 @@ def _geo(
                         tight=True,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
+                            *(
+                                [score_chip]
+                                if score_chip is not None
+                                else []
+                            ),
                             run_text,
                             ft.Icon(
                                 ft.Icons.OPEN_IN_NEW,
@@ -1029,6 +1110,16 @@ def _geo(
                 else tooltip_str
             ),
         )
+        line2_ctrl: ft.Control = (
+            ft.Row(
+                spacing=5,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[score_chip, cd_text],
+            )
+            if score_chip is not None
+            else cd_text
+        )
         if on_session_history is not None:
             return _stack(
                 tz,
@@ -1036,12 +1127,33 @@ def _geo(
                     ink=True,
                     border_radius=4,
                     on_click=lambda _, n=profile.name: on_session_history(n),
-                    content=cd_text,
+                    content=line2_ctrl,
                 ),
             )
-        return _stack(tz, cd_text)
+        return _stack(tz, line2_ctrl)
     locale = _minor(profile.locale, data=True) if profile.locale else _minor(follow)
-    return _stack(tz, locale)
+    idle_line2: ft.Control = (
+        ft.Row(
+            spacing=5,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[score_chip, locale],
+        )
+        if score_chip is not None
+        else locale
+    )
+    if on_session_history is not None:
+        return _stack(
+            tz,
+            ft.Container(
+                ink=True,
+                border_radius=4,
+                tooltip=get_string("session_hist_btn"),
+                on_click=lambda _, n=profile.name: on_session_history(n),
+                content=idle_line2,
+            ),
+        )
+    return _stack(tz, idle_line2)
 
 
 def _stamp(is_loading: bool, is_running: bool, since: str, failed: bool = False) -> ft.Control:

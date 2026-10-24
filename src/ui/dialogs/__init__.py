@@ -3,6 +3,7 @@ from .batch_and_backup import (
     open_batch_create_dialog,
     open_proxy_pool_dialog,
     open_session_history_dialog,
+    open_trust_monitor_dialog,
 )
 from .bulk_edit import (
     open_bulk_color_dialog,
@@ -50,5 +51,6 @@ __all__ = [
     "open_status_dialog",
     "open_token_burst_alert_dialog",
     "open_trash_dialog",
+    "open_trust_monitor_dialog",
     "open_warmup_sites_dialog",
 ]

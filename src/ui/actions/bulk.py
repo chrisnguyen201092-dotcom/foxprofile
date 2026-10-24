@@ -10,6 +10,7 @@ from ...services.proxy.geo_check import (
     derive_ip_metadata,
     extract_ip_from_check_detail,
     lookup_ip_isp,
+    lookup_ip_risk,
 )
 from ..dialogs import open_confirm_dialog
 from ..state import AppState
@@ -130,6 +131,13 @@ async def bulk_check_proxies(
                     detail,
                 )
                 isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+                risk_data = await asyncio.to_thread(lookup_ip_risk, raw_ip)
+                if not isp_name and risk_data.get("isp"):
+                    isp_name = str(risk_data["isp"])
+                if not ip_type and risk_data.get("ip_type"):
+                    ip_type = str(risk_data["ip_type"])
+                if monitor is not None and int(risk_data.get("fraud_score", -1)) >= 0:
+                    monitor.record_ip_risk(raw_ip, risk_data)
         badge = format_proxy_badge(ok, detail, ip_type=ip_type, country=country)
         for pname in member_names:
             if ok:

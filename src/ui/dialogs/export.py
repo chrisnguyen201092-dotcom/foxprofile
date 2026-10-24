@@ -115,6 +115,7 @@ def open_export_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -125,7 +126,7 @@ def open_export_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=410,
+            width=600,
             content=ft.Column(
                 tight=True,
                 spacing=8,
@@ -140,7 +141,7 @@ def open_export_dialog(
                     ft.Divider(height=1, color=COLORS["border"]),
                     ft.Column(
                         spacing=4,
-                        height=min(260, max(90, len(checkboxes) * 34)),
+                        height=min(460, max(120, len(checkboxes) * 34)),
                         scroll=ft.ScrollMode.AUTO,
                         controls=checkboxes,
                     ),

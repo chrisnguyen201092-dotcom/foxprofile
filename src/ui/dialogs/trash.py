@@ -18,7 +18,7 @@ def open_trash_dialog(
     on_open_backups: Callable[[], None] | None = None,
 ) -> None:
     """Trash Bin dialog to restore or permanently delete soft-deleted profiles."""
-    list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=320)
+    list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=500)
 
     def _rebuild_rows() -> None:
         items = get_trashed()
@@ -130,6 +130,7 @@ def open_trash_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -159,7 +160,7 @@ def open_trash_dialog(
             ],
         ),
         content=ft.Container(
-            width=540,
+            width=760,
             content=ft.Column(
                 tight=True,
                 spacing=10,

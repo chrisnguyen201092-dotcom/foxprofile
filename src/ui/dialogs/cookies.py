@@ -217,6 +217,7 @@ def open_cookie_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -246,7 +247,7 @@ def open_cookie_dialog(
             ],
         ),
         content=ft.Container(
-            width=560,
+            width=720,
             content=ft.Column(
                 tight=True,
                 spacing=10,

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -26,7 +27,14 @@ from typing import Any
 
 from ..core.config import DATA_DIR, LOG_DIR
 from ..core.strings import get_string
-from ..models.profile import Profile
+from ..models.profile import (
+    Profile,
+    compute_days_since,
+    has_ban_page,
+    is_ban_page,
+    is_ban_status,
+)
+from ..utils.totp import split_mail_token
 
 PORT_COOLDOWN_MINUTES = 15
 TOKEN_BURST_THRESHOLD = 12
@@ -86,11 +94,35 @@ def extract_proxy_endpoint(proxy_str: str | None) -> str:
     return f"{host}:{m.group(1)}" if host else f":{m.group(1)}"
 
 
+def _ipv6_prefix_64(ip: str | None) -> str:
+    clean = (ip or "").strip().lower()
+    if ":" not in clean:
+        return ""
+    try:
+        import ipaddress
+
+        addr = ipaddress.IPv6Address(clean)
+        exploded = addr.exploded.split(":")
+        return ":".join(exploded[:4])
+    except Exception:
+        segs = [s for s in clean.split(":") if s]
+        return ":".join(segs[:4]) if len(segs) >= 4 else ""
+
+
 @dataclass
 class PreLaunchWarning:
     code: str
     level: str  # "critical" | "warning"
     message: str
+
+
+@dataclass
+class AuditFinding:
+    code: str
+    level: str  # "critical" | "warning"
+    title: str
+    detail: str
+    profiles: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +152,33 @@ class ProfileMonitorInfo:
     prev_exit_ip: str = ""
     prev_exit_country: str = ""
     ip_country_changed: bool = False
+    ip_fraud_score: int | None = None
+    ip_scamalytics: int | None = None
+    ip_proxycheck_risk: int | None = None
+    ip_proxy_flag: bool = False
+    ip_asn: str = ""
+    has_grecaptcha: bool = False
+    has_meta: bool = False
+    has_microsoft: bool = False
+    has_cache2: bool = False
+    hatch_vml: bool = False
+    has_ps_l: bool = False
+    has_meta_checkpoint: bool = False
+    datr_age_days: float = 0.0
+    datr_domains: int = 0
+    ext_domains: int = 0
+    cookie_count: int = 0
+    cookie_domains: int = 0
+    history_pages: int = 0
+    history_domains: int = 0
+    age_days: int = 0
+    session_count: int = 0
+    active_days: int = 0
+    total_minutes: int = 0
+    is_banned: bool = False
+    trust_score: int = 0
+    trust_tier: str = "cold"
+    audit_codes: list[str] = field(default_factory=list)
 
     @property
     def has_warning(self) -> bool:
@@ -142,6 +201,11 @@ class MonitorSnapshot:
     total_ports: int = 0
     proxy_collisions: list[tuple[str, list[str]]] = field(default_factory=list)
     token_bursts: list[tuple[str, int]] = field(default_factory=list)
+    audit_findings: list[AuditFinding] = field(default_factory=list)
+    diamond_count: int = 0
+    trusted_count: int = 0
+    clean_ip_count: int = 0
+    scored_ip_count: int = 0
 
     @property
     def disk_low(self) -> bool:
@@ -164,7 +228,8 @@ class MonitorService:
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
         self._last_used_ports: dict[str, str] = {}
-        self._ip_history: dict[str, list[dict[str, str]]] = {}
+        self._ip_history: dict[str, list[dict[str, Any]]] = {}
+        self._ip_scores: dict[str, dict[str, Any]] = {}
         self._token_entry_memo: dict[str, tuple[float, bool]] = {}
         self._load_settings()
 
@@ -186,26 +251,46 @@ class MonitorService:
                     self._last_used_ports = {
                         str(k): str(v) for k, v in ports.items() if isinstance(k, str) and v
                     }
+                raw_scores = raw.get("ip_scores")
+                if isinstance(raw_scores, dict):
+                    clean_scores: dict[str, dict[str, Any]] = {}
+                    for ip_k, s_val in raw_scores.items():
+                        if isinstance(ip_k, str) and isinstance(s_val, dict):
+                            clean_scores[ip_k.strip()] = dict(s_val)
+                    self._ip_scores = clean_scores
                 raw_ips = raw.get("ip_history")
                 if isinstance(raw_ips, dict):
-                    clean_hist: dict[str, list[dict[str, str]]] = {}
+                    clean_hist: dict[str, list[dict[str, Any]]] = {}
                     for pname, entries in raw_ips.items():
                         if not isinstance(pname, str) or not isinstance(entries, list):
                             continue
-                        items: list[dict[str, str]] = []
+                        items: list[dict[str, Any]] = []
                         for item in entries[:20]:
                             if isinstance(item, dict) and item.get("ip"):
-                                items.append(
-                                    {
-                                        "ip": str(item.get("ip", "")).strip(),
-                                        "country": str(item.get("country", "")).strip().upper(),
-                                        "tz": str(item.get("tz", "")).strip(),
-                                        "port": str(item.get("port", "")).strip(),
-                                        "ts": str(item.get("ts", "")).strip(),
-                                        "isp": str(item.get("isp", "")).strip(),
-                                        "ip_type": str(item.get("ip_type", "")).strip().upper(),
-                                    }
-                                )
+                                ip_str = str(item.get("ip", "")).strip()
+                                entry_d: dict[str, Any] = {
+                                    "ip": ip_str,
+                                    "country": str(item.get("country", "")).strip().upper(),
+                                    "tz": str(item.get("tz", "")).strip(),
+                                    "port": str(item.get("port", "")).strip(),
+                                    "ts": str(item.get("ts", "")).strip(),
+                                    "isp": str(item.get("isp", "")).strip(),
+                                    "ip_type": str(item.get("ip_type", "")).strip().upper(),
+                                }
+                                if item.get("fraud_score") is not None:
+                                    with contextlib.suppress(TypeError, ValueError):
+                                        entry_d["fraud_score"] = int(item["fraud_score"])
+                                if item.get("scamalytics") is not None:
+                                    with contextlib.suppress(TypeError, ValueError):
+                                        entry_d["scamalytics"] = int(item["scamalytics"])
+                                if item.get("proxycheck_risk") is not None:
+                                    with contextlib.suppress(TypeError, ValueError):
+                                        entry_d["proxycheck_risk"] = int(item["proxycheck_risk"])
+                                if item.get("proxy_flag"):
+                                    entry_d["proxy_flag"] = bool(item["proxy_flag"])
+                                if item.get("asn"):
+                                    entry_d["asn"] = str(item["asn"]).strip()
+                                items.append(entry_d)
                         if items:
                             clean_hist[pname] = items
                     self._ip_history = clean_hist
@@ -244,6 +329,7 @@ class MonitorService:
                 "cooldown_minutes": self._cooldown_minutes,
                 "last_used_ports": self._last_used_ports,
                 "ip_history": self._ip_history,
+                "ip_scores": self._ip_scores,
                 "session_history": {
                     k: v[-50:] for k, v in self._live_sessions.items() if v
                 },
@@ -269,6 +355,52 @@ class MonitorService:
             self._ip_history[profile_name] = self._ip_history[profile_name][:1]
         self._save_settings()
 
+    def record_ip_risk(self, ip: str, risk_data: dict[str, Any]) -> None:
+        """Persist IP risk/fraud score outside camoufox_data/<Profile>/ and enrich matching history."""
+        clean_ip = (ip or "").strip()
+        if not clean_ip or not isinstance(risk_data, dict):
+            return
+        stored = dict(self._ip_scores.get(clean_ip, {}))
+        for k in (
+            "fraud_score",
+            "scamalytics",
+            "proxycheck_risk",
+            "proxy_flag",
+            "ip_type",
+            "detail_type",
+            "isp",
+            "asn",
+        ):
+            val = risk_data.get(k)
+            if val is not None and val != "":
+                stored[k] = val
+        stored["ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._ip_scores[clean_ip] = stored
+        for entries in self._ip_history.values():
+            for item in entries:
+                if item.get("ip") == clean_ip:
+                    if stored.get("fraud_score") is not None:
+                        item["fraud_score"] = stored["fraud_score"]
+                    if stored.get("scamalytics") is not None:
+                        item["scamalytics"] = stored["scamalytics"]
+                    if stored.get("proxycheck_risk") is not None:
+                        item["proxycheck_risk"] = stored["proxycheck_risk"]
+                    if "proxy_flag" in stored:
+                        item["proxy_flag"] = bool(stored["proxy_flag"])
+                    if stored.get("isp") and not item.get("isp"):
+                        item["isp"] = str(stored["isp"])
+                    if stored.get("ip_type") and not item.get("ip_type"):
+                        item["ip_type"] = str(stored["ip_type"]).upper()
+                    if stored.get("asn"):
+                        item["asn"] = str(stored["asn"])
+        self._save_settings()
+
+    def get_ip_risk(self, ip: str | None) -> dict[str, Any]:
+        clean_ip = (ip or "").strip()
+        if not clean_ip:
+            return {}
+        return dict(self._ip_scores.get(clean_ip, {}))
+
     def record_exit_ip(
         self,
         profile_name: str,
@@ -279,7 +411,12 @@ class MonitorService:
         proxy: str | None = None,
         isp: str = "",
         ip_type: str = "",
-    ) -> dict[str, str] | None:
+        fraud_score: int | None = None,
+        scamalytics: int | None = None,
+        proxycheck_risk: int | None = None,
+        proxy_flag: bool = False,
+        asn: str = "",
+    ) -> dict[str, Any] | None:
         """Record an exit IP check for `profile_name` (stored outside camoufox_data/<Profile>/)."""
         clean_ip = (ip or "").strip()
         if not clean_ip or not profile_name:
@@ -290,6 +427,31 @@ class MonitorService:
         clean_tz = (tz or "").strip()
         clean_isp = (isp or "").strip()
         clean_type = (ip_type or "").strip().upper()
+        clean_asn = (asn or "").strip()
+        if fraud_score is not None or scamalytics is not None or proxycheck_risk is not None:
+            self._ip_scores[clean_ip] = {
+                "fraud_score": fraud_score,
+                "scamalytics": scamalytics,
+                "proxycheck_risk": proxycheck_risk,
+                "proxy_flag": bool(proxy_flag),
+                "ip_type": clean_type,
+                "isp": clean_isp,
+                "asn": clean_asn,
+                "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        cached_risk = self._ip_scores.get(clean_ip, {})
+        eff_fraud = fraud_score if fraud_score is not None else cached_risk.get("fraud_score")
+        eff_scam = scamalytics if scamalytics is not None else cached_risk.get("scamalytics")
+        eff_pc = (
+            proxycheck_risk if proxycheck_risk is not None else cached_risk.get("proxycheck_risk")
+        )
+        eff_flag = bool(proxy_flag or cached_risk.get("proxy_flag"))
+        eff_asn = clean_asn or str(cached_risk.get("asn") or "")
+        if not clean_isp and cached_risk.get("isp"):
+            clean_isp = str(cached_risk["isp"])
+        if not clean_type and cached_risk.get("ip_type"):
+            clean_type = str(cached_risk["ip_type"]).upper()
+
         port = extract_proxy_port(proxy)
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         entries = self._ip_history.setdefault(profile_name, [])
@@ -309,9 +471,19 @@ class MonitorService:
                 entries[0]["isp"] = clean_isp
             if clean_type:
                 entries[0]["ip_type"] = clean_type
+            if eff_fraud is not None:
+                entries[0]["fraud_score"] = eff_fraud
+            if eff_scam is not None:
+                entries[0]["scamalytics"] = eff_scam
+            if eff_pc is not None:
+                entries[0]["proxycheck_risk"] = eff_pc
+            if eff_flag:
+                entries[0]["proxy_flag"] = True
+            if eff_asn:
+                entries[0]["asn"] = eff_asn
             out = dict(entries[0])
         else:
-            entry = {
+            entry: dict[str, Any] = {
                 "ip": clean_ip,
                 "country": clean_country,
                 "tz": clean_tz,
@@ -320,15 +492,42 @@ class MonitorService:
                 "isp": clean_isp,
                 "ip_type": clean_type,
             }
+            if eff_fraud is not None:
+                entry["fraud_score"] = eff_fraud
+            if eff_scam is not None:
+                entry["scamalytics"] = eff_scam
+            if eff_pc is not None:
+                entry["proxycheck_risk"] = eff_pc
+            if eff_flag:
+                entry["proxy_flag"] = True
+            if eff_asn:
+                entry["asn"] = eff_asn
             entries.insert(0, entry)
             del entries[20:]
             out = dict(entry)
         self._save_settings()
         return out
 
-    def get_ip_history(self, profile_name: str, limit: int = 20) -> list[dict[str, str]]:
+    def get_ip_history(self, profile_name: str, limit: int = 20) -> list[dict[str, Any]]:
         """Return recorded exit IP entries for `profile_name` (newest first)."""
-        return [dict(item) for item in self._ip_history.get(profile_name, [])[:limit]]
+        out: list[dict[str, Any]] = []
+        for item in self._ip_history.get(profile_name, [])[:limit]:
+            d = dict(item)
+            ip_k = str(d.get("ip") or "").strip()
+            if ip_k and ip_k in self._ip_scores:
+                sc = self._ip_scores[ip_k]
+                if d.get("fraud_score") is None and sc.get("fraud_score") is not None:
+                    d["fraud_score"] = sc["fraud_score"]
+                if d.get("scamalytics") is None and sc.get("scamalytics") is not None:
+                    d["scamalytics"] = sc["scamalytics"]
+                if d.get("proxycheck_risk") is None and sc.get("proxycheck_risk") is not None:
+                    d["proxycheck_risk"] = sc["proxycheck_risk"]
+                if sc.get("proxy_flag"):
+                    d["proxy_flag"] = True
+                if not d.get("asn") and sc.get("asn"):
+                    d["asn"] = sc["asn"]
+            out.append(d)
+        return out
 
     def clear_ip_history(self, profile_name: str) -> None:
         """Clear recorded exit IP history for `profile_name`."""
@@ -666,11 +865,24 @@ class MonitorService:
                 "sess_exp": "-",
                 "burst_10m": 0,
                 "last_active_ts": 0.0,
+                "has_grecaptcha": False,
+                "has_meta": False,
+                "has_microsoft": False,
+                "has_cache2": False,
+                "cookie_count": 0,
+                "cookie_domains": 0,
+                "history_pages": 0,
+                "history_domains": 0,
+                "fp_hash": "",
+                "fp_hw_sig": "",
             }
 
         tabs_file = pdir / "tabs.json"
         cookies_db = pdir / "cookies.sqlite"
+        places_db = pdir / "places.sqlite"
         prefs_file = pdir / "prefs.js"
+        fp_file = pdir / "fingerprint.json"
+        has_cache2 = (pdir / "cache2").is_dir()
         try:
             tabs_mtime = tabs_file.stat().st_mtime if tabs_file.exists() else 0.0
         except OSError:
@@ -680,20 +892,34 @@ class MonitorService:
         except OSError:
             cookies_mtime = 0.0
         try:
+            places_mtime = places_db.stat().st_mtime if places_db.exists() else 0.0
+        except OSError:
+            places_mtime = 0.0
+        try:
             prefs_mtime = prefs_file.stat().st_mtime if prefs_file.exists() else 0.0
         except OSError:
             prefs_mtime = 0.0
+        try:
+            fp_mtime = fp_file.stat().st_mtime if fp_file.exists() else 0.0
+        except OSError:
+            fp_mtime = 0.0
         last_active_ts = max(tabs_mtime, cookies_mtime, prefs_mtime)
 
         if cached is not None:
             age = now_ts - cached.get("_ts", 0.0)
+            ct_sec = float(cached.get("_datr_ctime_sec") or 0.0)
+            if 0 < ct_sec <= now_ts:
+                cached["datr_age_days"] = round((now_ts - ct_sec) / 86400.0, 2)
             if not is_running:
                 if (
                     cached.get("_tabs_mtime") == tabs_mtime
                     and cached.get("_cookies_mtime") == cookies_mtime
+                    and cached.get("_places_mtime") == places_mtime
+                    and cached.get("_fp_mtime") == fp_mtime
                 ):
                     cached["burst_10m"] = 0
                     cached["last_active_ts"] = last_active_ts
+                    cached["has_cache2"] = has_cache2
                     return cached
             elif (
                 cached.get("_is_running") is True
@@ -701,6 +927,7 @@ class MonitorService:
                 and age < 15.0
             ):
                 cached["last_active_ts"] = last_active_ts
+                cached["has_cache2"] = has_cache2
                 return cached
 
         result: dict[str, Any] = {
@@ -708,6 +935,9 @@ class MonitorService:
             "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
             "_cookies_mtime": -1.0 if is_running else cookies_mtime,
+            "_places_mtime": -1.0 if is_running else places_mtime,
+            "_fp_mtime": fp_mtime,
+            "_datr_ctime_sec": cached.get("_datr_ctime_sec", 0.0) if cached else 0.0,
             "has_thread_url": False,
             "tab_count": 0,
             "hatch_gw": cached.get("hatch_gw", False) if cached else False,
@@ -715,7 +945,50 @@ class MonitorService:
             "sess_exp": cached.get("sess_exp", "-") if cached else "-",
             "burst_10m": 0,
             "last_active_ts": last_active_ts,
+            "has_grecaptcha": cached.get("has_grecaptcha", False) if cached else False,
+            "has_meta": cached.get("has_meta", False) if cached else False,
+            "has_microsoft": cached.get("has_microsoft", False) if cached else False,
+            "has_cache2": has_cache2,
+            "hatch_vml": cached.get("hatch_vml", False) if cached else False,
+            "has_ps_l": cached.get("has_ps_l", False) if cached else False,
+            "has_meta_checkpoint": (
+                cached.get("has_meta_checkpoint", False) if cached else False
+            ),
+            "datr_age_days": cached.get("datr_age_days", 0.0) if cached else 0.0,
+            "datr_domains": cached.get("datr_domains", 0) if cached else 0,
+            "ext_domains": cached.get("ext_domains", 0) if cached else 0,
+            "cookie_count": cached.get("cookie_count", 0) if cached else 0,
+            "cookie_domains": cached.get("cookie_domains", 0) if cached else 0,
+            "history_pages": cached.get("history_pages", 0) if cached else 0,
+            "history_domains": cached.get("history_domains", 0) if cached else 0,
+            "fp_hash": cached.get("fp_hash", "") if cached else "",
+            "fp_hw_sig": cached.get("fp_hw_sig", "") if cached else "",
         }
+
+        if fp_mtime > 0 and (not cached or cached.get("_fp_mtime") != fp_mtime):
+            try:
+                raw_fp = fp_file.read_text(encoding="utf-8", errors="replace")
+                fp_obj = json.loads(raw_fp)
+                fp_inner = fp_obj.get("fingerprint", {}) if isinstance(fp_obj, dict) else {}
+                if isinstance(fp_inner, dict) and fp_inner:
+                    norm_fp = json.dumps(fp_inner, sort_keys=True, separators=(",", ":"))
+                    result["fp_hash"] = hashlib.sha1(norm_fp.encode("utf-8")).hexdigest()[:16]
+                    nav = fp_inner.get("navigator") or {}
+                    scr = fp_inner.get("screen") or {}
+                    vc = fp_inner.get("videoCard") or fp_inner.get("gpu") or fp_inner.get("webgl") or {}
+                    plat = str(nav.get("platform") or fp_obj.get("os") or "")
+                    w = scr.get("width") or ""
+                    h_px = scr.get("height") or ""
+                    cores = nav.get("hardwareConcurrency") or ""
+                    rend = str(
+                        (vc.get("renderer") if isinstance(vc, dict) else "")
+                        or fp_inner.get("webgl:renderer")
+                        or ""
+                    )[:48]
+                    if plat and w and h_px:
+                        result["fp_hw_sig"] = f"{plat}|{w}x{h_px}|{cores}c|{rend}"
+            except Exception:
+                pass
 
         if tabs_mtime > 0:
             try:
@@ -735,29 +1008,79 @@ class MonitorService:
                 conn = sqlite3.connect(uri, uri=True, timeout=0.3)
                 try:
                     cur = conn.cursor()
-                    cur.execute("SELECT host, name, expiry FROM moz_cookies")
-                    rows = cur.fetchall()
+                    try:
+                        cur.execute(
+                            "SELECT host, name, creationTime, expiry FROM moz_cookies"
+                        )
+                        rows = cur.fetchall()
+                    except sqlite3.OperationalError:
+                        cur.execute("SELECT host, name, 0, expiry FROM moz_cookies")
+                        rows = cur.fetchall()
                 finally:
                     conn.close()
 
                 hatch_gw = False
+                hatch_vml = False
                 hatch_sess = False
+                has_grecaptcha = False
+                has_meta = False
+                has_microsoft = False
+                has_ps_l = False
+                has_chk_cookie = False
+                datr_age_days = 0.0
+                earliest_datr_ct = 0.0
+                datr_hosts: set[str] = set()
+                cookie_hosts: set[str] = set()
                 latest_exp = 0.0
-                for _host, cname, exp in rows:
+                for _host, cname, ctime, exp in rows:
+                    host_l = str(_host or "").lower().lstrip(".")
+                    if host_l:
+                        cookie_hosts.add(host_l)
                     cname_s = str(cname or "")
-                    if "cf_clearance" in cname_s or "__cf_bm" in cname_s or "hatch_gw" in cname_s:
+                    cname_l = cname_s.lower()
+                    if cname_s == "_GRECAPTCHA" or "recaptcha" in cname_l:
+                        has_grecaptcha = True
+                    if any(d in host_l for d in ("meta.com", "facebook.com", "instagram.com")):
+                        has_meta = True
+                    if any(
+                        d in host_l
+                        for d in ("live.com", "microsoft.com", "office.com", "outlook.com")
+                    ):
+                        has_microsoft = True
+                    if cname_s in ("ps_l", "ps_n"):
+                        has_ps_l = True
+                    if "checkpoint" in cname_l:
+                        has_chk_cookie = True
+                    if cname_s == "datr":
+                        if host_l:
+                            datr_hosts.add(host_l)
+                        if ctime:
+                            ct_val = float(ctime)
+                            while ct_val > 10_000_000_000:
+                                ct_val /= 1000.0
+                            if 0 < ct_val <= now_ts:
+                                datr_age_days = max(
+                                    datr_age_days,
+                                    (now_ts - ct_val) / 86400.0,
+                                )
+                                if earliest_datr_ct == 0.0 or ct_val < earliest_datr_ct:
+                                    earliest_datr_ct = ct_val
+                    if cname_s == "hatch_vml":
+                        hatch_vml = True
+                    elif cname_s in ("hatch_gw", "cf_clearance", "__cf_bm"):
                         hatch_gw = True
-                    elif any(
-                        k in cname_s.lower()
-                        for k in (
-                            "session",
-                            "token",
-                            "auth",
-                            "user",
-                            "id",
-                            "clerk",
-                            "sb-",
-                            "hatch_sess",
+                    elif cname_s == "hatch_sess" or (
+                        "checkpoint" not in cname_l
+                        and any(
+                            k in cname_l
+                            for k in (
+                                "session",
+                                "token",
+                                "auth",
+                                "user",
+                                "clerk",
+                                "sb-",
+                            )
                         )
                     ):
                         hatch_sess = True
@@ -782,8 +1105,71 @@ class MonitorService:
                     sess_exp = "Session"
 
                 result["hatch_gw"] = hatch_gw
+                result["hatch_vml"] = hatch_vml
                 result["hatch_sess"] = hatch_sess
                 result["sess_exp"] = sess_exp
+                result["has_grecaptcha"] = has_grecaptcha
+                result["has_meta"] = has_meta
+                result["has_microsoft"] = has_microsoft
+                result["has_ps_l"] = has_ps_l
+                result["has_meta_checkpoint"] = has_chk_cookie
+                result["_datr_ctime_sec"] = earliest_datr_ct
+                result["datr_age_days"] = round(datr_age_days, 2)
+                result["datr_domains"] = len(datr_hosts)
+                result["cookie_count"] = len(rows)
+                result["cookie_domains"] = len(cookie_hosts)
+            except Exception:
+                pass
+
+        # Only read places.sqlite when the profile's browser is NOT running
+        if not is_running and places_mtime > 0:
+            try:
+                pl_posix = places_db.resolve().as_posix()
+                pl_uri = f"file:///{urllib.parse.quote(pl_posix, safe=':/')}?mode=ro&immutable=1"
+                conn_pl = sqlite3.connect(pl_uri, uri=True, timeout=0.3)
+                try:
+                    cur_pl = conn_pl.cursor()
+                    cur_pl.execute(
+                        "SELECT url, rev_host FROM moz_places WHERE visit_count > 0"
+                    )
+                    pl_rows = cur_pl.fetchall()
+                finally:
+                    conn_pl.close()
+
+                result["history_pages"] = len(pl_rows)
+                all_rev_hosts: set[str] = set()
+                ext_rev_hosts: set[str] = set()
+                has_chk_url = False
+                internal_domains = (
+                    "muse.ai",
+                    "meta.com",
+                    "facebook.com",
+                    "instagram.com",
+                    "meta.ai",
+                    "live.com",
+                    "microsoft.com",
+                    "outlook.com",
+                    "office.com",
+                    "google.com",
+                    "doodles.google",
+                )
+                for u, rh in pl_rows:
+                    u_l = str(u or "").lower()
+                    rh_s = str(rh or "")
+                    if rh_s:
+                        all_rev_hosts.add(rh_s)
+                    if (
+                        "auth.meta.com/checkpoint" in u_l
+                        or "oidc/start?checkpoint=1" in u_l
+                        or "auth.meta.com/recover" in u_l
+                    ):
+                        has_chk_url = True
+                    if rh_s and not any(d in u_l for d in internal_domains):
+                        ext_rev_hosts.add(rh_s)
+                result["history_domains"] = len(all_rev_hosts)
+                result["ext_domains"] = len(ext_rev_hosts)
+                if has_chk_url:
+                    result["has_meta_checkpoint"] = True
             except Exception:
                 pass
 
@@ -859,6 +1245,7 @@ class MonitorService:
         disk_map: dict[str, dict[str, Any]] = {}
         last_closed_map: dict[str, dt.datetime | None] = {}
         today_mins_map: dict[str, int] = {}
+        sess_stats_map: dict[str, tuple[int, int, int]] = {}
         ports_seeded = False
         for p in profiles:
             is_run = p.name in running_names
@@ -908,9 +1295,14 @@ class MonitorService:
             last_closed_map[p.name] = lc
 
             secs = 0.0
+            total_all_mins = 0
+            active_dates_set: set[str] = set()
             for s_item in completed:
                 en_str = str(s_item.get("end", ""))
                 st_str = str(s_item.get("start", ""))
+                if len(st_str) >= 10:
+                    active_dates_set.add(st_str[:10])
+                total_all_mins += max(1, int(s_item.get("duration_mins") or 0))
                 if en_str.startswith(today_str) or st_str.startswith(today_str):
                     try:
                         st_dt = dt.datetime.strptime(st_str, "%Y-%m-%d %H:%M:%S")
@@ -918,11 +1310,17 @@ class MonitorService:
                         secs += max(0.0, (en_dt - st_dt).total_seconds())
                     except ValueError:
                         secs += float(s_item.get("duration_mins") or 0) * 60.0
+            sess_cnt = len(completed)
             if p.name in running_names:
+                sess_cnt += 1
+                active_dates_set.add(today_str)
                 start_dt = self._live_started_at.get(p.name) or h.get("_open_start")
                 if start_dt and start_dt.date() == now.date():
-                    secs += max(0.0, (now - start_dt).total_seconds())
+                    run_s = max(0.0, (now - start_dt).total_seconds())
+                    secs += run_s
+                    total_all_mins += int(run_s // 60)
             today_mins_map[p.name] = int(secs // 60)
+            sess_stats_map[p.name] = (sess_cnt, len(active_dates_set), total_all_mins)
 
         if ports_seeded:
             self._save_settings()
@@ -1012,6 +1410,183 @@ class MonitorService:
                 p.proxy and last_country and prev_country and last_country != prev_country
             )
 
+            ip_risk_obj = self._ip_scores.get(last_ip, {}) if last_ip else {}
+            entry0 = ip_entries[0] if ip_entries else {}
+            raw_fraud = (
+                ip_risk_obj.get("fraud_score")
+                if ip_risk_obj.get("fraud_score") is not None
+                else entry0.get("fraud_score")
+            )
+            ip_fraud_score = int(raw_fraud) if raw_fraud is not None else None
+            raw_scam = (
+                ip_risk_obj.get("scamalytics")
+                if ip_risk_obj.get("scamalytics") is not None
+                else entry0.get("scamalytics")
+            )
+            ip_scamalytics = int(raw_scam) if raw_scam is not None else None
+            raw_pc = (
+                ip_risk_obj.get("proxycheck_risk")
+                if ip_risk_obj.get("proxycheck_risk") is not None
+                else entry0.get("proxycheck_risk")
+            )
+            ip_proxycheck_risk = int(raw_pc) if raw_pc is not None else None
+            ip_proxy_flag = bool(ip_risk_obj.get("proxy_flag") or entry0.get("proxy_flag"))
+            ip_asn = str(ip_risk_obj.get("asn") or entry0.get("asn") or "")
+            if not last_isp and ip_risk_obj.get("isp"):
+                last_isp = str(ip_risk_obj["isp"])
+            if not last_ip_type and ip_risk_obj.get("ip_type"):
+                last_ip_type = str(ip_risk_obj["ip_type"]).upper()
+
+            if ip_fraud_score is not None:
+                snap.scored_ip_count += 1
+                if ip_fraud_score <= 25 and not ip_proxy_flag:
+                    snap.clean_ip_count += 1
+
+            has_grecaptcha = bool(disk.get("has_grecaptcha"))
+            has_meta = bool(disk.get("has_meta"))
+            has_microsoft = bool(disk.get("has_microsoft"))
+            has_cache2 = bool(disk.get("has_cache2"))
+            hatch_vml = bool(disk.get("hatch_vml"))
+            has_ps_l = bool(disk.get("has_ps_l"))
+            has_meta_checkpoint = bool(disk.get("has_meta_checkpoint"))
+            datr_age_days = float(disk.get("datr_age_days") or 0.0)
+            datr_domains = int(disk.get("datr_domains") or 0)
+            ext_domains = int(disk.get("ext_domains") or 0)
+            cookie_count = int(disk.get("cookie_count") or 0)
+            cookie_domains = int(disk.get("cookie_domains") or 0)
+            history_pages = int(disk.get("history_pages") or 0)
+            history_domains = int(disk.get("history_domains") or 0)
+            age_days = compute_days_since(p.created_at) or 0
+            eff_datr_age = (
+                datr_age_days
+                if datr_age_days > 0
+                else (float(age_days) if (not has_meta and cookie_count > 0) else 0.0)
+            )
+            sess_cnt, active_days, total_mins = sess_stats_map.get(p.name, (0, 0, 0))
+            if sess_cnt == 0 and (cookie_count > 0 or history_pages > 0):
+                sess_cnt = 1
+                active_days = 1
+            if (
+                active_days <= 1
+                and eff_datr_age >= 10.0
+                and cookie_count >= 40
+                and ext_domains >= 3
+            ):
+                # Veteran profile whose local session logs were rotated
+                active_days = 4
+                sess_cnt = max(sess_cnt, 6)
+            is_banned = bool(
+                p.banned_at
+                or is_ban_status(p.status)
+                or has_ban_page(p.pages)
+                or is_ban_page(p.group)
+            )
+
+            # Calculate Meta Sigma & Hatch OIDC Trust Score (0 - 100)
+            score = 0
+            # 1. Meta `datr` Device-Identity Age, AYMH Cross-Domain Sync & Multi-Day Rhythm (max 35)
+            if eff_datr_age >= 10.0:
+                score += 16
+            elif eff_datr_age >= 7.0:
+                score += 13
+            elif eff_datr_age >= 4.0:
+                score += 9
+            elif eff_datr_age >= 2.0:
+                score += 5
+            elif eff_datr_age > 0.0:
+                score += 2
+
+            if datr_domains >= 3 or (not has_meta and has_grecaptcha):
+                score += 4
+            elif datr_domains >= 1:
+                score += 2
+
+            if active_days >= 6:
+                score += 15
+            elif active_days >= 4:
+                score += 12
+            elif active_days >= 3:
+                score += 8
+            elif active_days >= 2:
+                score += 5
+            elif active_days >= 1:
+                score += 2
+
+            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 25)
+            if disk["hatch_gw"]:
+                score += 12
+            if hatch_vml or (disk["hatch_gw"] and not has_meta):
+                score += 5
+            if disk["hatch_sess"]:
+                score += 4
+            if disk["has_thread_url"]:
+                score += 4
+
+            # 3. Meta Pixel (`ps_l`/`ps_n`), Non-Meta External Domains & HTTP Cache2 ETag Sync (max 15)
+            if has_ps_l or (not has_meta and has_grecaptcha):
+                score += 5
+            if ext_domains >= 4:
+                score += 6
+            elif ext_domains >= 2:
+                score += 4
+            elif ext_domains >= 1:
+                score += 2
+            if has_cache2 and cookie_count > 0:
+                score += 4
+
+            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 25)
+            if p.proxy:
+                if p.timezone and p.locale:
+                    score += 10
+                else:
+                    score += 4
+                if ip_fraud_score is not None:
+                    if ip_fraud_score <= 10 and not ip_proxy_flag:
+                        score += 15
+                    elif ip_fraud_score <= 29 and not ip_proxy_flag:
+                        score += 12
+                    elif ip_fraud_score <= 60:
+                        score += 6
+                elif last_ip:
+                    score += 8
+
+            # 5. Meta Sigma Risk Penalties & Hard Device Gates
+            if has_meta_checkpoint:
+                score -= 20
+            if disk["hatch_sess"] and not disk["hatch_gw"]:
+                score -= 15
+            if proxy_port_changed or ip_country_changed:
+                score -= 20
+            if today_mins_map.get(p.name, 0) > 180 or disk["burst_10m"] >= 3:
+                score -= 15
+
+            score = max(0, min(100, score))
+
+            if cookie_count == 0 and sess_cnt == 0:
+                trust_score = min(12, score)
+            elif not disk["hatch_gw"]:
+                trust_score = min(48, score)
+            elif eff_datr_age < 3.0 or active_days < 2:
+                trust_score = min(55, score)
+            elif eff_datr_age < 7.0 or active_days < 4 or has_meta_checkpoint:
+                trust_score = min(78, score)
+            else:
+                trust_score = score
+
+            if is_banned:
+                trust_tier = "banned"
+            elif trust_score >= 80:
+                trust_tier = "diamond"
+                snap.diamond_count += 1
+                snap.trusted_count += 1
+            elif trust_score >= 60:
+                trust_tier = "trusted"
+                snap.trusted_count += 1
+            elif trust_score >= 35:
+                trust_tier = "warming"
+            else:
+                trust_tier = "cold"
+
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
                 port=port,
@@ -1038,9 +1613,235 @@ class MonitorService:
                 prev_exit_ip=prev_ip,
                 prev_exit_country=prev_country,
                 ip_country_changed=ip_country_changed,
+                ip_fraud_score=ip_fraud_score,
+                ip_scamalytics=ip_scamalytics,
+                ip_proxycheck_risk=ip_proxycheck_risk,
+                ip_proxy_flag=ip_proxy_flag,
+                ip_asn=ip_asn,
+                has_grecaptcha=has_grecaptcha,
+                has_meta=has_meta,
+                has_microsoft=has_microsoft,
+                has_cache2=has_cache2,
+                hatch_vml=hatch_vml,
+                has_ps_l=has_ps_l,
+                has_meta_checkpoint=has_meta_checkpoint,
+                datr_age_days=datr_age_days,
+                datr_domains=datr_domains,
+                ext_domains=ext_domains,
+                cookie_count=cookie_count,
+                cookie_domains=cookie_domains,
+                history_pages=history_pages,
+                history_domains=history_domains,
+                age_days=age_days,
+                session_count=sess_cnt,
+                active_days=active_days,
+                total_minutes=total_mins,
+                is_banned=is_banned,
+                trust_score=trust_score,
+                trust_tier=trust_tier,
             )
 
+        self._populate_audit_findings(profiles, disk_map, snap)
         return snap
+
+    def _populate_audit_findings(
+        self,
+        profiles: list[Profile],
+        disk_map: dict[str, dict[str, Any]],
+        snap: MonitorSnapshot,
+    ) -> None:
+        """Run read-only Cross-Profile Correlation & Leak Audit across all profiles."""
+        findings: list[AuditFinding] = []
+
+        def _attach(code: str, level: str, title: str, detail: str, names: list[str]) -> None:
+            findings.append(
+                AuditFinding(
+                    code=code,
+                    level=level,
+                    title=title,
+                    detail=detail,
+                    profiles=list(names),
+                )
+            )
+            for n in names:
+                info = snap.profiles.get(n)
+                if info is not None and code not in info.audit_codes:
+                    info.audit_codes.append(code)
+
+        # 1. Burned Proxy / IP / IPv6 /64 Subnet shared with explicitly Banned profiles
+        banned_by_ep: dict[str, list[str]] = {}
+        banned_by_ip: dict[str, list[str]] = {}
+        banned_by_v6: dict[str, list[str]] = {}
+        hard_banned_names: set[str] = set()
+        for p in profiles:
+            info = snap.profiles.get(p.name)
+            if not info or not info.is_banned:
+                continue
+            if is_ban_status(p.status):
+                hard_banned_names.add(p.name)
+            ep = extract_proxy_endpoint(p.proxy)
+            if ep:
+                banned_by_ep.setdefault(ep, []).append(p.name)
+            if info.last_exit_ip:
+                banned_by_ip.setdefault(info.last_exit_ip, []).append(p.name)
+                v6_pref = _ipv6_prefix_64(info.last_exit_ip)
+                if v6_pref and is_ban_status(p.status):
+                    banned_by_v6.setdefault(v6_pref, []).append(p.name)
+
+        subnet_affected: dict[str, list[str]] = {}
+        for p in profiles:
+            info = snap.profiles.get(p.name)
+            if not info or info.is_banned:
+                continue
+            ep = extract_proxy_endpoint(p.proxy)
+            if ep and ep in banned_by_ep:
+                b_list = banned_by_ep[ep]
+                # Do not flag active accounts that already established a working Hatch gateway if the old account was only Disconnected
+                is_working_replacement = info.hatch_gw and not info.has_meta_checkpoint
+                if not is_working_replacement or any(bn in hard_banned_names for bn in b_list):
+                    b_names = ", ".join(b_list)
+                    _attach(
+                        "burned_proxy",
+                        "critical",
+                        get_string("audit_burned_proxy_title", name=p.name, port=info.port or ep),
+                        get_string("audit_burned_proxy_detail", name=p.name, banned=b_names, port=info.port or ep),
+                        [p.name, *b_list],
+                    )
+            elif info.last_exit_ip and info.last_exit_ip in banned_by_ip:
+                b_names = ", ".join(banned_by_ip[info.last_exit_ip])
+                _attach(
+                    "burned_ip",
+                    "critical",
+                    get_string("audit_burned_ip_title", name=p.name, ip=info.last_exit_ip),
+                    get_string("audit_burned_ip_detail", name=p.name, banned=b_names, ip=info.last_exit_ip),
+                    [p.name, *banned_by_ip[info.last_exit_ip]],
+                )
+            elif info.last_exit_ip:
+                v6_pref = _ipv6_prefix_64(info.last_exit_ip)
+                if v6_pref and v6_pref in banned_by_v6:
+                    subnet_affected.setdefault(v6_pref, []).append(p.name)
+
+        for v6_pref, aff_names in subnet_affected.items():
+            b_list = banned_by_v6.get(v6_pref, [])
+            b_names = ", ".join(b_list)
+            shown_names = ", ".join(aff_names[:5]) + (f" (+{len(aff_names) - 5})" if len(aff_names) > 5 else "")
+            _attach(
+                "burned_subnet",
+                "warning",
+                get_string("audit_burned_subnet_title", name=shown_names, subnet=f"{v6_pref}::/64"),
+                get_string(
+                    "audit_burned_subnet_detail",
+                    name=shown_names,
+                    banned=b_names,
+                    subnet=f"{v6_pref}::/64",
+                ),
+                [*aff_names, *b_list],
+            )
+
+        # 2. Credential Leak / Duplicate Audit (Email, 2FA Secret, OAuth2 Refresh Token)
+        email_map: dict[str, list[str]] = {}
+        tfa_map: dict[str, list[str]] = {}
+        rt_map: dict[str, list[str]] = {}
+        for p in profiles:
+            em = (p.email or "").strip().lower()
+            if em:
+                email_map.setdefault(em, []).append(p.name)
+            tfa = (p.two_fa or "").strip().upper()
+            if len(tfa) >= 12:
+                tfa_map.setdefault(tfa, []).append(p.name)
+            rt, _ = split_mail_token(p.mail_token)
+            if len(rt) >= 24:
+                rt_map.setdefault(rt, []).append(p.name)
+
+        for em, names in email_map.items():
+            if len(names) > 1:
+                _attach(
+                    "duplicate_email",
+                    "critical",
+                    get_string("audit_dup_email_title", email=em),
+                    get_string("audit_dup_email_detail", names=", ".join(names)),
+                    names,
+                )
+        for _tfa, names in tfa_map.items():
+            if len(names) > 1:
+                _attach(
+                    "duplicate_2fa",
+                    "critical",
+                    get_string("audit_dup_2fa_title"),
+                    get_string("audit_dup_2fa_detail", names=", ".join(names)),
+                    names,
+                )
+        for _rt, names in rt_map.items():
+            if len(names) > 1:
+                _attach(
+                    "duplicate_token",
+                    "critical",
+                    get_string("audit_dup_token_title"),
+                    get_string("audit_dup_token_detail", names=", ".join(names)),
+                    names,
+                )
+
+        # 3. Fingerprint Clone / Same-Port Hardware Collision Audit
+        fp_hash_map: dict[str, list[str]] = {}
+        ep_hw_map: dict[tuple[str, str], list[str]] = {}
+        for p in profiles:
+            d = disk_map.get(p.name) or {}
+            fph = str(d.get("fp_hash") or "")
+            if fph:
+                fp_hash_map.setdefault(fph, []).append(p.name)
+            ep = extract_proxy_endpoint(p.proxy)
+            hw_sig = str(d.get("fp_hw_sig") or "")
+            if ep and hw_sig:
+                ep_hw_map.setdefault((ep, hw_sig), []).append(p.name)
+
+        for _fph, names in fp_hash_map.items():
+            if len(names) > 1:
+                _attach(
+                    "duplicate_fingerprint",
+                    "critical",
+                    get_string("audit_dup_fp_title"),
+                    get_string("audit_dup_fp_detail", names=", ".join(names)),
+                    names,
+                )
+        for (ep, hw_sig), names in ep_hw_map.items():
+            if len(names) > 1:
+                port_lbl = f":{ep.rsplit(':', 1)[-1]}" if ":" in ep else ep
+                _attach(
+                    "same_port_hw",
+                    "warning",
+                    get_string("audit_same_port_hw_title", port=port_lbl),
+                    get_string(
+                        "audit_same_port_hw_detail",
+                        names=", ".join(names),
+                        hw=hw_sig.replace("|", " · "),
+                    ),
+                    names,
+                )
+
+        # 4. High IP Fraud Score Warning
+        for p in profiles:
+            info = snap.profiles.get(p.name)
+            if not info or info.is_banned:
+                continue
+            if info.ip_fraud_score is not None and info.ip_fraud_score >= 70:
+                _attach(
+                    "high_fraud_ip",
+                    "critical" if info.ip_fraud_score >= 75 else "warning",
+                    get_string(
+                        "audit_high_fraud_ip_title",
+                        name=p.name,
+                        score=info.ip_fraud_score,
+                    ),
+                    get_string(
+                        "audit_high_fraud_ip_detail",
+                        name=p.name,
+                        ip=info.last_exit_ip or "-",
+                        score=info.ip_fraud_score,
+                    ),
+                    [p.name],
+                )
+
+        snap.audit_findings = findings
 
     def check_prelaunch(
         self,

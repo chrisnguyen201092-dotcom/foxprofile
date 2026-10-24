@@ -611,6 +611,7 @@ def open_profile_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=4, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -642,7 +643,7 @@ def open_profile_dialog(
             ],
         ),
         content=ft.Container(
-            width=460,
+            width=620,
             content=ft.Column(
                 tight=True,
                 spacing=4,
@@ -984,8 +985,8 @@ def open_mail_credentials_dialog(
         value="",
         hint_text=get_string("mail_bulk_hint"),
         multiline=True,
-        min_lines=7,
-        max_lines=10,
+        min_lines=10,
+        max_lines=14,
         text_style=_DATA,
         **DLG_FIELD_KWARGS,
     )
@@ -1208,7 +1209,7 @@ def open_mail_credentials_dialog(
     )
 
     inbox_list_col = ft.Column(
-        tight=True,
+        height=440,
         spacing=8,
         scroll=ft.ScrollMode.AUTO,
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -1563,6 +1564,7 @@ def open_mail_credentials_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
@@ -1585,7 +1587,7 @@ def open_mail_credentials_dialog(
             ],
         ),
         content=ft.Container(
-            width=480,
+            width=720,
             content=ft.Column(
                 tight=True,
                 spacing=6,
@@ -1779,7 +1781,7 @@ def open_warmup_sites_dialog(
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         controls=[
             ft.Container(
-                height=420,
+                height=560,
                 content=groups_col,
             ),
         ],
@@ -1896,6 +1898,7 @@ def open_warmup_sites_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
@@ -1918,7 +1921,7 @@ def open_warmup_sites_dialog(
             ],
         ),
         content=ft.Container(
-            width=540,
+            width=840,
             content=ft.Column(
                 tight=True,
                 spacing=6,

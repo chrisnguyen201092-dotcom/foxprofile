@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import pathlib
 from collections.abc import Callable
@@ -7,7 +8,13 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...models.profile import Profile
-from ...services.monitor import extract_proxy_port
+from ...services.monitor import MonitorSnapshot, ProfileMonitorInfo, extract_proxy_port
+from ...services.proxy.geo_check import (
+    derive_ip_metadata,
+    extract_ip_from_check_detail,
+    lookup_ip_isp,
+    lookup_ip_risk,
+)
 from ...utils.proxy_parser import mask_proxy
 from ...utils.validation import validate_profile_name, validate_proxy_format
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
@@ -237,6 +244,7 @@ def open_batch_create_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -253,7 +261,7 @@ def open_batch_create_dialog(
             ],
         ),
         content=ft.Container(
-            width=560,
+            width=780,
             content=ft.Column(
                 spacing=10,
                 tight=True,
@@ -344,7 +352,7 @@ def open_backup_restore_dialog(
     )
     list_col = ft.Column(
         spacing=8,
-        height=300,
+        height=480,
         scroll=ft.ScrollMode.AUTO,
     )
 
@@ -434,6 +442,7 @@ def open_backup_restore_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -444,7 +453,7 @@ def open_backup_restore_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=540,
+            width=760,
             content=ft.Column(
                 spacing=10,
                 tight=True,
@@ -1047,6 +1056,7 @@ def open_proxy_pool_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -1100,7 +1110,7 @@ def open_proxy_pool_dialog(
             ],
         ),
         content=ft.Container(
-            width=740,
+            width=980,
             content=ft.Column(
                 spacing=8,
                 tight=True,
@@ -1124,6 +1134,167 @@ def open_proxy_pool_dialog(
     page.show_dialog(dlg)
 
 
+def _build_ip_score_chip(
+    fraud_score: int | None,
+    *,
+    scamalytics: int | None = None,
+    proxycheck_risk: int | None = None,
+    proxy_flag: bool = False,
+    isp: str = "",
+    asn: str = "",
+    on_click: Callable[[], None] | None = None,
+) -> ft.Container:
+    """Render an artistic IP Fraud / Risk Score badge with symbol and detailed tooltip."""
+    if fraud_score is None:
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+            border_radius=5,
+            bgcolor=COLORS["card_bg"],
+            border=ft.Border.all(1, COLORS["rule_strong"]),
+            ink=on_click is not None,
+            tooltip=get_string("trust_score_all_ips_btn"),
+            on_click=(lambda _: on_click()) if on_click is not None else None,
+            content=ft.Row(
+                spacing=4,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(ft.Icons.RADAR_ROUNDED, size=12, color=COLORS["accent"]),
+                    ft.Text(
+                        get_string("ip_score_unscored"),
+                        size=10.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["accent"],
+                    ),
+                ],
+            ),
+        )
+
+    if fraud_score <= 15:
+        col = "#15803D"
+        icon = ft.Icons.VERIFIED_OUTLINED
+        label = get_string("ip_score_clean", score=fraud_score)
+    elif fraud_score <= 35:
+        col = "#1D4ED8"
+        icon = ft.Icons.SHIELD_OUTLINED
+        label = get_string("ip_score_good", score=fraud_score)
+    elif fraud_score <= 64:
+        col = COLORS["accent"]
+        icon = ft.Icons.GPP_MAYBE_OUTLINED
+        label = get_string("ip_score_medium", score=fraud_score)
+    else:
+        col = COLORS["error"]
+        icon = ft.Icons.GPP_BAD_OUTLINED
+        label = get_string("ip_score_high", score=fraud_score)
+
+    isp_full = " · ".join(x for x in (isp, asn) if x) or "-"
+    tip = get_string(
+        "ip_score_tooltip",
+        score=fraud_score,
+        scam=scamalytics if scamalytics is not None else "-",
+        pc=proxycheck_risk if proxycheck_risk is not None else "-",
+        flag=get_string("ip_flag_yes") if proxy_flag else get_string("ip_flag_no"),
+        isp=isp_full,
+    )
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+        border_radius=5,
+        bgcolor=ft.Colors.with_opacity(0.11, col),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.55, col)),
+        ink=on_click is not None,
+        tooltip=tip,
+        on_click=(lambda _: on_click()) if on_click is not None else None,
+        content=ft.Row(
+            spacing=4,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Icon(icon, size=12, color=col),
+                ft.Text(
+                    label,
+                    size=10.5,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_700,
+                    color=col,
+                ),
+            ],
+        ),
+    )
+
+
+def _build_trust_score_chip(info: ProfileMonitorInfo) -> ft.Container:
+    """Render an Account Warmup & Trust Score badge with tier symbol and breakdown tooltip."""
+    tier = info.trust_tier
+    score = info.trust_score
+    if tier == "banned":
+        col = COLORS["error"]
+        label = get_string("trust_tier_banned")
+    elif tier == "diamond":
+        col = "#15803D"
+        label = get_string("trust_tier_diamond", score=score)
+    elif tier == "trusted":
+        col = "#1D4ED8"
+        label = get_string("trust_tier_trusted", score=score)
+    elif tier == "warming":
+        col = COLORS["accent"]
+        label = get_string("trust_tier_warming", score=score)
+    else:
+        col = COLORS["text_dim"]
+        label = get_string("trust_tier_cold", score=score)
+
+    sess_status = (
+        get_string("trust_badge_gw_ok")
+        if (info.hatch_gw and info.hatch_vml)
+        else (
+            get_string("trust_yes")
+            if info.hatch_gw
+            else (
+                get_string("trust_badge_no_gw")
+                if info.hatch_sess
+                else get_string("trust_no")
+            )
+        )
+    )
+    tip = get_string(
+        "trust_breakdown_tooltip",
+        score=score,
+        datr_age=f"{info.datr_age_days:.1f}" if info.datr_age_days > 0 else str(info.age_days),
+        datr_doms=info.datr_domains,
+        sess=sess_status,
+        cookies=info.cookie_count,
+        ps_l=get_string("trust_yes") if info.has_ps_l else get_string("trust_no"),
+        ext_doms=info.ext_domains,
+        hpages=info.history_pages,
+        chk_scar=(
+            get_string("trust_chk_scar")
+            if info.has_meta_checkpoint
+            else get_string("trust_chk_clean")
+        ),
+        cache2=(
+            get_string("trust_yes")
+            if (info.has_cache2 and info.cookie_count > 0)
+            else get_string("trust_no")
+        ),
+        act_days=info.active_days,
+        sess_cnt=info.session_count,
+        mins=info.total_minutes,
+    )
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+        border_radius=5,
+        bgcolor=ft.Colors.with_opacity(0.09, col),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.45, col)),
+        tooltip=tip,
+        content=ft.Text(
+            label,
+            size=10.5,
+            font_family=FONT_DATA,
+            weight=ft.FontWeight.W_700,
+            color=col,
+        ),
+    )
+
+
 def open_session_history_dialog(
     page: ft.Page,
     profile_name: str,
@@ -1135,18 +1306,58 @@ def open_session_history_dialog(
     initial_tab: str = "sessions",
     on_check_ip_now: Callable[[], None] | None = None,
     on_clear_ip_history: Callable[[], None] | None = None,
+    monitor_info: ProfileMonitorInfo | None = None,
+    on_score_ip: Callable[[str, dict[str, Any]], None] | None = None,
+    on_open_trust_monitor: Callable[[], None] | None = None,
 ) -> None:
-    """Modal dialog showing browser session history and exit IP log for a profile."""
+    """Modal dialog showing browser session history, exit IP log, and IP fraud score for a profile."""
     ip_items: list[dict[str, Any]] = list(ip_history or [])
     active_tab: list[str] = ["ips" if initial_tab == "ips" else "sessions"]
     tab_bar = ft.Row(spacing=8)
-    list_col = ft.Column(spacing=6, height=280, scroll=ft.ScrollMode.AUTO)
+    summary_badges_row = ft.Row(spacing=6, wrap=True)
+    list_col = ft.Column(spacing=6, height=500, scroll=ft.ScrollMode.AUTO)
     clear_ip_btn = ft.TextButton(
         get_string("ip_hist_clear_btn"),
         icon=ft.Icons.DELETE_SWEEP_OUTLINED,
         visible=active_tab[0] == "ips" and bool(ip_items) and on_clear_ip_history is not None,
         style=ft.ButtonStyle(color=COLORS["error"]),
     )
+
+    def _score_single_ip(target_ip: str) -> None:
+        clean = (target_ip or "").strip()
+        if not clean or clean == "-":
+            return
+
+        async def _task() -> None:
+            risk = await asyncio.to_thread(lookup_ip_risk, clean)
+            if risk.get("fraud_score") is not None:
+                if on_score_ip is not None:
+                    on_score_ip(clean, risk)
+                for item in ip_items:
+                    if item.get("ip") == clean:
+                        item["fraud_score"] = risk["fraud_score"]
+                        item["scamalytics"] = risk.get("scamalytics")
+                        item["proxycheck_risk"] = risk.get("proxycheck_risk")
+                        item["proxy_flag"] = bool(risk.get("proxy_flag"))
+                        if risk.get("isp") and not item.get("isp"):
+                            item["isp"] = risk["isp"]
+                        if risk.get("ip_type") and not item.get("ip_type"):
+                            item["ip_type"] = risk["ip_type"]
+                        if risk.get("asn"):
+                            item["asn"] = risk["asn"]
+                if monitor_info is not None and monitor_info.last_exit_ip == clean:
+                    monitor_info.ip_fraud_score = int(risk["fraud_score"])
+                    monitor_info.ip_scamalytics = risk.get("scamalytics")
+                    monitor_info.ip_proxycheck_risk = risk.get("proxycheck_risk")
+                    monitor_info.ip_proxy_flag = bool(risk.get("proxy_flag"))
+                    if risk.get("asn"):
+                        monitor_info.ip_asn = str(risk["asn"])
+                _rebuild_view()
+                with contextlib.suppress(Exception):
+                    page.update()
+
+        if hasattr(page, "run_task"):
+            page.run_task(_task)
 
     def _build_session_rows() -> list[ft.Control]:
         if not sessions:
@@ -1234,6 +1445,12 @@ def open_session_history_dialog(
             ts_val = str(item.get("ts") or "")
             isp_val = str(item.get("isp") or "").strip()
             ip_type_val = str(item.get("ip_type") or "").strip().upper()
+            raw_fraud = item.get("fraud_score")
+            fraud_val = int(raw_fraud) if raw_fraud is not None else None
+            scam_val = item.get("scamalytics")
+            pc_val = item.get("proxycheck_risk")
+            flag_val = bool(item.get("proxy_flag"))
+            asn_val = str(item.get("asn") or "").strip()
             older = ip_items[idx + 1] if idx + 1 < len(ip_items) else None
             older_country = str(older.get("country") or "").strip().upper() if older else ""
             older_ip = str(older.get("ip") or "").strip() if older else ""
@@ -1299,6 +1516,17 @@ def open_session_history_dialog(
                         ),
                     )
                 )
+            top_controls.append(
+                _build_ip_score_chip(
+                    fraud_val,
+                    scamalytics=int(scam_val) if scam_val is not None else None,
+                    proxycheck_risk=int(pc_val) if pc_val is not None else None,
+                    proxy_flag=flag_val,
+                    isp=isp_val,
+                    asn=asn_val,
+                    on_click=lambda target=ip_val: _score_single_ip(target),
+                )
+            )
             if badge_text:
                 top_controls.append(
                     ft.Container(
@@ -1335,6 +1563,7 @@ def open_session_history_dialog(
                                 controls=[
                                     ft.Row(
                                         spacing=6,
+                                        wrap=True,
                                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                         controls=top_controls,
                                     ),
@@ -1401,6 +1630,24 @@ def open_session_history_dialog(
         )
 
     def _rebuild_view() -> None:
+        summary_badges: list[ft.Control] = []
+        if monitor_info is not None:
+            summary_badges.append(_build_trust_score_chip(monitor_info))
+            if monitor_info.last_exit_ip:
+                summary_badges.append(
+                    _build_ip_score_chip(
+                        monitor_info.ip_fraud_score,
+                        scamalytics=monitor_info.ip_scamalytics,
+                        proxycheck_risk=monitor_info.ip_proxycheck_risk,
+                        proxy_flag=monitor_info.ip_proxy_flag,
+                        isp=monitor_info.last_exit_isp,
+                        asn=monitor_info.ip_asn,
+                        on_click=lambda: _score_single_ip(monitor_info.last_exit_ip),
+                    )
+                )
+        summary_badges_row.controls = summary_badges
+        summary_badges_row.visible = bool(summary_badges)
+
         tab_bar.controls = [
             _seg_btn(
                 "sessions",
@@ -1430,8 +1677,35 @@ def open_session_history_dialog(
         if on_check_ip_now is not None:
             on_check_ip_now()
 
+    def _handle_open_full_monitor(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_open_trust_monitor is not None:
+            on_open_trust_monitor()
+
     clear_ip_btn.on_click = _handle_clear_ip
     _rebuild_view()
+
+    top_btns: list[ft.Control] = []
+    if on_open_trust_monitor is not None:
+        top_btns.append(
+            ft.OutlinedButton(
+                get_string("trust_open_full_btn"),
+                icon=ft.Icons.VERIFIED_USER_ROUNDED,
+                height=32,
+                style=OUTLINE_STYLE,
+                on_click=_handle_open_full_monitor,
+            )
+        )
+    if on_check_ip_now is not None:
+        top_btns.append(
+            ft.OutlinedButton(
+                get_string("ip_hist_check_now"),
+                icon=ft.Icons.NETWORK_CHECK,
+                height=32,
+                style=OUTLINE_STYLE,
+                on_click=_handle_check_ip,
+            )
+        )
 
     header_row = ft.Row(
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1442,18 +1716,11 @@ def open_session_history_dialog(
                 size=19,
                 font_family=FONT_BOLD,
                 color=COLORS["text_main"],
+                expand=True,
             ),
             *(
-                [
-                    ft.OutlinedButton(
-                        get_string("ip_hist_check_now"),
-                        icon=ft.Icons.NETWORK_CHECK,
-                        height=32,
-                        style=OUTLINE_STYLE,
-                        on_click=_handle_check_ip,
-                    )
-                ]
-                if on_check_ip_now is not None
+                [ft.Row(spacing=6, tight=True, controls=top_btns)]
+                if top_btns
                 else []
             ),
         ],
@@ -1463,28 +1730,36 @@ def open_session_history_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
         title=ft.Column(
-            spacing=4,
+            spacing=6,
             tight=True,
             controls=[
                 header_row,
-                ft.Text(
-                    get_string(
-                        "session_hist_subtitle",
-                        count=len(sessions),
-                        today=today_mins,
-                        port=last_port or "-",
-                    ),
-                    size=12.5,
-                    color=COLORS["text_sub"],
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(
+                            get_string(
+                                "session_hist_subtitle",
+                                count=len(sessions),
+                                today=today_mins,
+                                port=last_port or "-",
+                            ),
+                            size=12.5,
+                            color=COLORS["text_sub"],
+                        ),
+                        summary_badges_row,
+                    ],
                 ),
             ],
         ),
         content=ft.Container(
-            width=540,
+            width=840,
             content=ft.Column(
                 spacing=10,
                 tight=True,
@@ -1497,6 +1772,616 @@ def open_session_history_dialog(
         ),
         actions=[
             clear_ip_btn,
+            ft.TextButton(
+                get_string("close_btn"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+def open_trust_monitor_dialog(
+    page: ft.Page,
+    get_profiles: Callable[[], list[Profile]],
+    get_snapshot: Callable[[], MonitorSnapshot],
+    on_record_ip_risk: Callable[[str, dict[str, Any]], None],
+    *,
+    check_proxy_fn: Callable[[str, int], tuple[bool, str]] | None = None,
+    on_record_exit_ip: Callable[..., Any] | None = None,
+    on_log: Callable[[str], None] | None = None,
+    on_refresh_main: Callable[[], None] | None = None,
+    initial_tab: str = "scores",
+) -> None:
+    """Modal dashboard for IP Fraud Score, Account Warmup Trust Score, and Cross-Profile Audit."""
+    active_tab: list[str] = ["audit" if initial_tab == "audit" else "scores"]
+    active_filter: list[str] = ["all"]
+    scoring_busy: list[bool] = [False]
+
+    tab_bar = ft.Row(
+        spacing=6,
+        wrap=True,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    table_header_slot = ft.Container()
+    status_banner = ft.Text("", size=12, color=COLORS["accent"], visible=False)
+    list_col = ft.Column(spacing=4, height=580, scroll=ft.ScrollMode.AUTO)
+    score_all_btn = ft.Button(
+        get_string("trust_score_all_ips_btn"),
+        icon=ft.Icons.RADAR_ROUNDED,
+        height=34,
+        style=ACCENT_STYLE,
+    )
+
+    async def _resolve_proxy_exit_ip(proxy_str: str) -> str:
+        if not proxy_str or check_proxy_fn is None:
+            return ""
+        ok, detail = await asyncio.to_thread(check_proxy_fn, proxy_str, 10)
+        if not ok:
+            return ""
+        raw_ip = extract_ip_from_check_detail(detail) or ""
+        if not raw_ip:
+            return ""
+        country, auto_tz, _ = await asyncio.to_thread(derive_ip_metadata, raw_ip, detail)
+        isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+        if on_record_exit_ip is not None:
+            for prof in get_profiles():
+                if prof.proxy == proxy_str:
+                    on_record_exit_ip(
+                        prof.name,
+                        raw_ip,
+                        country=country,
+                        tz=auto_tz or "",
+                        proxy=proxy_str,
+                        isp=isp_name,
+                        ip_type=ip_type,
+                    )
+        return raw_ip
+
+    def _score_ip_async(target_ip: str, proxy_str: str = "") -> None:
+        clean = (target_ip or "").strip()
+        px = (proxy_str or "").strip()
+        if not clean and not px:
+            return
+
+        async def _one() -> None:
+            status_banner.value = get_string("trust_scoring_ips")
+            status_banner.visible = True
+            with contextlib.suppress(Exception):
+                page.update()
+            try:
+                ip_to_score = clean
+                if not ip_to_score and px:
+                    ip_to_score = await _resolve_proxy_exit_ip(px)
+                if ip_to_score:
+                    risk = await asyncio.to_thread(lookup_ip_risk, ip_to_score)
+                    if risk.get("fraud_score") is not None:
+                        on_record_ip_risk(ip_to_score, risk)
+            finally:
+                status_banner.visible = False
+                if on_refresh_main is not None:
+                    on_refresh_main()
+                _rebuild()
+                with contextlib.suppress(Exception):
+                    page.update()
+
+        if hasattr(page, "run_task"):
+            page.run_task(_one)
+
+    def _score_all_ips(_: ft.ControlEvent) -> None:
+        if scoring_busy[0]:
+            return
+        profiles_now = get_profiles()
+        snap = get_snapshot()
+        missing_proxies = sorted(
+            {
+                p.proxy
+                for p in profiles_now
+                if p.proxy
+                and not (snap.profiles.get(p.name) and snap.profiles[p.name].is_banned)
+                and not (snap.profiles.get(p.name) and snap.profiles[p.name].last_exit_ip)
+            }
+        )
+        known_ips = sorted(
+            {
+                info.last_exit_ip
+                for info in snap.profiles.values()
+                if info.last_exit_ip and not info.is_banned
+            }
+        )
+        if not missing_proxies and not known_ips:
+            return
+        scoring_busy[0] = True
+        score_all_btn.disabled = True
+        status_banner.value = get_string("trust_scoring_ips")
+        status_banner.visible = True
+        with contextlib.suppress(Exception):
+            page.update()
+
+        async def _batch() -> None:
+            sem = asyncio.Semaphore(5)
+            scored = 0
+            resolved_ips: set[str] = set(known_ips)
+
+            async def _resolve_worker(px_str: str) -> None:
+                async with sem:
+                    ip_out = await _resolve_proxy_exit_ip(px_str)
+                if ip_out:
+                    resolved_ips.add(ip_out)
+
+            async def _score_worker(ip_addr: str) -> None:
+                nonlocal scored
+                async with sem:
+                    risk = await asyncio.to_thread(lookup_ip_risk, ip_addr)
+                if risk.get("fraud_score") is not None:
+                    scored += 1
+                    on_record_ip_risk(ip_addr, risk)
+
+            try:
+                if missing_proxies and check_proxy_fn is not None:
+                    await asyncio.gather(*(_resolve_worker(px) for px in missing_proxies))
+                if resolved_ips:
+                    await asyncio.gather(*(_score_worker(ip) for ip in sorted(resolved_ips)))
+            finally:
+                scoring_busy[0] = False
+                score_all_btn.disabled = False
+                status_banner.visible = False
+                if scored > 0 and on_log is not None:
+                    on_log(get_string("trust_scored_ips_log", count=scored))
+                if on_refresh_main is not None:
+                    on_refresh_main()
+                _rebuild()
+                with contextlib.suppress(Exception):
+                    page.update()
+
+        if hasattr(page, "run_task"):
+            page.run_task(_batch)
+
+    score_all_btn.on_click = _score_all_ips
+
+    def _switch_tab(tab_key: str) -> None:
+        active_tab[0] = tab_key
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+    def _switch_filter(fid: str) -> None:
+        active_filter[0] = fid
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+    def _seg_btn(tab_key: str, label: str, icon: ft.IconData, alert: bool = False) -> ft.Container:
+        on = active_tab[0] == tab_key
+        col = (
+            COLORS["cover_ink"]
+            if on
+            else (COLORS["error"] if alert else COLORS["text_main"])
+        )
+        return ft.Container(
+            height=34,
+            padding=ft.Padding.symmetric(horizontal=13),
+            border_radius=8,
+            bgcolor=COLORS["sidebar"] if on else COLORS["input_bg"],
+            border=ft.Border.all(
+                1,
+                COLORS["sidebar"]
+                if on
+                else (COLORS["error"] if alert else COLORS["rule_strong"]),
+            ),
+            ink=True,
+            on_click=lambda _, k=tab_key: _switch_tab(k),
+            content=ft.Row(
+                spacing=6,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(icon, size=15, color=col),
+                    ft.Text(
+                        label,
+                        size=12.5,
+                        font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
+                        color=col,
+                    ),
+                ],
+            ),
+        )
+
+    def _fchip(fid: str, label: str) -> ft.Container:
+        on = active_filter[0] == fid
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border_radius=6,
+            bgcolor=COLORS["sidebar"] if on else COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["sidebar"] if on else COLORS["rule_strong"]),
+            ink=True,
+            on_click=lambda _, k=fid: _switch_filter(k),
+            content=ft.Text(
+                label,
+                size=11.5,
+                font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
+                color=COLORS["cover_ink"] if on else COLORS["text_main"],
+            ),
+        )
+
+    def _rebuild() -> None:
+        profiles = get_profiles()
+        snap = get_snapshot()
+        infos = [
+            (p, snap.profiles.get(p.name) or ProfileMonitorInfo(name=p.name))
+            for p in profiles
+        ]
+        c_diamond = sum(1 for _, i in infos if i.trust_tier == "diamond")
+        c_trusted = sum(1 for _, i in infos if i.trust_tier == "trusted")
+        c_warming = sum(1 for _, i in infos if i.trust_tier in ("warming", "cold"))
+
+        left_toolbar: list[ft.Control] = [
+            _seg_btn(
+                "scores",
+                f"Điểm Trust & IP ({len(profiles)})",
+                ft.Icons.VERIFIED_USER_OUTLINED,
+            ),
+            _seg_btn(
+                "audit",
+                f"Kiểm toán ({len(snap.audit_findings)})",
+                ft.Icons.SHIELD_OUTLINED,
+                alert=bool(snap.audit_findings),
+            ),
+        ]
+        if active_tab[0] == "scores":
+            left_toolbar.extend(
+                [
+                    ft.Container(
+                        width=1,
+                        height=20,
+                        bgcolor=COLORS["rule_strong"],
+                        margin=ft.Margin.symmetric(horizontal=2),
+                    ),
+                    _fchip("all", get_string("trust_filter_all", count=len(infos))),
+                    _fchip("diamond", get_string("trust_filter_diamond", count=c_diamond)),
+                    _fchip("trusted", get_string("trust_filter_trusted", count=c_trusted)),
+                    _fchip("warming", get_string("trust_filter_warming", count=c_warming)),
+                ]
+            )
+
+        tab_bar.controls = left_toolbar
+
+        if active_tab[0] == "audit":
+            table_header_slot.visible = False
+            if not snap.audit_findings:
+                list_col.controls = [
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=24, vertical=44),
+                        border_radius=10,
+                        bgcolor=ft.Colors.with_opacity(0.07, "#059669"),
+                        border=ft.Border.all(1, "#059669"),
+                        alignment=ft.Alignment(0, 0),
+                        content=ft.Column(
+                            spacing=6,
+                            tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Icon(
+                                    ft.Icons.VERIFIED_ROUNDED,
+                                    size=36,
+                                    color="#059669",
+                                ),
+                                ft.Text(
+                                    get_string("audit_all_clear_title"),
+                                    size=15,
+                                    font_family=FONT_BOLD,
+                                    color="#059669",
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
+                                ft.Text(
+                                    get_string("audit_all_clear_desc"),
+                                    size=12.5,
+                                    color=COLORS["text_sub"],
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
+                            ],
+                        ),
+                    )
+                ]
+            else:
+                audit_rows: list[ft.Control] = []
+                for f in snap.audit_findings:
+                    is_crit = f.level == "critical"
+                    col = COLORS["error"] if is_crit else COLORS["warning"]
+                    icon = (
+                        ft.Icons.GPP_BAD_ROUNDED
+                        if is_crit
+                        else ft.Icons.WARNING_AMBER_ROUNDED
+                    )
+                    audit_rows.append(
+                        ft.Container(
+                            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                            border_radius=8,
+                            bgcolor=COLORS["input_bg"],
+                            border=ft.Border.all(1, col),
+                            content=ft.Row(
+                                spacing=10,
+                                vertical_alignment=ft.CrossAxisAlignment.START,
+                                controls=[
+                                    ft.Icon(icon, size=19, color=col),
+                                    ft.Column(
+                                        spacing=2,
+                                        tight=True,
+                                        expand=True,
+                                        controls=[
+                                            ft.Text(
+                                                f.title,
+                                                size=13,
+                                                font_family=FONT_SEMIBOLD,
+                                                color=COLORS["text_main"],
+                                            ),
+                                            ft.Text(
+                                                f.detail,
+                                                size=12,
+                                                color=COLORS["text_sub"],
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        )
+                    )
+                list_col.controls = audit_rows
+            return
+
+        table_header_slot.visible = True
+        table_header_slot.content = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            border_radius=6,
+            bgcolor=COLORS["bg"],
+            border=ft.Border.all(1, COLORS["border"]),
+            content=ft.Row(
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text(
+                        "PROFILE",
+                        width=200,
+                        size=11,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_dim"],
+                    ),
+                    ft.Text(
+                        "ĐỘ CHÍN TRUST",
+                        width=142,
+                        size=11,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_dim"],
+                    ),
+                    ft.Text(
+                        "TRẠNG THÁI NUÔI & PHIÊN",
+                        expand=True,
+                        size=11,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_dim"],
+                    ),
+                    ft.Text(
+                        "ĐỊA CHỈ IP & ĐỘ SẠCH",
+                        width=215,
+                        size=11,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_dim"],
+                        text_align=ft.TextAlign.RIGHT,
+                    ),
+                ],
+            ),
+        )
+
+        flt = active_filter[0]
+        if flt == "diamond":
+            infos = [(p, i) for p, i in infos if i.trust_tier == "diamond"]
+        elif flt == "trusted":
+            infos = [(p, i) for p, i in infos if i.trust_tier == "trusted"]
+        elif flt == "warming":
+            infos = [(p, i) for p, i in infos if i.trust_tier in ("warming", "cold")]
+
+        infos.sort(key=lambda pair: (pair[1].is_banned, -pair[1].trust_score, pair[0].name.casefold()))
+
+        score_rows: list[ft.Control] = []
+        for p, info in infos:
+            # Build clean 1-line human summary for Col 3
+            summary_parts: list[str] = []
+            if info.hatch_gw:
+                summary_parts.append("Đã vào Muse")
+            elif info.hatch_sess:
+                summary_parts.append("Thiếu GW")
+            else:
+                summary_parts.append("Chưa vào Muse")
+
+            if info.datr_age_days >= 0.5:
+                summary_parts.append(f"Cookie {info.datr_age_days:.0f}d")
+            elif info.cookie_count > 0:
+                summary_parts.append(f"{info.cookie_count} cookie")
+
+            if info.active_days > 0:
+                summary_parts.append(f"Mở {info.active_days}d ({info.session_count} phiên)")
+
+            summary_str = " · ".join(summary_parts)
+
+            right_controls: list[ft.Control] = []
+            if info.last_exit_ip:
+                ip_short = info.last_exit_ip
+                if ":" in ip_short and len(ip_short) > 16:
+                    segs = ip_short.split(":")
+                    if len(segs) >= 4:
+                        ip_short = f"{segs[0]}:..:{segs[-1]}"
+                ip_lbl = (
+                    f"{ip_short} ({info.last_exit_country})"
+                    if info.last_exit_country
+                    else ip_short
+                )
+                right_controls.append(
+                    ft.Text(
+                        ip_lbl,
+                        size=11,
+                        font_family=FONT_DATA,
+                        color=COLORS["text_sub"],
+                        tooltip=f"{info.last_exit_ip} · {info.last_exit_isp or '-'}",
+                    )
+                )
+                right_controls.append(
+                    _build_ip_score_chip(
+                        info.ip_fraud_score,
+                        scamalytics=info.ip_scamalytics,
+                        proxycheck_risk=info.ip_proxycheck_risk,
+                        proxy_flag=info.ip_proxy_flag,
+                        isp=info.last_exit_isp,
+                        asn=info.ip_asn,
+                        on_click=lambda target=info.last_exit_ip, px=p.proxy or "": _score_ip_async(
+                            target, px
+                        ),
+                    )
+                )
+            elif p.proxy:
+                right_controls.append(
+                    ft.Text(
+                        info.port or mask_proxy(p.proxy),
+                        size=11,
+                        font_family=FONT_DATA,
+                        color=COLORS["text_dim"],
+                    )
+                )
+                right_controls.append(
+                    _build_ip_score_chip(
+                        None,
+                        on_click=lambda px=p.proxy or "": _score_ip_async("", px),
+                    )
+                )
+            else:
+                right_controls.append(
+                    ft.Text(
+                        get_string("no_proxy_short"),
+                        size=11,
+                        color=COLORS["text_dim"],
+                    )
+                )
+
+            sub_email = (
+                p.email
+                if (getattr(p, "email", None) and p.email not in p.name)
+                else (info.port or "")
+            )
+            score_rows.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                    border_radius=7,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["border"]),
+                    content=ft.Row(
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                width=200,
+                                content=ft.Row(
+                                    spacing=5,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    controls=[
+                                        ft.Text(
+                                            p.name,
+                                            size=12.5,
+                                            font_family=FONT_SEMIBOLD,
+                                            color=COLORS["text_main"],
+                                            no_wrap=True,
+                                            overflow=ft.TextOverflow.ELLIPSIS,
+                                        ),
+                                        *(
+                                            [
+                                                ft.Text(
+                                                    sub_email,
+                                                    size=10.5,
+                                                    font_family=FONT_DATA,
+                                                    color=COLORS["text_dim"],
+                                                    no_wrap=True,
+                                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                                    expand=True,
+                                                )
+                                            ]
+                                            if sub_email
+                                            else []
+                                        ),
+                                    ],
+                                ),
+                            ),
+                            ft.Container(
+                                width=142,
+                                alignment=ft.Alignment(-1, 0),
+                                content=_build_trust_score_chip(info),
+                            ),
+                            ft.Text(
+                                summary_str,
+                                expand=True,
+                                size=11.5,
+                                color=COLORS["text_sub"],
+                                no_wrap=True,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                                tooltip=summary_str,
+                            ),
+                            ft.Container(
+                                width=215,
+                                alignment=ft.Alignment(1, 0),
+                                content=ft.Row(
+                                    spacing=5,
+                                    tight=True,
+                                    alignment=ft.MainAxisAlignment.END,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    controls=right_controls,
+                                ),
+                            ),
+                        ],
+                    ),
+                )
+            )
+        list_col.controls = score_rows
+
+    _rebuild()
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
+        title_padding=ft.Padding.only(left=24, right=24, top=18, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=6, bottom=16),
+        title=ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Column(
+                    spacing=2,
+                    tight=True,
+                    controls=[
+                        ft.Text(
+                            get_string("trust_monitor_title"),
+                            size=17.5,
+                            font_family=FONT_BOLD,
+                            color=COLORS["text_main"],
+                        ),
+                        status_banner,
+                    ],
+                ),
+                score_all_btn,
+            ],
+        ),
+        content=ft.Container(
+            width=860,
+            content=ft.Column(
+                spacing=8,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    tab_bar,
+                    table_header_slot,
+                    list_col,
+                ],
+            ),
+        ),
+        actions=[
             ft.TextButton(
                 get_string("close_btn"),
                 style=ft.ButtonStyle(color=COLORS["text_sub"]),

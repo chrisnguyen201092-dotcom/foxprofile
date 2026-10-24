@@ -54,7 +54,7 @@ def open_custom_page_dialog(
         font_family=FONT_SEMIBOLD,
         color=COLORS["text_sub"],
     )
-    list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=220)
+    list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=420)
 
     def _filtered_profiles() -> list:
         q = (filter_field.value or "").strip().lower()
@@ -190,6 +190,7 @@ def open_custom_page_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -200,7 +201,7 @@ def open_custom_page_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=440,
+            width=640,
             content=ft.Column(
                 tight=True,
                 spacing=8,
@@ -331,6 +332,7 @@ def open_add_to_page_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -341,7 +343,7 @@ def open_add_to_page_dialog(
             color=COLORS["text_main"],
         ),
         content=ft.Container(
-            width=400,
+            width=540,
             content=ft.Column(
                 tight=True,
                 spacing=8,

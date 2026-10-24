@@ -195,6 +195,13 @@ def monitor_overview(
                 "last_exit_ip": info.last_exit_ip if info else "",
                 "last_exit_country": info.last_exit_country if info else "",
                 "last_exit_ip_type": info.last_exit_ip_type if info else "",
+                "ip_fraud_score": info.ip_fraud_score if info else None,
+                "ip_scamalytics": info.ip_scamalytics if info else None,
+                "ip_proxycheck_risk": info.ip_proxycheck_risk if info else None,
+                "ip_proxy_flag": bool(info.ip_proxy_flag) if info else False,
+                "trust_score": info.trust_score if info else 0,
+                "trust_tier": info.trust_tier if info else "cold",
+                "audit_codes": list(info.audit_codes) if info else [],
                 "today_minutes": info.today_minutes if info else 0,
             }
         )
@@ -205,9 +212,23 @@ def monitor_overview(
         "ready_count": ready_count,
         "cooldown_count": cooldown_count,
         "warning_count": warning_count,
+        "diamond_count": snap.diamond_count,
+        "trusted_count": snap.trusted_count,
+        "clean_ip_count": snap.clean_ip_count,
+        "scored_ip_count": snap.scored_ip_count,
         "cooldown_target_minutes": cd_target,
         "proxy_collisions": [
             {"port": port, "profiles": names} for port, names in snap.proxy_collisions
+        ],
+        "audit_findings": [
+            {
+                "code": f.code,
+                "level": f.level,
+                "title": f.title,
+                "detail": f.detail,
+                "profiles": list(f.profiles),
+            }
+            for f in snap.audit_findings
         ],
         "profiles": items,
     }

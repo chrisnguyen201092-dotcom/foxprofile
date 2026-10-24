@@ -102,7 +102,10 @@ class App:
 
     def run(self) -> None:
         setup_windows_taskbar_icon()
-        ft.run(self._main, assets_dir=ASSETS_DIR)
+        try:
+            ft.run(self._main, assets_dir=ASSETS_DIR)
+        finally:
+            self.page = None
 
     def _main(self, page: ft.Page) -> None:
         self.page = page
@@ -596,6 +599,8 @@ class App:
                 cooldown_chip_label=self._cooldown_chip_text(),
                 on_open_cooldown=self.h.on_open_cooldown_settings,
                 on_open_warmup_sites=self.h.on_open_warmup_sites,
+                on_open_trust_monitor=self.h.on_open_trust_monitor,
+                audit_alert=bool(snap.audit_findings),
             )
             if page_profiles
             else None

@@ -539,6 +539,87 @@ STRINGS: dict[str, dict[str, str]] = {
         "warmup_reset_default_btn": "Reset Default",
         "warmup_saved_log": "Saved warmup sites list",
         "warmup_copy_pill": "Copy",
+        "trust_monitor_btn": "Trust & IP Monitor",
+        "trust_monitor_title": "Trust Score, IP Cleanliness & Cross-Profile Audit",
+        "trust_monitor_subtitle": "Read-only inspection of account warmup readiness, Scamalytics/ProxyCheck IP fraud scores, and cross-profile correlation risks.",
+        "trust_tab_scores": "Trust & IP Score ({count})",
+        "trust_tab_audit": "Cross-Profile Audit ({count})",
+        "trust_kpi_high": "✦ High Trust (≥60)",
+        "trust_kpi_clean_ip": "✦ Clean IP (≤25pt)",
+        "trust_kpi_audit": "Audit Risks",
+        "trust_kpi_audit_ok": "✦ 0 Issues",
+        "trust_kpi_ports": "Active Ports",
+        "trust_filter_all": "All ({count})",
+        "trust_filter_diamond": "✦ Diamond ({count})",
+        "trust_filter_trusted": "◈ Trusted ({count})",
+        "trust_filter_warming": "◇ Warming ({count})",
+        "trust_filter_alerts": "❖ Alerts ({count})",
+        "trust_score_all_ips_btn": "✦ Score All IPs",
+        "trust_scoring_ips": "Scoring IPs via Scamalytics & ProxyCheck...",
+        "trust_scored_ips_log": "Scored {count} exit IP(s) via Scamalytics & ProxyCheck",
+        "ip_score_clean": "✦ {score}pt · Clean",
+        "ip_score_good": "◈ {score}pt · Good",
+        "ip_score_medium": "▲ {score}pt · Med",
+        "ip_score_high": "❖ {score}pt · Risk",
+        "ip_score_unscored": "◌ Score IP",
+        "ip_score_tooltip": (
+            "✦ IP Fraud / Risk Score: {score}/100 (lower is cleaner)\n"
+            "• Scamalytics Fraud Score: {scam}/100\n"
+            "• ProxyCheck Risk: {pc}/100\n"
+            "• Proxy / VPN Flag: {flag}\n"
+            "• ISP / ASN: {isp}"
+        ),
+        "ip_flag_yes": "⚠ Flagged (Proxy/VPN)",
+        "ip_flag_no": "✦ Clean (Not flagged)",
+        "trust_tier_diamond": "✦ {score}pt · Diamond",
+        "trust_tier_trusted": "◈ {score}pt · Trusted",
+        "trust_tier_warming": "◇ {score}pt · Warming",
+        "trust_tier_cold": "○ {score}pt · New",
+        "trust_tier_banned": "✕ Banned / Hold",
+        "trust_breakdown_tooltip": (
+            "Meta Sigma & Hatch OIDC Trust Score: {score}/100\n"
+            "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} domain(s)\n"
+            "• Multi-Day Login Rhythm: {act_days} active day(s) · {sess_cnt} session(s) ({mins}m)\n"
+            "• Hatch VM Session (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookies)\n"
+            "• Meta Off-Site Pixel (`ps_l`/`ps_n`): {ps_l} · External Web: {ext_doms} domain(s) ({hpages} pages)\n"
+            "• Prior Meta Checkpoint Scar: {chk_scar}\n"
+            "• HTTP Cache2 ETag Sync: {cache2}\n"
+            "── Meta Gates: 🛡️ Trusted requires hatch_gw + datr ≥3d + ≥2 active days; 💎 Diamond requires datr ≥7d + ≥4 active days + 0 Checkpoint"
+        ),
+        "trust_yes": "✦ Ready",
+        "trust_no": "○ None",
+        "trust_chk_clean": "✦ Clean (0 Checkpoint)",
+        "trust_chk_scar": "⚠ Flagged (-20pt)",
+        "trust_badge_datr": "🔑 datr {days}d·{doms}m",
+        "trust_badge_gw_ok": "✦ GW+VML",
+        "trust_badge_no_gw": "⚠ Missing hatch_gw",
+        "trust_badge_chk_scar": "⚠ Checkpoint Scar",
+        "trust_badge_pixel": "✦ Pixel ps_l",
+        "trust_badge_recaptcha": "✦ Recaptcha",
+        "trust_badge_sess": "◈ Session",
+        "trust_badge_web": "🌐 {doms} ext·{pages}p",
+        "trust_badge_cache": "📦 Cache2",
+        "trust_open_full_btn": "🛡️ Full Trust Monitor",
+        "audit_all_clear_title": "✦ All Clear — Zero Correlation or Leak Risks Detected",
+        "audit_all_clear_desc": "Every profile has independent credentials, unique device fingerprints, and no active profile shares a proxy port or IP with a banned account.",
+        "audit_burned_proxy_title": "☣️ [{name}] Shares Proxy Port ({port}) with Banned Account",
+        "audit_burned_proxy_detail": "Active profile '{name}' is using proxy port {port}, which was also assigned to banned/held account(s): {banned}.",
+        "audit_burned_ip_title": "☣️ [{name}] Shares Exit IP ({ip}) with Banned Account",
+        "audit_burned_ip_detail": "Active profile '{name}' resolved to exit IP {ip}, previously recorded on banned/held account(s): {banned}.",
+        "audit_burned_subnet_title": "⚠️ [{name}] Shares IPv6 /64 Subnet ({subnet}) with Banned Account",
+        "audit_burned_subnet_detail": "Active profile '{name}' is in the same IPv6 /64 block ({subnet}) as banned/held account(s): {banned}.",
+        "audit_dup_email_title": "🔑 Duplicate Email Across Profiles ({email})",
+        "audit_dup_email_detail": "Shared on profiles: {names}",
+        "audit_dup_2fa_title": "🔑 Duplicate 2FA Secret (TOTP) Across Profiles",
+        "audit_dup_2fa_detail": "Shared on profiles: {names}",
+        "audit_dup_token_title": "🔑 Duplicate OAuth2 Refresh Token Across Profiles",
+        "audit_dup_token_detail": "Shared on profiles: {names}",
+        "audit_dup_fp_title": "🖥️ Identical Device Fingerprint File (Clone Leak)",
+        "audit_dup_fp_detail": "Exact same fingerprint.json shared by: {names}. Reset fingerprint on one of them before launching.",
+        "audit_same_port_hw_title": "🖥️ Identical Hardware Signature on Same Proxy Port ({port})",
+        "audit_same_port_hw_detail": "Profiles on {port} have identical OS/Screen/GPU ({hw}): {names}",
+        "audit_high_fraud_ip_title": "🚨 [{name}] High IP Fraud Score ({score}pt)",
+        "audit_high_fraud_ip_detail": "Exit IP {ip} on '{name}' has a high fraud/risk score ({score}/100) or proxy blacklist flag.",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -1078,6 +1159,87 @@ STRINGS: dict[str, dict[str, str]] = {
         "warmup_reset_default_btn": "Khôi phục mặc định",
         "warmup_saved_log": "Đã lưu danh sách trang web nuôi trust",
         "warmup_copy_pill": "Copy",
+        "trust_monitor_btn": "Giám sát Điểm IP & Trust",
+        "trust_monitor_title": "Giám sát Điểm IP, Độ Chín Trust & Kiểm toán Chéo",
+        "trust_monitor_subtitle": "Kiểm tra chỉ-đọc (100% an toàn) điểm độ sạch IP (Scamalytics · ProxyCheck), điểm độ chín tài khoản và rà soát trùng lặp chéo.",
+        "trust_tab_scores": "Điểm Trust & Độ sạch IP ({count})",
+        "trust_tab_audit": "Kiểm toán Chống Tương quan ({count})",
+        "trust_kpi_high": "✦ Trust Cao (≥60đ)",
+        "trust_kpi_clean_ip": "✦ IP Sạch (≤25pt)",
+        "trust_kpi_audit": "Kiểm toán Chéo",
+        "trust_kpi_audit_ok": "✦ 0 Rủi ro",
+        "trust_kpi_ports": "Cổng Đang Mở",
+        "trust_filter_all": "Tất cả ({count})",
+        "trust_filter_diamond": "✦ Kim Cương ({count})",
+        "trust_filter_trusted": "◈ Tin cậy ({count})",
+        "trust_filter_warming": "◇ Đang nuôi ({count})",
+        "trust_filter_alerts": "❖ Có cảnh báo ({count})",
+        "trust_score_all_ips_btn": "✦ Chấm điểm tất cả IP",
+        "trust_scoring_ips": "Đang chấm điểm độ sạch IP qua Scamalytics & ProxyCheck...",
+        "trust_scored_ips_log": "Đã chấm điểm độ sạch cho {count} địa chỉ IP (Scamalytics & ProxyCheck)",
+        "ip_score_clean": "✦ {score}pt · Sạch",
+        "ip_score_good": "◈ {score}pt · Tốt",
+        "ip_score_medium": "▲ {score}pt · TB",
+        "ip_score_high": "❖ {score}pt · Rủi ro",
+        "ip_score_unscored": "◌ Chấm IP",
+        "ip_score_tooltip": (
+            "✦ Điểm độ sạch IP: {score}/100 (càng thấp càng sạch)\n"
+            "• Scamalytics Fraud Score: {scam}/100\n"
+            "• ProxyCheck Risk: {pc}/100\n"
+            "• Cờ Proxy / VPN: {flag}\n"
+            "• Nhà mạng (ISP/ASN): {isp}"
+        ),
+        "ip_flag_yes": "⚠ Bị gắn cờ Proxy/VPN",
+        "ip_flag_no": "✦ Ẩn danh sạch (Không bị gắn cờ)",
+        "trust_tier_diamond": "✦ {score}đ · Kim Cương",
+        "trust_tier_trusted": "◈ {score}đ · Tin cậy",
+        "trust_tier_warming": "◇ {score}đ · Đang nuôi",
+        "trust_tier_cold": "○ {score}đ · Mới",
+        "trust_tier_banned": "✕ Tạm ngưng / Ban",
+        "trust_breakdown_tooltip": (
+            "Điểm Trust Meta Sigma & Hatch OIDC: {score}/100\n"
+            "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày tuổi · đồng bộ {datr_doms} miền\n"
+            "• Nhịp đăng nhập nhiều ngày: {act_days} ngày mở · {sess_cnt} phiên ({mins}p)\n"
+            "• Phiên Hatch VM (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookie)\n"
+            "• Tín hiệu Meta Pixel (`ps_l`/`ps_n`): {ps_l} · Web ngoài: {ext_doms} miền ({hpages} trang)\n"
+            "• Vết sẹo Checkpoint Meta: {chk_scar}\n"
+            "• Đồng bộ ETag HTTP Cache2: {cache2}\n"
+            "── Chuẩn Meta: 🛡️ Tin cậy cần có hatch_gw + datr ≥3 ngày + ≥2 ngày mở; 💎 Kim Cương cần datr ≥7 ngày + ≥4 ngày mở + 0 Checkpoint"
+        ),
+        "trust_yes": "✦ Đã có",
+        "trust_no": "○ Chưa có",
+        "trust_chk_clean": "✦ Sạch (Chưa từng bị)",
+        "trust_chk_scar": "⚠ Từng dính Checkpoint (-20đ)",
+        "trust_badge_datr": "🔑 datr {days}d·{doms}m",
+        "trust_badge_gw_ok": "✦ GW+VML",
+        "trust_badge_no_gw": "⚠ Thiếu hatch_gw",
+        "trust_badge_chk_scar": "⚠ Sẹo Checkpoint",
+        "trust_badge_pixel": "✦ Pixel ps_l",
+        "trust_badge_recaptcha": "✦ Recaptcha",
+        "trust_badge_sess": "◈ Phiên",
+        "trust_badge_web": "🌐 {doms} ngoài·{pages}tr",
+        "trust_badge_cache": "📦 Cache2",
+        "trust_open_full_btn": "🛡️ Bảng Giám sát Tổng",
+        "audit_all_clear_title": "✦ Tuyệt vời — Không phát hiện rủi ro tương quan hay rò rỉ chéo",
+        "audit_all_clear_desc": "Toàn bộ các Profile đều có thông tin đăng nhập độc lập, Fingerprint riêng biệt và không có Profile sống nào dùng chung Cổng Proxy hay IP với tài khoản đã bị Ban.",
+        "audit_burned_proxy_title": "☣️ [{name}] Dùng chung Cổng Proxy ({port}) với Acc đã bị Ban",
+        "audit_burned_proxy_detail": "Profile đang hoạt động '{name}' đang gắn cổng proxy {port} — trùng với tài khoản đã bị Tạm ngưng/Ban: {banned}.",
+        "audit_burned_ip_title": "☣️ [{name}] Trùng địa chỉ Exit IP ({ip}) với Acc đã bị Ban",
+        "audit_burned_ip_detail": "Profile '{name}' có IP ra {ip} trùng với IP từng ghi nhận trên tài khoản đã bị Tạm ngưng/Ban: {banned}.",
+        "audit_burned_subnet_title": "⚠️ [{name}] Cùng dải mạng IPv6 /64 ({subnet}) với Acc đã bị Ban",
+        "audit_burned_subnet_detail": "Profile '{name}' nằm cùng dải IPv6 /64 ({subnet}) với tài khoản đã bị Tạm ngưng/Ban: {banned}.",
+        "audit_dup_email_title": "🔑 Trùng lặp Email đăng nhập ({email})",
+        "audit_dup_email_detail": "Các profile đang dùng chung Email này: {names}",
+        "audit_dup_2fa_title": "🔑 Trùng lặp Mã khoá 2FA (TOTP Secret)",
+        "audit_dup_2fa_detail": "Các profile đang dùng chung chuỗi 2FA: {names}",
+        "audit_dup_token_title": "🔑 Trùng lặp Refresh Token OAuth2 Mail",
+        "audit_dup_token_detail": "Các profile đang dùng chung Refresh Token: {names}",
+        "audit_dup_fp_title": "🖥️ Trùng lặp nguyên bản File Fingerprint (Rò rỉ nhân bản)",
+        "audit_dup_fp_detail": "Các profile có file fingerprint.json giống hệt nhau 100%: {names}. Hãy bấm 'Tạo fingerprint mới' cho 1 bên trước khi mở.",
+        "audit_same_port_hw_title": "🖥️ Trùng cấu hình phần cứng trên cùng Cổng Proxy ({port})",
+        "audit_same_port_hw_detail": "Các profile chung cổng {port} có cùng Hệ điều hành/Màn hình/GPU ({hw}): {names}",
+        "audit_high_fraud_ip_title": "🚨 [{name}] Điểm rủi ro IP cao ({score}pt)",
+        "audit_high_fraud_ip_detail": "IP {ip} của '{name}' có Fraud Score cao ({score}/100) hoặc bị gắn cờ Proxy/VPN.",
     },
 }
 

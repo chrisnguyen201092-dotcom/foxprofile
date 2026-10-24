@@ -179,6 +179,8 @@ _DC_KEYWORDS = (
     "hivelocity",
 )
 _ISP_MEMO: dict[str, tuple[str, str]] = {}
+_IP_RISK_MEMO: dict[str, dict[str, Any]] = {}
+_SCAMALYTICS_SCORE_RE = re.compile(r"Fraud\s+Score:\s*(\d{1,3})\b", re.IGNORECASE)
 
 
 def classify_isp_type(isp_or_org: str | None, hosting_flag: bool | None = None) -> str:
@@ -226,6 +228,150 @@ def lookup_ip_isp(ip: str | None, timeout: float = 3.5) -> tuple[str, str]:
     except Exception:
         pass
     return "", ""
+
+
+def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
+    """Query Scamalytics, ProxyCheck.io, and ip-api.com for IP fraud/risk score (0-100).
+
+    Returns a dict with keys:
+      `ip`, `fraud_score` (int | None), `scamalytics` (int | None),
+      `proxycheck_risk` (int | None), `proxy_flag` (bool), `ip_type` ('ISP'|'DC'|''),
+      `detail_type` (str), `isp` (str), `asn` (str).
+    """
+    clean_ip = (ip or "").strip()
+    empty: dict[str, Any] = {
+        "ip": clean_ip,
+        "fraud_score": None,
+        "scamalytics": None,
+        "proxycheck_risk": None,
+        "proxy_flag": False,
+        "ip_type": "",
+        "detail_type": "",
+        "isp": "",
+        "asn": "",
+    }
+    if not clean_ip:
+        return empty
+    cached = _IP_RISK_MEMO.get(clean_ip)
+    if cached is not None:
+        return dict(cached)
+
+    import requests
+
+    def _q_scamalytics() -> int | None:
+        try:
+            r = requests.get(
+                f"https://scamalytics.com/ip/{clean_ip}",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                m = _SCAMALYTICS_SCORE_RE.search(r.text)
+                if m:
+                    return max(0, min(100, int(m.group(1))))
+        except Exception:
+            pass
+        return None
+
+    def _q_proxycheck() -> dict[str, Any]:
+        try:
+            r = requests.get(
+                f"https://proxycheck.io/v2/{clean_ip}?vpn=1&asn=1&risk=1",
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                node = data.get(clean_ip) if isinstance(data, dict) else None
+                if isinstance(node, dict):
+                    return node
+        except Exception:
+            pass
+        return {}
+
+    def _q_ipapi() -> dict[str, Any]:
+        try:
+            r = requests.get(
+                f"http://ip-api.com/json/{clean_ip}?fields=status,isp,org,as,mobile,proxy,hosting",
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict) and data.get("status") == "success":
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        f_scam = pool.submit(_q_scamalytics)
+        f_pc = pool.submit(_q_proxycheck)
+        f_api = pool.submit(_q_ipapi)
+        try:
+            scam_score = f_scam.result(timeout=timeout + 1.0)
+        except Exception:
+            scam_score = None
+        try:
+            pc_data = f_pc.result(timeout=timeout + 1.0)
+        except Exception:
+            pc_data = {}
+        try:
+            api_data = f_api.result(timeout=timeout + 1.0)
+        except Exception:
+            api_data = {}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    pc_risk: int | None = None
+    if "risk" in pc_data and pc_data["risk"] is not None:
+        try:
+            pc_risk = max(0, min(100, int(pc_data["risk"])))
+        except (TypeError, ValueError):
+            pc_risk = None
+
+    proxy_flag = bool(
+        str(pc_data.get("proxy") or "").lower() == "yes"
+        or api_data.get("proxy") is True
+    )
+    raw_isp = str(
+        api_data.get("isp")
+        or api_data.get("org")
+        or pc_data.get("provider")
+        or pc_data.get("organisation")
+        or ""
+    ).strip()
+    asn_str = str(pc_data.get("asn") or api_data.get("as") or "").split()[0].strip()
+    detail_type = str(pc_data.get("type") or "").strip()
+    hosting_flag = api_data.get("hosting")
+    if not isinstance(hosting_flag, bool) and detail_type:
+        hosting_flag = detail_type.lower() in ("hosting", "vpn", "datacenter")
+    ip_type = classify_isp_type(raw_isp, hosting_flag if isinstance(hosting_flag, bool) else None)
+    if raw_isp and ip_type:
+        _ISP_MEMO[clean_ip] = (raw_isp, ip_type)
+
+    scores = [s for s in (scam_score, pc_risk) if s is not None]
+    fraud_score: int | None = None
+    if scam_score is not None and pc_risk is not None:
+        fraud_score = scam_score if scam_score >= pc_risk else round((scam_score * 2 + pc_risk) / 3)
+    elif scores:
+        fraud_score = scores[0]
+    if fraud_score is not None and proxy_flag and fraud_score < 35:
+        fraud_score = 35
+
+    res = {
+        "ip": clean_ip,
+        "fraud_score": fraud_score,
+        "scamalytics": scam_score,
+        "proxycheck_risk": pc_risk,
+        "proxy_flag": proxy_flag,
+        "ip_type": ip_type,
+        "detail_type": detail_type,
+        "isp": raw_isp,
+        "asn": asn_str,
+    }
+    if fraud_score is not None or raw_isp:
+        _IP_RISK_MEMO[clean_ip] = res
+    return dict(res)
 
 
 def extract_ip_from_check_detail(detail: str) -> str | None:

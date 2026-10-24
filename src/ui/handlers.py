@@ -12,6 +12,7 @@ from ..services.proxy.geo_check import (
     derive_ip_metadata,
     extract_ip_from_check_detail,
     lookup_ip_isp,
+    lookup_ip_risk,
 )
 from ..utils.totp import (
     format_oauth_reader_line,
@@ -47,6 +48,7 @@ from .dialogs import (
     open_session_history_dialog,
     open_status_dialog,
     open_trash_dialog,
+    open_trust_monitor_dialog,
     open_warmup_sites_dialog,
 )
 from .refs import UIRefs
@@ -192,6 +194,11 @@ class AppHandlers:
                 self._monitor.clear_ip_history(name)
                 self._refresh()
 
+        def _score_ip(ip_addr: str, risk_data: dict) -> None:
+            if self._monitor is not None:
+                self._monitor.record_ip_risk(ip_addr, risk_data)
+                self._state.schedule_refresh()
+
         open_session_history_dialog(
             page,
             name,
@@ -204,10 +211,41 @@ class AppHandlers:
                 (lambda: self.on_quick_check_proxy(name)) if p is not None and p.proxy else None
             ),
             on_clear_ip_history=_clear_ips,
+            monitor_info=info,
+            on_score_ip=_score_ip,
+            on_open_trust_monitor=lambda: self.on_open_trust_monitor(),
         )
 
     def on_open_ip_history(self, name: str) -> None:
         self.on_open_session_history(name, initial_tab="ips")
+
+    def on_open_trust_monitor(self, initial_tab: str = "scores") -> None:
+        page = self._get_page()
+        if page is None or self._monitor is None:
+            return
+
+        def _get_snap():
+            assert self._monitor is not None
+            return self._monitor.snapshot(
+                self._pm.list_profiles(),
+                self._bl.running_profile_names() | set(self._state.loading),
+            )
+
+        def _record_risk(ip_addr: str, risk_data: dict) -> None:
+            if self._monitor is not None:
+                self._monitor.record_ip_risk(ip_addr, risk_data)
+
+        open_trust_monitor_dialog(
+            page,
+            self._pm.list_profiles,
+            _get_snap,
+            _record_risk,
+            check_proxy_fn=self._ps.check_proxy_sync,
+            on_record_exit_ip=self._monitor.record_exit_ip,
+            on_log=self._log,
+            on_refresh_main=self._state.schedule_refresh,
+            initial_tab=initial_tab,
+        )
 
     def on_toggle_pin(self, name: str) -> None:
         if not hasattr(self._pm, "toggle_pin_profile"):
@@ -731,6 +769,13 @@ class AppHandlers:
                         detail,
                     )
                     isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+                    risk_data = await asyncio.to_thread(lookup_ip_risk, raw_ip)
+                    if not isp_name and risk_data.get("isp"):
+                        isp_name = str(risk_data["isp"])
+                    if not ip_type and risk_data.get("ip_type"):
+                        ip_type = str(risk_data["ip_type"])
+                    if self._monitor is not None and int(risk_data.get("fraud_score", -1)) >= 0:
+                        self._monitor.record_ip_risk(raw_ip, risk_data)
             badge = format_proxy_badge(ok, detail, ip_type=ip_type, country=country)
             for sib in siblings:
                 self._state.proxy_status[sib] = badge

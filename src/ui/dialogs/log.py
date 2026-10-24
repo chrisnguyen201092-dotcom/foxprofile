@@ -9,10 +9,11 @@ def open_log_dialog(page: ft.Page, log_lines: list[str]) -> None:
 
     dlg = ft.AlertDialog(
         modal=True,
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title=ft.Text(get_string("activity_log"), size=22, weight=ft.FontWeight.BOLD),
         content=ft.Container(
-            width=800,
-            height=400,
+            width=980,
+            height=580,
             border_radius=10,
             bgcolor=COLORS["log_bg"],
             padding=14,
