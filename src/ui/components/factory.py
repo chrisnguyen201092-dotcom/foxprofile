@@ -36,9 +36,9 @@ def build_ui_refs(
     )
     sort_dropdown = ft.Dropdown(
         value=sort_by,
-        width=205,
+        width=215,
         dense=True,
-        text_size=13,
+        text_size=12.5,
         bgcolor=COLORS["input_bg"],
         color=COLORS["text_main"],
         border_color=COLORS["rule_strong"],
@@ -46,13 +46,16 @@ def build_ui_refs(
         border_radius=8,
         options=[
             ft.dropdown.Option("custom", get_string("sort_custom")),
+            ft.dropdown.Option("schedule", get_string("sort_schedule")),
             ft.dropdown.Option("cooldown_desc", get_string("sort_cooldown_desc")),
             ft.dropdown.Option("cooldown_asc", get_string("sort_cooldown_asc")),
+            ft.dropdown.Option("trust_desc", get_string("sort_trust_desc")),
+            ft.dropdown.Option("trust_asc", get_string("sort_trust_asc")),
+            ft.dropdown.Option("age_desc", get_string("sort_age_desc")),
+            ft.dropdown.Option("age_asc", get_string("sort_age_asc")),
             ft.dropdown.Option("name_asc", get_string("sort_name_asc")),
             ft.dropdown.Option("name_desc", get_string("sort_name_desc")),
-            ft.dropdown.Option("group", get_string("sort_group")),
             ft.dropdown.Option("running", get_string("sort_running")),
-            ft.dropdown.Option("proxy", get_string("sort_proxy")),
         ],
         on_select=lambda e: on_sort(e.control.value or "custom") if on_sort else None,
     )

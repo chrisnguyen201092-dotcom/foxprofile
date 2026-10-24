@@ -879,6 +879,10 @@ def test_keyboard_shortcuts_and_batch_backup_dialogs(isolated_pm, tmp_path):
     assert len(fake_page.dialogs) == 1
     fake_page.pop_dialog()
 
+    app.h.on_open_safe_schedule()
+    assert len(fake_page.dialogs) == 1
+    fake_page.pop_dialog()
+
 
 def test_quick_status_badges_and_bulk_update_status(isolated_pm):
     from src.core.strings import get_string
@@ -1972,10 +1976,12 @@ def test_warmup_sites_vault_and_dialog(tmp_path):
 
     groups = parse_warmup_groups(DEFAULT_WARMUP_TEXT)
     assert len(groups) == 3
-    assert groups[0]["title"] == "Web vào Meta không bị chặn"
-    assert len(groups[0]["items"]) == 1  # type: ignore[arg-type]
-    assert len(groups[1]["items"]) >= 4  # type: ignore[arg-type]
-    assert len(groups[2]["items"]) >= 3  # type: ignore[arg-type]
+    assert "Meta" in str(groups[0]["title"])
+    assert len(groups[0]["items"]) >= 3  # type: ignore[arg-type]
+    assert len(groups[1]["items"]) >= 8  # type: ignore[arg-type]
+    assert len(groups[2]["items"]) >= 2  # type: ignore[arg-type]
+    assert "bing.com" not in DEFAULT_WARMUP_TEXT
+    assert "outlook" not in DEFAULT_WARMUP_TEXT.lower()
 
     picked = pick_random_warmup_site(DEFAULT_WARMUP_TEXT)
     assert picked is not None
@@ -2569,6 +2575,210 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
 
     assert cf_info.hatch_gw is False
     assert cf_info.trust_score <= 45
+
+
+def test_safe_farming_scheduler_and_dialog(isolated_pm, tmp_path):
+    import datetime as dt
+
+    from src.services.scheduler import (
+        build_safe_schedule,
+        extract_proxy_cluster,
+        format_schedule_markdown,
+    )
+    from src.ui.dialogs import open_safe_schedule_dialog
+
+    assert extract_proxy_cluster("http://u:p@sp02-usa109.proxysystem.net:10778") == "usa109"
+    assert extract_proxy_cluster("209.141.40.174:5325:u:p") == "209.141.40.174"
+    assert extract_proxy_cluster("198.98.62.18:9779:u:p") == "198.98.62.18"
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(exist_ok=True)
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+
+    # Build 20 Live accounts across 5 clusters + 2 shared endpoint accounts + 1 empty draft
+    now_dt = dt.datetime(2026, 10, 24, 13, 0, 0)
+    cluster_hosts = [
+        "209.141.40.174",
+        "198.98.62.18",
+        "sp02-usa101.proxysystem.net",
+        "sp02-usa108.proxysystem.net",
+        "sp02-usa109.proxysystem.net",
+    ]
+    for i in range(18):
+        name = f"LiveAcc_{i + 1}"
+        host_base = cluster_hosts[i % len(cluster_hosts)]
+        host_port = f"{host_base}:{10100 + i}"
+        is_new = i >= 14  # Last 4 accounts are newly created (< 12h old)
+        created = "2026-10-24" if is_new else "2026-10-20"
+        isolated_pm.add_profile(
+            name,
+            f"http://u:p@{host_port}",
+            "windows",
+            timezone="America/Los_Angeles" if "209.141" in host_port else "America/Detroit",
+            locale="en-US",
+            pages=["Live"],
+            email=f"acc{i + 1}@hotmail.com",
+        )
+        isolated_pm.profiles[name].created_at = created
+        closed_dt = (
+            now_dt - dt.timedelta(hours=8)
+            if is_new
+            else now_dt - dt.timedelta(hours=72 - i * 2)
+        )
+        mon._live_stopped_at[name] = closed_dt
+
+    # Shared endpoint pair (like Ngu Yen & Ken Shin on usa106:10291)
+    for idx_s, s_name in enumerate(("Shared_A", "Shared_B")):
+        isolated_pm.add_profile(
+            s_name,
+            "http://u:p@sp02-usa106.proxysystem.net:10291",
+            "windows",
+            timezone="America/Detroit",
+            locale="en-US",
+            pages=["Live"],
+            email=f"{s_name.lower()}@hotmail.com",
+        )
+        isolated_pm.profiles[s_name].created_at = "2026-10-18"
+        mon._live_stopped_at[s_name] = now_dt - dt.timedelta(hours=68 if idx_s == 0 else 20)
+
+    # Empty draft slot (no email, no Live page)
+    isolated_pm.add_profile(
+        "24",
+        "http://u:p@198.98.62.18:9775",
+        "windows",
+        timezone="America/New_York",
+        locale="en-US",
+    )
+
+    p_list = list(isolated_pm.profiles.values())
+    snap = mon.snapshot(p_list, running_names=set())
+
+    plan1 = build_safe_schedule(p_list, snap, cycle_days=5, now=now_dt, shuffle_seed=101)
+    assert plan1.total_live == 20
+    assert plan1.skipped_drafts == ["24"]
+    assert plan1.collision_count == 0
+
+    # Verify Shared_A and Shared_B are separated by >= 2 days
+    day_of_acc = {}
+    for d in plan1.days:
+        for n in d.account_names:
+            day_of_acc[n] = d.day_index
+    assert abs(day_of_acc["Shared_A"] - day_of_acc["Shared_B"]) >= 2
+
+    # Verify newly created accounts (< 12h old) are placed in Day >= 3 (>= 72h effective rest)
+    for i in range(14, 18):
+        assert day_of_acc[f"LiveAcc_{i + 1}"] >= 3
+
+    # Verify Cycle 2 anti-correlation shuffling avoids repeating pairs
+    plan2 = build_safe_schedule(
+        p_list,
+        snap,
+        cycle_days=5,
+        last_pairings=plan1.pairing_records(),
+        last_shifts=plan1.shift_records(),
+        now=now_dt,
+        shuffle_seed=202,
+    )
+    assert plan2.collision_count == 0
+    assert plan2.repeated_pair_count == 0
+
+    md = format_schedule_markdown(plan1)
+    assert "LỊCH NUÔI AN TOÀN" in md
+    assert "Shared_A" in md
+
+    # Test persistence in MonitorService and tag application in ProfileManager
+    mon.record_schedule_applied(plan1.pairing_records(), plan1.shift_records(), 5)
+    assert len(mon.last_pairings) == 10
+    assert mon.schedule_cycle_days == 5
+
+    from src.models.profile import parse_schedule_tag, resolve_status_display, schedule_sort_key
+
+    applied_cnt = isolated_pm.apply_schedule_tags(plan1.status_tag_map())
+    assert applied_cnt == 20
+    parsed_shared = parse_schedule_tag(isolated_pm.profiles["Shared_A"].status)
+    assert parsed_shared is not None
+    assert parsed_shared[0] in {"T2", "T3", "T4", "T5", "T6", "T7", "CN"}
+    assert parsed_shared[1] >= 1
+    # Verify display badge shows 'T7·C1' with same-day color and schedule_sort_key orders by day & pair
+    disp_c1 = resolve_status_display("T7-C1")
+    disp_c2 = resolve_status_display("T7-C2")
+    disp_cn = resolve_status_display("CN-C1")
+    assert disp_c1 is not None and disp_c1[0] == "T7·C1"
+    assert disp_c2 is not None and disp_c2[0] == "T7·C2"
+    assert disp_c1[1] == disp_c2[1]
+    assert disp_cn is not None and disp_c1[1] != disp_cn[1]
+    assert schedule_sort_key("T7-C1", now_dt.date()) < schedule_sort_key("T7-C2", now_dt.date())
+    assert schedule_sort_key("T7-C2", now_dt.date()) < schedule_sort_key("CN-C1", now_dt.date())
+    assert schedule_sort_key("CN-C1", now_dt.date()) < schedule_sort_key("Hold", now_dt.date())
+
+    # Test clearing weekday schedule tags preserves non-weekday statuses like "Hold"
+    isolated_pm.profiles["24"].status = "Hold"
+    cleared_cnt = isolated_pm.clear_schedule_tags()
+    assert cleared_cnt == 20
+    assert isolated_pm.profiles["Shared_A"].status is None
+    assert isolated_pm.profiles["24"].status == "Hold"
+
+    # Test completed_today accounts get their weekday tag cleared ("") in status_tag_map()
+    isolated_pm.apply_schedule_tags(plan1.status_tag_map())
+    assert isolated_pm.profiles["Shared_A"].status is not None
+    mon._live_stopped_at["Shared_A"] = now_dt - dt.timedelta(hours=1)
+    snap_after_run = mon.snapshot(p_list, set())
+    plan_after_run = build_safe_schedule(
+        p_list,
+        snap_after_run,
+        cycle_days=5,
+        now=now_dt,
+        shuffle_seed=101,
+    )
+    assert any(a.name == "Shared_A" for a in plan_after_run.completed_today)
+    assert plan_after_run.status_tag_map()["Shared_A"] == ""
+    isolated_pm.apply_schedule_tags(plan_after_run.status_tag_map())
+    assert isolated_pm.profiles["Shared_A"].status is None
+
+    # Test dialog rendering, apply button, and clear button
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, d):
+            self.dialogs.append(d)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    dp = DummyPage()
+    applied_plans = []
+    copied_texts = []
+    cleared_calls = []
+    open_safe_schedule_dialog(
+        dp,  # type: ignore[arg-type]
+        p_list,
+        snap,
+        initial_cycle_days=5,
+        last_pairings=mon.last_pairings,
+        last_shifts=mon.last_shifts,
+        on_apply_schedule=lambda pl: applied_plans.append(pl),
+        on_copy_schedule=lambda txt: copied_texts.append(txt),
+        on_clear_schedule=lambda: cleared_calls.append(True),
+    )
+    assert len(dp.dialogs) == 1
+    dlg = dp.dialogs[0]
+    # Trigger Apply button (last action)
+    apply_btn = dlg.actions[-1]
+    apply_btn.on_click(None)
+    assert len(applied_plans) == 1
+    assert applied_plans[0].total_live == 20
+    # Trigger Clear button (actions[1])
+    clear_btn = dlg.actions[1]
+    clear_btn.on_click(None)
+    assert len(cleared_calls) == 1
+
 
 
 

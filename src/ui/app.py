@@ -9,6 +9,7 @@ from ..core.container import Container
 from ..core.logging import get_logger
 from ..core.strings import current_language, get_string, set_language
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
+from ..models.profile import compute_days_since, parse_schedule_tag, schedule_sort_key
 from ..services.browser import fingerprint
 from ..services.monitor import MonitorService, MonitorSnapshot
 from .components import (
@@ -427,9 +428,18 @@ class App:
             all_profiles = [p for p in all_profiles if p.group == target_group]
         elif self.filter.startswith("status:"):
             target_status = self.filter.removeprefix("status:").casefold()
-            all_profiles = [
-                p for p in all_profiles if (p.status or "").strip().casefold() == target_status
-            ]
+
+            def _matches_status(prof: object) -> bool:
+                raw_st = (getattr(prof, "status", None) or "").strip()
+                if raw_st.casefold() == target_status:
+                    return True
+                parsed_st = parse_schedule_tag(raw_st)
+                return parsed_st is not None and parsed_st[0].casefold() == target_status
+
+            if not any(_matches_status(p) for p in all_profiles):
+                self.filter = "all"
+            else:
+                all_profiles = [p for p in all_profiles if _matches_status(p)]
         else:
             test = self._filter_tests().get(self.filter, lambda p: True)
             all_profiles = [p for p in all_profiles if test(p)]
@@ -446,7 +456,9 @@ class App:
                 or q in (p.notes or "").lower()
             ]
         sort_by = self.state.sort_by
-        if sort_by == "name_asc":
+        if sort_by == "schedule":
+            all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), p.name.casefold()))
+        elif sort_by == "name_asc":
             all_profiles.sort(key=lambda p: p.name.casefold())
         elif sort_by == "name_desc":
             all_profiles.sort(key=lambda p: p.name.casefold(), reverse=True)
@@ -484,6 +496,37 @@ class App:
                 return (2, 0, pname.casefold())
 
             all_profiles.sort(key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key)
+        elif sort_by in ("trust_desc", "trust_asc"):
+            snap = self._last_monitor_snap or self.monitor.snapshot(
+                self.pm.list_profiles(),
+                self.bl.running_profile_names() | self.state.loading,
+            )
+
+            def _trust_key(p: object) -> tuple:
+                pname = getattr(p, "name", "")
+                info = snap.profiles.get(pname)
+                score = info.trust_score if info is not None else 0
+                return (-score if sort_by == "trust_desc" else score, pname.casefold())
+
+            all_profiles.sort(key=_trust_key)
+        elif sort_by in ("age_desc", "age_asc"):
+            snap = self._last_monitor_snap or self.monitor.snapshot(
+                self.pm.list_profiles(),
+                self.bl.running_profile_names() | self.state.loading,
+            )
+
+            def _age_key(p: object) -> tuple:
+                pname = getattr(p, "name", "")
+                days = compute_days_since(getattr(p, "created_at", None))
+                if days is None:
+                    info = snap.profiles.get(pname)
+                    if info is not None and info.age_days > 0:
+                        days = info.age_days
+                if days is None:
+                    return (1, 0, pname.casefold())
+                return (0, -days if sort_by == "age_desc" else days, pname.casefold())
+
+            all_profiles.sort(key=_age_key)
 
         # Pinned profiles always float to the top while preserving the active sort within each group
         all_profiles.sort(key=lambda p: not bool(getattr(p, "pinned", False)))
@@ -514,9 +557,16 @@ class App:
             self._live_since[name] = time.strftime("%H:%M")
             p_live = self.pm.profiles.get(name)
             self.monitor.record_started(name, p_live.proxy if p_live else None)
+        stopped_scheduled: list[str] = []
         for name in set(self._live_since) - running:
             del self._live_since[name]
             self.monitor.record_stopped(name)
+            if name not in self.state.failed:
+                p_done = self.pm.profiles.get(name)
+                if p_done is not None and parse_schedule_tag(p_done.status) is not None:
+                    stopped_scheduled.append(name)
+        if stopped_scheduled:
+            self.pm.bulk_update_status(stopped_scheduled, None)
         self._alerted_token_bursts.intersection_update(running)
 
         everything = self.pm.list_profiles()
@@ -577,9 +627,13 @@ class App:
             if p.group:
                 group_counts[p.group] = group_counts.get(p.group, 0) + 1
             if p.status:
-                st_key = p.status.strip()
+                parsed_st = parse_schedule_tag(p.status)
+                st_key = parsed_st[0] if parsed_st is not None else p.status.strip()
                 status_counts[st_key] = status_counts.get(st_key, 0) + 1
         group_counts = dict(sorted(group_counts.items(), key=lambda kv: kv[0].casefold()))
+        status_counts = dict(
+            sorted(status_counts.items(), key=lambda kv: (schedule_sort_key(kv[0]), kv[0].casefold()))
+        )
         self._filter_column.controls = build_filter_buttons(
             self.filter,
             {fid: sum(1 for p in everything if test(p)) for fid, test in tests.items()},
@@ -600,6 +654,7 @@ class App:
                 on_open_cooldown=self.h.on_open_cooldown_settings,
                 on_open_warmup_sites=self.h.on_open_warmup_sites,
                 on_open_trust_monitor=self.h.on_open_trust_monitor,
+                on_open_safe_schedule=self.h.on_open_safe_schedule,
                 audit_alert=bool(snap.audit_findings),
             )
             if page_profiles

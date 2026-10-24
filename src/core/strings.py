@@ -578,13 +578,13 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_banned": "✕ Banned / Hold",
         "trust_breakdown_tooltip": (
             "Meta Sigma & Hatch OIDC Trust Score (Strict Safety Buffer): {score}/100\n"
-            "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} domain(s)\n"
+            "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} Meta/Muse domain(s)\n"
             "• Multi-Day Login Rhythm: {act_days} active day(s) · {sess_cnt} session(s) ({mins}m)\n"
             "• Hatch VM Session (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookies)\n"
-            "• Meta Off-Site Pixel (`ps_l`/`ps_n`): {ps_l} · External Web: {ext_doms} domain(s) ({hpages} pages)\n"
+            "• First-Party Storage (`ps_l`/`ps_n`): {ps_l} · History: {hpages} page(s)\n"
             "• Prior Meta Checkpoint Scar: {chk_scar}\n"
             "• HTTP Cache2 ETag Sync: {cache2}\n"
-            "── Strict Safety Gates: ◈ Trusted requires hatch_gw + datr ≥6d + ≥4d/5sess/90m + Pixel ≥2 ext sites; ✦ Diamond requires datr ≥10d + ≥6d/10sess/300m (5h) + ≥4 ext sites"
+            "── Strict Safety Gates: ◈ Trusted requires hatch_gw + datr ≥6d (≥3 Meta/Muse domains) + ps_l + ≥4d/5sess/90m; ✦ Diamond requires datr ≥10d + ≥6d/10sess/300m (5h) + /thread/"
         ),
         "trust_yes": "✦ Ready",
         "trust_no": "○ None",
@@ -620,6 +620,38 @@ STRINGS: dict[str, dict[str, str]] = {
         "audit_same_port_hw_detail": "Profiles on {port} have identical OS/Screen/GPU ({hw}): {names}",
         "audit_high_fraud_ip_title": "🚨 [{name}] High IP Fraud Score ({score}pt)",
         "audit_high_fraud_ip_detail": "Exit IP {ip} on '{name}' has a high fraud/risk score ({score}/100) or proxy blacklist flag.",
+        "schedule_btn": "Safe Schedule",
+        "tooltip_schedule_btn": "Auto-generate conflict-free multi-day paired schedule & assign T2..CN tags",
+        "schedule_dialog_title": "Paired Account Schedule",
+        "schedule_dialog_subtitle": "Each pair of 2 accounts below is matched across different proxy servers so you can open them together safely.",
+        "schedule_cycle_label": "Split into:",
+        "schedule_cycle_days_opt": "{days} days",
+        "schedule_reshuffle_btn": "Shuffle Pairs",
+        "schedule_copy_md_btn": "Copy Schedule",
+        "schedule_apply_tags_btn": "Save & Sort Profile List",
+        "schedule_clear_tags_btn": "Clear Saved Schedule",
+        "sort_schedule": "Schedule (Day · Pair)",
+        "sort_trust_desc": "Trust score (High ↓)",
+        "sort_trust_asc": "Trust score (Low ↑)",
+        "sort_age_desc": "Account age (Old ↓)",
+        "sort_age_asc": "Account age (New ↑)",
+        "schedule_applied_log": "Applied safe schedule tags (T2..CN) to {count} Live profile(s) ({days}-day cycle)",
+        "schedule_cleared_log": "Cleared weekday schedule tags (T2..CN) from {count} profile(s)",
+        "schedule_copied_log": "Copied safe farming schedule to clipboard",
+        "schedule_kpi_live": "Live Scheduled: {count}",
+        "schedule_kpi_drafts": "Skipped Empty Slots: {count}",
+        "schedule_kpi_collision_zero": "✦ 0% Same-Cluster Collision",
+        "schedule_kpi_collision_warn": "⚠ {count} Same-Cluster Pair(s)",
+        "schedule_kpi_shuffle_ok": "✦ Dynamic Anti-Correlation Active",
+        "schedule_morning_title": "☀️ MORNING SHIFT (08:00 – 11:30 VN) · {count} pair(s)",
+        "schedule_evening_title": "🌙 EVENING SHIFT (19:30 – 23:00 VN) · {count} pair(s)",
+        "schedule_pair_badge": "Pair {idx}",
+        "schedule_solo_badge": "Solo (1 browser)",
+        "schedule_rest_badge": "Rest {now}h → Open ~{eff}h",
+        "schedule_probation_badge": "🛡️ New Acc (≥72h Cool-off)",
+        "schedule_shared_port_badge": "🔒 Shared {port}",
+        "schedule_done_today_badge": "✓ Opened Today",
+        "schedule_day_header": "Day {idx} · {day_name} ({tag}) — {date} · {count} acc",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -966,8 +998,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "arrange_windows_btn": "Xếp cửa sổ",
         "tooltip_arrange_windows": "Xếp vị trí các cửa sổ đang chạy (giữ nguyên 100% kích thước trình duyệt)",
         "arranged_windows_log": "Đã xếp vị trí {count} cửa sổ trình duyệt",
-        "sort_cooldown_desc": "Nghỉ lâu nhất lên đầu",
-        "sort_cooldown_asc": "Mới chạy gần nhất",
+        "sort_cooldown_desc": "Giờ nghỉ (Lâu ↓)",
+        "sort_cooldown_asc": "Giờ nghỉ (Mới ↑)",
         "batch_create_btn": "Tạo hàng loạt",
         "batch_create_title": "Tạo Profile hàng loạt",
         "batch_create_subtitle": "Dán danh sách tên profile và danh sách proxy (mỗi dòng 1 mục) để tạo nhanh nhiều profile cùng lúc.",
@@ -1198,13 +1230,13 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_banned": "✕ Tạm ngưng / Ban",
         "trust_breakdown_tooltip": (
             "Điểm Trust Meta Sigma & Hatch OIDC (Chuẩn Siết Chặt An Toàn): {score}/100\n"
-            "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày tuổi · đồng bộ {datr_doms} miền\n"
+            "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày tuổi · đồng bộ {datr_doms} miền Meta/Muse\n"
             "• Nhịp đăng nhập nhiều ngày: {act_days} ngày mở · {sess_cnt} phiên ({mins}p)\n"
             "• Phiên Hatch VM (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookie)\n"
-            "• Tín hiệu Meta Pixel (`ps_l`/`ps_n`): {ps_l} · Web ngoài: {ext_doms} miền ({hpages} trang)\n"
+            "• Cookie phiên chính chủ (`ps_l`/`ps_n`): {ps_l} · Lịch sử: {hpages} trang\n"
             "• Vết sẹo Checkpoint Meta: {chk_scar}\n"
             "• Đồng bộ ETag HTTP Cache2: {cache2}\n"
-            "── Khoảng đệm an toàn: ◈ Tin cậy cần hatch_gw + datr ≥6 ngày + ≥4 ngày mở (≥5 phiên, ≥90p) + ≥2 web Pixel ngoài; ✦ Kim Cương cần datr ≥10 ngày + ≥6 ngày mở (≥10 phiên, ≥300p / 5h) + ≥4 web ngoài"
+            "── Khoảng đệm an toàn: ◈ Tin cậy cần hatch_gw + datr ≥6 ngày (≥3 miền Meta/Muse) + ps_l + ≥4 ngày mở (≥5 phiên, ≥90p); ✦ Kim Cương cần datr ≥10 ngày + ≥6 ngày mở (≥10 phiên, ≥300p / 5h) + đã vào hội thoại /thread/"
         ),
         "trust_yes": "✦ Đã có",
         "trust_no": "○ Chưa có",
@@ -1240,6 +1272,38 @@ STRINGS: dict[str, dict[str, str]] = {
         "audit_same_port_hw_detail": "Các profile chung cổng {port} có cùng Hệ điều hành/Màn hình/GPU ({hw}): {names}",
         "audit_high_fraud_ip_title": "🚨 [{name}] Điểm rủi ro IP cao ({score}pt)",
         "audit_high_fraud_ip_detail": "IP {ip} của '{name}' có Fraud Score cao ({score}/100) hoặc bị gắn cờ Proxy/VPN.",
+        "schedule_btn": "Chia lịch nuôi",
+        "tooltip_schedule_btn": "Tự động chia lịch nuôi theo cặp 2 máy trạm khác cụm & gắn nhãn thứ T2..CN",
+        "schedule_dialog_title": "Lịch Mở Tài Khoản Theo Cặp",
+        "schedule_dialog_subtitle": "Mỗi cặp 2 tài khoản bên dưới đã được ghép khác cụm Proxy để bạn mở cùng lúc an toàn.",
+        "schedule_cycle_label": "Chia làm:",
+        "schedule_cycle_days_opt": "{days} ngày",
+        "schedule_reshuffle_btn": "Đảo cặp",
+        "schedule_copy_md_btn": "Copy lịch",
+        "schedule_apply_tags_btn": "Lưu & Sắp xếp ngoài danh sách",
+        "schedule_clear_tags_btn": "Hủy lịch đã lưu",
+        "sort_schedule": "Lịch nuôi (Ngày · Cặp)",
+        "sort_trust_desc": "Điểm Trust (Cao ↓)",
+        "sort_trust_asc": "Điểm Trust (Thấp ↑)",
+        "sort_age_desc": "Tuổi acc (Cũ ↓)",
+        "sort_age_asc": "Tuổi acc (Mới ↑)",
+        "schedule_applied_log": "Đã gắn nhãn lịch nuôi an toàn (T2..CN) cho {count} profile Live (chu kỳ {days} ngày)",
+        "schedule_cleared_log": "Đã gỡ nhãn lịch nuôi (T2..CN) khỏi {count} profile",
+        "schedule_copied_log": "Đã sao chép bảng lịch nuôi an toàn vào Clipboard",
+        "schedule_kpi_live": "Acc Live vào lịch: {count}",
+        "schedule_kpi_drafts": "Bỏ qua ô trống: {count}",
+        "schedule_kpi_collision_zero": "✦ 0% Trùng cụm cùng lúc",
+        "schedule_kpi_collision_warn": "⚠ {count} cặp trùng cụm",
+        "schedule_kpi_shuffle_ok": "✦ Đã đảo cặp chống dính chùm",
+        "schedule_morning_title": "☀️ CA SÁNG (08:00 – 11:30 VN) · {count} cặp",
+        "schedule_evening_title": "🌙 CA TỐI (19:30 – 23:00 VN) · {count} cặp",
+        "schedule_pair_badge": "Cặp {idx}",
+        "schedule_solo_badge": "Đi lẻ 1 máy",
+        "schedule_rest_badge": "Nghỉ {now}h → Mở ~{eff}h",
+        "schedule_probation_badge": "🛡️ Acc mới (Ủ ≥72h)",
+        "schedule_shared_port_badge": "🔒 Chung {port}",
+        "schedule_done_today_badge": "✓ Đã mở hôm nay",
+        "schedule_day_header": "Ngày {idx} · {day_name} ({tag}) — {date} · {count} acc",
     },
 }
 

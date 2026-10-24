@@ -17,6 +17,7 @@ from ...models.profile import (
     has_ban_page,
     is_ban_status,
     parse_flexible_date,
+    parse_schedule_tag,
     set_active_status_tags,
     today_ymd,
 )
@@ -957,6 +958,39 @@ class ProfileManager:
                     was_banned = self._is_profile_banned(p)
                     p.status = clean_status
                     self._sync_ban_state(p, was_banned=was_banned)
+                    count += 1
+            if count:
+                self.save_profiles()
+        return count
+
+    def apply_schedule_tags(self, tag_map: dict[str, str]) -> int:
+        """Assign weekday status tags (e.g. T2..CN) to multiple profiles in one atomic save."""
+        if not tag_map:
+            return 0
+        count = 0
+        with self._lock:
+            for name, raw_tag in tag_map.items():
+                p = self.profiles.get(name)
+                if p is None:
+                    continue
+                clean_tag = (raw_tag or "").strip() or None
+                if clean_tag is not None and not validate_status(clean_tag)[0]:
+                    continue
+                was_banned = self._is_profile_banned(p)
+                p.status = clean_tag
+                self._sync_ban_state(p, was_banned=was_banned)
+                count += 1
+            if count:
+                self.save_profiles()
+        return count
+
+    def clear_schedule_tags(self) -> int:
+        """Clear all weekday schedule tags (T2..CN / T7-C1..) across all profiles in one atomic save."""
+        count = 0
+        with self._lock:
+            for p in self.profiles.values():
+                if parse_schedule_tag(p.status) is not None:
+                    p.status = None
                     count += 1
             if count:
                 self.save_profiles()

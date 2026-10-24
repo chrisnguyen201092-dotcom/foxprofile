@@ -106,6 +106,51 @@ def resolve_tag_label(tag: dict[str, str], get_str_fn=None) -> str:
     return tag.get("code") or ""
 
 
+_SCHEDULE_TAG_RE = re.compile(r"^(T[2-7]|CN)(?:[-·\s]*C(\d{1,2}))?$", re.IGNORECASE)
+_WEEKDAY_TAG_TO_INT: dict[str, int] = {
+    "T2": 0,
+    "T3": 1,
+    "T4": 2,
+    "T5": 3,
+    "T6": 4,
+    "T7": 5,
+    "CN": 6,
+}
+_WEEKDAY_COLORS: dict[str, str] = {
+    "T2": "#1D4ED8",  # Royal Blue (matches 'trusted' Trust Score)
+    "T3": "#15803D",  # Forest Green (matches 'diamond' Trust Score)
+    "T4": "#C2510F",  # Fox Rust / Orange (matches 'warming' Trust Score)
+    "T5": "#6D28D9",  # Deep Indigo (palette_deep)
+    "T6": "#0E7490",  # Deep Teal (palette_deep)
+    "T7": "#A16207",  # Warm Bronze / Gold (palette_deep)
+    "CN": "#BE185D",  # Deep Berry (palette_deep)
+}
+
+
+def parse_schedule_tag(status: str | None) -> tuple[str, int] | None:
+    """Return `(weekday_tag, pair_index)` (e.g. `('T7', 1)`) if `status` is a schedule tag, else `None`."""
+    if not status:
+        return None
+    m = _SCHEDULE_TAG_RE.match(status.strip())
+    if not m:
+        return None
+    day_tag = m.group(1).upper()
+    pair_num = int(m.group(2)) if m.group(2) else 0
+    return day_tag, pair_num
+
+
+def schedule_sort_key(status: str | None, today: date | None = None) -> tuple[int, int, int]:
+    """Sort key ordering scheduled profiles by day offset from today (0..6) and pair number (C1, C2...)."""
+    parsed = parse_schedule_tag(status)
+    if parsed is None:
+        return (1, 99, 99)
+    day_tag, pair_num = parsed
+    ref_wd = (today or date.today()).weekday()
+    day_wd = _WEEKDAY_TAG_TO_INT.get(day_tag, 0)
+    day_offset = (day_wd - ref_wd) % 7
+    return (0, day_offset, pair_num if pair_num > 0 else 99)
+
+
 def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, str] | None:
     """Return (display_label, hex_color) for a status preset code or custom status tag."""
     if not status:
@@ -113,6 +158,13 @@ def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, st
     clean = status.strip()
     if not clean:
         return None
+    parsed_sched = parse_schedule_tag(clean)
+    if parsed_sched is not None:
+        day_tag, pair_num = parsed_sched
+        col = _WEEKDAY_COLORS.get(day_tag, "#2C524A")
+        if pair_num > 0:
+            return f"{day_tag}·C{pair_num}", col
+        return day_tag, col
     low = clean.casefold()
     for tag in _ACTIVE_STATUS_TAGS:
         t_code = (tag.get("code") or "").strip()

@@ -40,6 +40,11 @@ class AppState:
         with self._loading_lock:
             return set(self._loading_profiles)
 
+    @property
+    def loading_profiles(self) -> set[str]:
+        with self._loading_lock:
+            return set(self._loading_profiles)
+
     def loading_names(self) -> set[str]:
         with self._loading_lock:
             return set(self._loading_profiles)

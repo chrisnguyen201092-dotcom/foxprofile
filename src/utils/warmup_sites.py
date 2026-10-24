@@ -6,26 +6,32 @@ import re
 
 from ..core.config import PROFILES_FILE
 
-DEFAULT_WARMUP_TEXT = """Web vào Meta không bị chặn
-https://muse.ai/?aymh_complete=1 — Link bypass vòng lặp /aymh/redirect-cycle/ khi mở lại acc
+DEFAULT_WARMUP_TEXT = """Nhóm 1: Hệ Meta & Muse Chính Chủ (Tín hiệu First-Party — Quan trọng số 1)
+(Camoufox cô lập cookie giữa các trang bằng Total Cookie Protection; chỉ các trang họ Meta/Muse dưới đây mới đồng bộ trực tiếp cookie `datr`, `ps_l`, `layout_state` mà Meta Sigma kiểm tra)
+https://muse.ai/?aymh_complete=1 — Link vào thẳng Muse (bypass vòng lặp /aymh/redirect-cycle/ khi mở lại acc).
+https://www.facebook.com — Lướt 1–2 phút làm tươi trực tiếp cookie gốc `.facebook.com` (`datr`, `fr`, `ps_l`, `wd`).
+https://www.instagram.com — Giữ ấm phiên Instagram liên kết trong Meta Accounts Center (`datr`, `ig_did`, `ps_l`).
+https://accountscenter.meta.com — Kiểm tra đồng bộ tài khoản Meta Accounts Center (`.accountscenter.meta.com`).
 
-Nhóm 1: Kích hoạt trực tiếp Meta Pixel (fbevents.js) & Cookie `ps_l` / `datr` — Quan trọng số 1 cho Meta Sigma
-(Meta chỉ biết bạn là người thật khi vào các trang có nhúng mã `connect.facebook.net/en_US/fbevents.js` bắn sự kiện PageView kèm cookie `.facebook.com` / `.meta.com` về máy chủ Meta)
-https://www.coursera.org — Nền tảng khóa học AI/Tech Mỹ (gắn Meta Pixel + Cloudflare + Google OAuth, cực khớp tệp người dùng Muse).
-https://www.udemy.com — Khóa học lập trình/AI (bắn trực tiếp sự kiện Meta Pixel `fbevents.js` + cấp cookie Cloudflare sạch).
-https://www.canva.com — Công cụ thiết kế (tích hợp sâu Meta Pixel, Facebook SDK và Cloudflare).
-https://www.nytimes.com — Thời báo New York (gắn Meta Pixel + Fastly CDN hỗ trợ IPv6 tốc độ cao).
-https://www.forbes.com — Tạp chí kinh doanh Mỹ (tích hợp Meta Pixel + truyền thông xã hội Mỹ).
-https://www.eventbrite.com — Sự kiện tại Mỹ (nhúng trực tiếp Facebook Login SDK & Meta Pixel).
-https://www.etsy.com — Sàn thương mại Mỹ (kích hoạt rất nhanh cookie `ps_l` / `ps_n` của Meta).
-https://about.meta.com — Trang thông tin chính thức của Meta (làm tươi trực tiếp cookie `.meta.com` cùng miền với `auth.meta.com`).
+Nhóm 2: Báo Mỹ Chuẩn 100% IPv6 `AAAA` (Tùy chọn — Tải nhanh <2.5s, không dính Captcha)
+(Tùy chọn — KHÔNG bắt buộc để lên điểm Kim Cương; chỉ dùng khi bạn muốn mở kèm 1–2 tab nhẹ để kiểm tra mạng hoặc giữ kết nối Proxy IPv6 sống tự nhiên khi treo máy)
+https://www.cnet.com — Chuyên trang công nghệ Mỹ (IPv6 1.9s, đã kiểm chứng trên profile Kim Cương).
+https://www.cntraveler.com — Tạp chí du lịch Mỹ (IPv6 2.5s, tải mượt không bao giờ chặn proxy).
+https://www.self.com — Tạp chí đời sống Mỹ (IPv6 2.7s, phản hồi nhanh trên IPv6 thuần).
+https://www.bonappetit.com — Chuyên trang ẩm thực Mỹ (IPv6 2.2s, rất nhẹ khi treo tab).
+https://www.wired.com — Tạp chí AI & Công nghệ Mỹ (IPv6 2.3s, tải sạch không dính Captcha).
+https://www.pcmag.com — Tạp chí phần cứng & PC Mỹ (IPv6 1.8s, phản hồi rất nhanh).
+https://www.lifehacker.com — Mẹo công nghệ & phần mềm Mỹ (IPv6 3.0s, tương thích tốt IPv6).
+https://techcrunch.com — Tin tức Startup & AI Mỹ (IPv6 2.7s, nhẹ và ổn định).
+https://www.gq.com — Tạp chí phong cách Mỹ (IPv6 2.5s, phản hồi nhanh).
+https://www.vanityfair.com — Tạp chí văn hóa Mỹ (IPv6 2.1s, không dính Captcha).
+https://www.espn.com — Tin tức thể thao Mỹ (IPv6 1.9s, cấp cookie vùng `edition` US).
+https://www.npr.org — Đài phát thanh quốc gia Mỹ (IPv6 2.1s, trang siêu nhẹ).
 
-Nhóm 2: Hệ sinh thái Google reCAPTCHA & Microsoft (Hỗ trợ chấm điểm `_GRECAPTCHA` trên `muse.ai` & Hotmail OAuth)
-(Trang `muse.ai` nhúng trực tiếp Google reCAPTCHA v3 để chấm điểm bot ngầm; giữ ấm cookie Google & Microsoft giúp vượt Captcha và đăng nhập Hotmail mượt mà)
-https://www.google.com — Tìm kiếm 1–2 từ khóa tiếng Anh (cấp cookie `NID` / `_GRECAPTCHA` cho reCAPTCHA v3 trên `muse.ai`).
-https://www.youtube.com — Xem lướt 1 video ngắn (tăng độ tin cậy phiên Google trên trình duyệt).
-https://news.google.com — Đọc lướt tiêu đề tin tức công nghệ Mỹ.
-https://www.bing.com — Cổng tìm kiếm Microsoft (giữ ấm phiên đăng nhập Hotmail / Outlook)."""
+Nhóm 3: Hệ sinh thái Google (Tùy chọn — Chuẩn IPv6 `AAAA`, kiểm tra mạng & tìm kiếm)
+(Đã loại bỏ YouTube vì bị nhà mạng proxy chặn 403 và bỏ toàn bộ hệ Microsoft/Bing vì bạn đọc Hotmail trên máy chủ ngoài)
+https://www.google.com — Tìm kiếm 1–2 từ khóa tiếng Anh (IPv6 1.7s, cấp cookie `NID` / `AEC` / `UULE`).
+https://news.google.com — Đọc lướt tiêu đề tin tức công nghệ Mỹ trên Google News (IPv6)."""
 
 _URL_LINE_RE = re.compile(
     r"^(?:[-*•]\s*)?(https?://[^\s—–\-|()]+)(?:\s*(?:—|–|-|\|)\s*(.*)|\s+\((.*)\))?$",

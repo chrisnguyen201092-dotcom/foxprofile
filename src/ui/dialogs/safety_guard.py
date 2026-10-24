@@ -2,12 +2,23 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ...core.strings import get_string
-from ...services.monitor import PreLaunchWarning
+from ...core.strings import current_language, get_string
+from ...models.profile import Profile
+from ...services.monitor import MonitorSnapshot, PreLaunchWarning
+from ...services.scheduler import (
+    ScheduledAccount,
+    ScheduledDay,
+    ScheduledPair,
+    SchedulePlan,
+    build_safe_schedule,
+    format_schedule_markdown,
+    is_gateway_ipv6_cluster,
+)
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, ERROR_STYLE, OUTLINE_STYLE
 
 _COOLDOWN_PRESETS = (0, 5, 10, 15, 20, 30, 60)
+_CYCLE_PRESETS = (4, 5, 6)
 
 
 def _warning_card(w: PreLaunchWarning) -> ft.Container:
@@ -405,6 +416,460 @@ def open_token_burst_alert_dialog(
                 icon=ft.Icons.CHECK,
                 style=ACCENT_STYLE,
                 on_click=lambda _: page.pop_dialog(),
+            ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+def _build_account_pill(acc: ScheduledAccount, day_idx: int) -> ft.Container:
+    is_gw = is_gateway_ipv6_cluster(acc.cluster)
+    cluster_col = "#0284C7" if is_gw else "#059669"
+    eff_rest = int(round(acc.rest_hours + day_idx * 24))
+    now_rest = int(round(acc.rest_hours))
+    display_name = (
+        acc.name
+        if acc.name == acc.email or not acc.email
+        else f"{acc.name} · {acc.email}"
+    )
+
+    badges: list[ft.Control] = [
+        ft.Container(
+            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            border_radius=4,
+            bgcolor=cluster_col,
+            content=ft.Text(
+                f"{acc.cluster}{acc.port}",
+                size=10.5,
+                font_family=FONT_DATA,
+                color="#FFFFFF",
+            ),
+        ),
+        ft.Container(
+            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            border_radius=4,
+            bgcolor=COLORS["card_bg"],
+            border=ft.Border.all(
+                1,
+                "#059669" if acc.completed_today else COLORS["rule_strong"],
+            ),
+            content=ft.Text(
+                get_string("schedule_done_today_badge")
+                if acc.completed_today
+                else get_string("schedule_rest_badge", now=now_rest, eff=eff_rest),
+                size=10.5,
+                font_family=FONT_SEMIBOLD if acc.completed_today else FONT_DATA,
+                color="#059669" if acc.completed_today else COLORS["text_sub"],
+            ),
+        ),
+    ]
+    if acc.is_probation:
+        badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(1, "#0284C7"),
+                content=ft.Text(
+                    get_string("schedule_probation_badge"),
+                    size=10.0,
+                    font_family=FONT_SEMIBOLD,
+                    color="#0284C7",
+                ),
+            )
+        )
+    if acc.shared_endpoint:
+        badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(1, COLORS["warning"]),
+                content=ft.Text(
+                    get_string("schedule_shared_port_badge", port=acc.port),
+                    size=10.0,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["warning"],
+                ),
+            )
+        )
+
+    return ft.Container(
+        expand=True,
+        padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+        border_radius=7,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["card_border"]),
+        content=ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Text(
+                    display_name,
+                    size=12.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_main"],
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Row(spacing=5, wrap=True, controls=badges),
+            ],
+        ),
+    )
+
+
+def _build_pair_row(pr: ScheduledPair, day_idx: int) -> ft.Container:
+    second_ctrl: ft.Control
+    if pr.second is not None:
+        second_ctrl = _build_account_pill(pr.second, day_idx)
+    else:
+        second_ctrl = ft.Container(
+            expand=True,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            border_radius=7,
+            bgcolor=COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["card_border"]),
+            content=ft.Text(
+                get_string("schedule_solo_badge"),
+                size=12,
+                color=COLORS["text_sub"],
+            ),
+        )
+
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+        content=ft.Row(
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Container(
+                    width=62,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+                    border_radius=6,
+                    bgcolor=COLORS["sidebar"],
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("schedule_pair_badge", idx=pr.pair_index),
+                        size=11.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["cover_ink"],
+                    ),
+                ),
+                _build_account_pill(pr.first, day_idx),
+                ft.Icon(ft.Icons.SYNC_ALT_ROUNDED, size=16, color=COLORS["text_sub"]),
+                second_ctrl,
+            ],
+        ),
+    )
+
+
+def _build_day_card(day: ScheduledDay, lang: str) -> ft.Container:
+    day_name = day.weekday_name_vi if lang == "vi" else day.weekday_name_en
+    sections: list[ft.Control] = [
+        ft.Row(
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=9, vertical=3),
+                    border_radius=6,
+                    bgcolor=COLORS["sidebar"],
+                    content=ft.Text(
+                        day.weekday_tag,
+                        size=12,
+                        font_family=FONT_BOLD,
+                        color=COLORS["cover_ink"],
+                    ),
+                ),
+                ft.Text(
+                    get_string(
+                        "schedule_day_header",
+                        idx=day.day_index + 1,
+                        day_name=day_name,
+                        tag=day.weekday_tag,
+                        date=day.date_str,
+                        count=day.total_accounts,
+                    ),
+                    size=13.5,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                    expand=True,
+                ),
+            ],
+        ),
+    ]
+
+    if day.morning_pairs:
+        sections.append(
+            ft.Text(
+                get_string("schedule_morning_title", count=len(day.morning_pairs)),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["accent"],
+            )
+        )
+        for pr in day.morning_pairs:
+            sections.append(_build_pair_row(pr, day.day_index))
+
+    if day.evening_pairs:
+        sections.append(
+            ft.Text(
+                get_string("schedule_evening_title", count=len(day.evening_pairs)),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color="#0284C7",
+            )
+        )
+        for pr in day.evening_pairs:
+            sections.append(_build_pair_row(pr, day.day_index))
+
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=14, vertical=12),
+        border_radius=10,
+        bgcolor=COLORS["card_bg"],
+        border=ft.Border.all(1, COLORS["rule_strong"]),
+        content=ft.Column(spacing=6, tight=True, controls=sections),
+    )
+
+
+def open_safe_schedule_dialog(
+    page: ft.Page,
+    profiles: list[Profile],
+    snap: MonitorSnapshot,
+    *,
+    initial_cycle_days: int = 5,
+    last_pairings: list[list[str]] | None = None,
+    last_shifts: dict[str, str] | None = None,
+    on_apply_schedule: Callable[[SchedulePlan], None],
+    on_copy_schedule: Callable[[str], None] | None = None,
+    on_clear_schedule: Callable[[], None] | None = None,
+) -> None:
+    """Modal dialog displaying the multi-day paired safe farming schedule & tag applicator."""
+    lang = current_language()
+    state = {
+        "cycle_days": max(4, min(6, int(initial_cycle_days or 5))),
+        "seed_offset": 0,
+        "selected_day": -1,  # -1 = all days
+        "plan": None,
+    }
+
+    cycle_row = ft.Row(spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    day_filter_row = ft.Row(spacing=6, wrap=True)
+    days_list_col = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=440)
+
+    def _recompute() -> SchedulePlan:
+        base_seed = 20261024 + state["seed_offset"] * 97
+        plan = build_safe_schedule(
+            profiles,
+            snap,
+            cycle_days=state["cycle_days"],
+            last_pairings=last_pairings,
+            last_shifts=last_shifts,
+            shuffle_seed=base_seed if state["seed_offset"] > 0 else None,
+        )
+        state["plan"] = plan
+        return plan
+
+    def _set_cycle(days_val: int) -> None:
+        state["cycle_days"] = days_val
+        state["selected_day"] = -1
+        _refresh_view()
+        page.update()
+
+    def _set_day_filter(d_idx: int) -> None:
+        state["selected_day"] = d_idx
+        _refresh_view(recompute=False)
+        page.update()
+
+    def _reshuffle(_: ft.ControlEvent) -> None:
+        state["seed_offset"] += 1
+        _refresh_view()
+        page.update()
+
+    def _copy_md(_: ft.ControlEvent) -> None:
+        plan: SchedulePlan | None = state["plan"]
+        if plan is not None and on_copy_schedule is not None:
+            on_copy_schedule(format_schedule_markdown(plan))
+
+    def _apply(_: ft.ControlEvent) -> None:
+        plan: SchedulePlan | None = state["plan"]
+        page.pop_dialog()
+        if plan is not None:
+            on_apply_schedule(plan)
+
+    def _clear(_: ft.ControlEvent) -> None:
+        page.pop_dialog()
+        if on_clear_schedule is not None:
+            on_clear_schedule()
+
+    def _refresh_view(*, recompute: bool = True) -> None:
+        plan: SchedulePlan = _recompute() if (recompute or state["plan"] is None) else state["plan"]
+
+        # 1. Cycle selector pills
+        cyc_ctrls: list[ft.Control] = [
+            ft.Text(
+                get_string("schedule_cycle_label"),
+                size=12.5,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_sub"],
+            )
+        ]
+        for cyc in _CYCLE_PRESETS:
+            is_on = cyc == state["cycle_days"]
+            cyc_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=6,
+                    bgcolor=COLORS["sidebar"] if is_on else COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1,
+                        COLORS["sidebar"] if is_on else COLORS["rule_strong"],
+                    ),
+                    ink=True,
+                    on_click=lambda _, c=cyc: _set_cycle(c),
+                    content=ft.Text(
+                        get_string("schedule_cycle_days_opt", days=cyc),
+                        size=12,
+                        font_family=FONT_SEMIBOLD if is_on else FONT_DATA,
+                        color=COLORS["cover_ink"] if is_on else COLORS["text_main"],
+                    ),
+                )
+            )
+        cyc_ctrls.append(
+            ft.OutlinedButton(
+                get_string("schedule_reshuffle_btn"),
+                icon=ft.Icons.SHUFFLE_ROUNDED,
+                height=32,
+                style=OUTLINE_STYLE,
+                on_click=_reshuffle,
+            )
+        )
+        if on_copy_schedule is not None:
+            cyc_ctrls.append(
+                ft.OutlinedButton(
+                    get_string("schedule_copy_md_btn"),
+                    icon=ft.Icons.CONTENT_COPY_ROUNDED,
+                    height=32,
+                    style=OUTLINE_STYLE,
+                    on_click=_copy_md,
+                )
+            )
+        cycle_row.controls = cyc_ctrls
+
+        # 2. Day filter tabs
+        df_ctrls: list[ft.Control] = [
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+                border_radius=6,
+                bgcolor=COLORS["sidebar"] if state["selected_day"] == -1 else COLORS["input_bg"],
+                border=ft.Border.all(
+                    1,
+                    COLORS["sidebar"] if state["selected_day"] == -1 else COLORS["rule_strong"],
+                ),
+                ink=True,
+                on_click=lambda _: _set_day_filter(-1),
+                content=ft.Text(
+                    f"{get_string('filter_all')} ({plan.total_live})",
+                    size=11.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["cover_ink"]
+                    if state["selected_day"] == -1
+                    else COLORS["text_main"],
+                ),
+            )
+        ]
+        for d in plan.days:
+            is_sel = state["selected_day"] == d.day_index
+            df_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=6,
+                    bgcolor=COLORS["sidebar"] if is_sel else COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1,
+                        COLORS["sidebar"] if is_sel else COLORS["rule_strong"],
+                    ),
+                    ink=True,
+                    on_click=lambda _, idx=d.day_index: _set_day_filter(idx),
+                    content=ft.Text(
+                        f"{d.weekday_tag} · {d.date_str[:5]} ({d.total_accounts})",
+                        size=11.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["cover_ink"] if is_sel else COLORS["text_main"],
+                    ),
+                )
+            )
+        day_filter_row.controls = df_ctrls
+
+        # 4. Day cards
+        visible_days = (
+            plan.days
+            if state["selected_day"] == -1
+            else [d for d in plan.days if d.day_index == state["selected_day"]]
+        )
+        days_list_col.controls = [_build_day_card(d, lang) for d in visible_days]
+
+    _refresh_view(recompute=True)
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
+        title=ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("schedule_dialog_title"),
+                    size=17,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                ft.Text(
+                    get_string("schedule_dialog_subtitle"),
+                    size=12,
+                    color=COLORS["text_sub"],
+                ),
+            ],
+        ),
+        content=ft.Container(
+            width=820,
+            content=ft.Column(
+                spacing=10,
+                tight=True,
+                controls=[
+                    cycle_row,
+                    day_filter_row,
+                    days_list_col,
+                ],
+            ),
+        ),
+        actions=[
+            ft.OutlinedButton(
+                get_string("close_btn"),
+                style=OUTLINE_STYLE,
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            *(
+                [
+                    ft.OutlinedButton(
+                        get_string("schedule_clear_tags_btn"),
+                        icon=ft.Icons.DELETE_SWEEP_OUTLINED,
+                        style=OUTLINE_STYLE,
+                        on_click=_clear,
+                    )
+                ]
+                if on_clear_schedule is not None
+                else []
+            ),
+            ft.Button(
+                get_string("schedule_apply_tags_btn"),
+                icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
+                style=ACCENT_STYLE,
+                on_click=_apply,
             ),
         ],
     )

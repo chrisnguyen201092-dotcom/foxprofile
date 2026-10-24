@@ -54,6 +54,7 @@ def build_header_row(
     on_open_cooldown: Callable[[], None] | None = None,
     on_open_warmup_sites: Callable[[], None] | None = None,
     on_open_trust_monitor: Callable[[], None] | None = None,
+    on_open_safe_schedule: Callable[[], None] | None = None,
     audit_alert: bool = False,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
@@ -98,21 +99,32 @@ def build_header_row(
         tooltip=get_string("deselect_page") if all_selected else get_string("select_page"),
         on_change=lambda e: on_select_all(not all_selected),
     )
+    prof_chips: list[ft.Control] = [label("col_profile")]
+    if on_open_warmup_sites is not None:
+        prof_chips.append(
+            _head_chip(
+                ft.Icons.PUBLIC_ROUNDED,
+                get_string("warmup_sites_btn"),
+                get_string("warmup_sites_title"),
+                on_open_warmup_sites,
+            )
+        )
+    if on_open_safe_schedule is not None:
+        prof_chips.append(
+            _head_chip(
+                ft.Icons.CALENDAR_MONTH_ROUNDED,
+                get_string("schedule_btn"),
+                get_string("tooltip_schedule_btn"),
+                on_open_safe_schedule,
+            )
+        )
     profile_header: ft.Control = (
         ft.Row(
             spacing=6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[
-                label("col_profile"),
-                _head_chip(
-                    ft.Icons.PUBLIC_ROUNDED,
-                    get_string("warmup_sites_btn"),
-                    get_string("warmup_sites_title"),
-                    on_open_warmup_sites,
-                ),
-            ],
+            controls=prof_chips,
         )
-        if on_open_warmup_sites is not None
+        if len(prof_chips) > 1
         else label("col_profile")
     )
     proxy_header: ft.Control = (
@@ -344,13 +356,13 @@ def build_profile_card(
         )
     if status_disp is not None:
         st_label, st_color = status_disp
-        st_bg = ft.Colors.with_opacity(0.12, st_color)
+        st_bg = ft.Colors.with_opacity(0.11, st_color)
         top_line_controls.append(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=6, vertical=1),
                 border_radius=4,
                 bgcolor=st_bg,
-                border=ft.Border.all(1, st_color),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, st_color)),
                 ink=on_status_click is not None,
                 on_click=(
                     (lambda _, n=profile.name: on_status_click(n))

@@ -2193,7 +2193,7 @@ def open_trust_monitor_dialog(
                 summary_str = "✦ Đạt chuẩn — Sẵn sàng treo cả ngày"
                 action_color = "#15803D"
             elif info.cookie_count == 0 and info.session_count == 0 and info.history_pages == 0:
-                summary_str = "Mở trình duyệt · Lướt 3–4 web ngoài"
+                summary_str = "Mở trình duyệt · Đăng nhập Muse & Meta"
                 action_color = COLORS["text_dim"]
             else:
                 steps: list[str] = []
@@ -2208,8 +2208,8 @@ def open_trust_monitor_dialog(
                     action_color = COLORS["warning"]
 
                 if info.trust_tier == "trusted":
-                    if info.has_meta and info.ext_domains < 4:
-                        steps.append(f"Lướt thêm {4 - info.ext_domains} web ngoài")
+                    if info.has_meta and info.datr_domains < 3 and info.ext_domains < 4:
+                        steps.append("Mở Facebook/Instagram đồng bộ phiên")
                     if info.active_days < 6:
                         steps.append(f"Mở thêm {6 - info.active_days} ngày")
                     elif info.session_count < 10:
@@ -2233,7 +2233,7 @@ def open_trust_monitor_dialog(
                     if not steps and not info.has_thread_url:
                         steps.append("Mở 1 hội thoại Muse")
                     if not steps:
-                        steps.append("Đổi IP sạch (≤25pt) để lên Kim Cương")
+                        steps.append("Kiểm tra độ sạch IP (≤25pt) để lên Kim Cương")
                 else:
                     if not p.proxy:
                         steps.append("Gắn Proxy")
@@ -2241,10 +2241,10 @@ def open_trust_monitor_dialog(
                         steps.append("Điền Timezone/Locale")
                     if not info.hatch_gw:
                         steps.append("Đăng nhập Muse")
-                    if info.has_meta and info.ext_domains < 2:
-                        steps.append(f"Lướt thêm {max(2, 4 - info.ext_domains)} web ngoài")
-                    elif info.has_meta and not info.has_ps_l:
-                        steps.append("Vào web Nhóm 1 lấy Pixel")
+                    if info.has_meta and not info.has_ps_l:
+                        steps.append("Mở Facebook/Meta lấy ps_l")
+                    elif info.has_meta and info.datr_domains < 2 and info.ext_domains < 2:
+                        steps.append("Mở Facebook/Instagram đồng bộ")
                     if (
                         info.session_count >= 3
                         and (info.total_minutes / max(1, info.session_count)) < 5.0
@@ -2262,14 +2262,12 @@ def open_trust_monitor_dialog(
                         )
                     if not steps and not info.has_thread_url:
                         steps.append("Mở 1 hội thoại Muse")
-                    if not steps and info.ext_domains < 4:
-                        steps.append(f"Lướt thêm {4 - info.ext_domains} web ngoài")
                 summary_str = " · ".join(steps[:3]) if steps else "Tiếp tục duy trì phiên"
 
             detail_tip = (
                 f"Cần làm: {summary_str}\n"
-                f"Hiện tại: Cookie {info.datr_age_days:.1f}d · {info.active_days}d mở "
-                f"({info.session_count} phiên, {info.total_minutes}p) · {info.ext_domains} web ngoài"
+                f"Hiện tại: Cookie {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
+                f"{info.active_days}d mở ({info.session_count} phiên, {info.total_minutes}p)"
             )
 
             right_controls: list[ft.Control] = []

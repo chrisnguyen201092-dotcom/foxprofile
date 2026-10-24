@@ -316,6 +316,9 @@ class MonitorService:
         self._ip_history: dict[str, list[dict[str, Any]]] = {}
         self._ip_scores: dict[str, dict[str, Any]] = {}
         self._token_entry_memo: dict[str, tuple[float, bool]] = {}
+        self._last_pairings: list[list[str]] = []
+        self._last_shifts: dict[str, str] = {}
+        self._schedule_cycle_days: int = 5
         self._load_settings()
 
     def _settings_file(self) -> pathlib.Path:
@@ -404,6 +407,23 @@ class MonitorService:
                         if s_items:
                             clean_sess[pname] = s_items
                     self._live_sessions = clean_sess
+                raw_pairs = raw.get("last_pairings")
+                if isinstance(raw_pairs, list):
+                    clean_pairs: list[list[str]] = []
+                    for pr in raw_pairs:
+                        if isinstance(pr, list) and len(pr) == 2 and pr[0] and pr[1]:
+                            clean_pairs.append([str(pr[0]), str(pr[1])])
+                    self._last_pairings = clean_pairs
+                raw_shifts = raw.get("last_shifts")
+                if isinstance(raw_shifts, dict):
+                    self._last_shifts = {
+                        str(k): str(v)
+                        for k, v in raw_shifts.items()
+                        if isinstance(k, str) and v in ("morning", "evening")
+                    }
+                raw_cyc = raw.get("schedule_cycle_days")
+                if isinstance(raw_cyc, int) and 2 <= raw_cyc <= 7:
+                    self._schedule_cycle_days = raw_cyc
 
     def _save_settings(self) -> None:
         path = self._settings_file()
@@ -418,6 +438,9 @@ class MonitorService:
                 "session_history": {
                     k: v[-50:] for k, v in self._live_sessions.items() if v
                 },
+                "last_pairings": self._last_pairings,
+                "last_shifts": self._last_shifts,
+                "schedule_cycle_days": self._schedule_cycle_days,
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
@@ -428,6 +451,38 @@ class MonitorService:
 
     def set_cooldown_minutes(self, minutes: int) -> None:
         self._cooldown_minutes = max(0, min(1440, int(minutes)))
+        self._save_settings()
+
+    @property
+    def last_pairings(self) -> list[list[str]]:
+        return list(self._last_pairings)
+
+    @property
+    def last_shifts(self) -> dict[str, str]:
+        return dict(self._last_shifts)
+
+    @property
+    def schedule_cycle_days(self) -> int:
+        return self._schedule_cycle_days
+
+    def record_schedule_applied(
+        self,
+        pairings: list[list[str]],
+        shifts: dict[str, str],
+        cycle_days: int = 5,
+    ) -> None:
+        """Persist the applied schedule's pairings and shifts for next-cycle anti-correlation."""
+        self._last_pairings = [
+            [str(pr[0]), str(pr[1])]
+            for pr in (pairings or [])
+            if isinstance(pr, (list, tuple)) and len(pr) == 2 and pr[0] and pr[1]
+        ]
+        self._last_shifts = {
+            str(k): str(v)
+            for k, v in (shifts or {}).items()
+            if k and v in ("morning", "evening")
+        }
+        self._schedule_cycle_days = max(2, min(7, int(cycle_days)))
         self._save_settings()
 
     def acknowledge_proxy_change(self, profile_name: str, proxy: str | None) -> None:
@@ -640,6 +695,17 @@ class MonitorService:
             changed = True
         if old_name in self._disk_cache:
             self._disk_cache[new_name] = self._disk_cache.pop(old_name)
+        if old_name in self._last_shifts:
+            self._last_shifts[new_name] = self._last_shifts.pop(old_name)
+            changed = True
+        for pr in self._last_pairings:
+            if len(pr) == 2:
+                if pr[0] == old_name:
+                    pr[0] = new_name
+                    changed = True
+                if pr[1] == old_name:
+                    pr[1] = new_name
+                    changed = True
         if changed:
             self._save_settings()
 
@@ -1577,8 +1643,8 @@ class MonitorService:
             if (
                 active_days <= 1
                 and eff_datr_age >= 10.0
-                and cookie_count >= 50
-                and ext_domains >= 6
+                and cookie_count >= 25
+                and (datr_domains >= 4 or ext_domains >= 4)
             ):
                 # Veteran profile whose local session logs were rotated
                 active_days = 7
@@ -1635,18 +1701,18 @@ class MonitorService:
             if disk["has_thread_url"]:
                 score += 4
 
-            # 3. Meta Pixel (`ps_l`/`ps_n`), Non-Meta External Domains & HTTP Cache2 ETag Sync (max 20)
+            # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Ecosystem Depth & HTTP Cache2 ETag Sync (max 20)
             if has_ps_l or (not has_meta and has_grecaptcha):
                 score += 5
-            if ext_domains >= 5:
+            if (datr_domains >= 4 and cookie_count >= 25) or ext_domains >= 5:
                 score += 11
-            elif ext_domains >= 4:
+            elif (datr_domains >= 3 and cookie_count >= 20) or ext_domains >= 4:
                 score += 9
-            elif ext_domains >= 3:
+            elif (datr_domains >= 3 and cookie_count >= 12) or ext_domains >= 3:
                 score += 6
-            elif ext_domains >= 2:
+            elif datr_domains >= 2 or ext_domains >= 2:
                 score += 4
-            elif ext_domains >= 1:
+            elif datr_domains >= 1 or ext_domains >= 1:
                 score += 2
             if has_cache2 and cookie_count > 0:
                 score += 4
@@ -1679,8 +1745,8 @@ class MonitorService:
             if sess_cnt >= 3 and (total_mins / max(1, sess_cnt)) < 5.0:
                 # Ping-check bot pattern (opening & closing in < 5m per session)
                 score -= 10
-            if has_meta and ext_domains == 0:
-                # Single-purpose bot pattern (zero off-site web activity)
+            if has_meta and datr_domains < 2 and cookie_count < 10 and ext_domains == 0:
+                # Incomplete Meta/Muse cookie ecosystem state
                 score -= 10
 
             score = max(0, min(100, score))
@@ -1695,7 +1761,7 @@ class MonitorService:
                     or active_days < 4
                     or sess_cnt < 5
                     or total_mins < 90
-                    or (has_meta and (ext_domains < 2 or not has_ps_l))
+                    or (has_meta and ((datr_domains < 3 and ext_domains < 2) or not has_ps_l))
                     or has_meta_checkpoint
                     or proxy_port_changed
                     or ip_country_changed
@@ -1707,7 +1773,8 @@ class MonitorService:
                     or sess_cnt < 10
                     or total_mins < 300
                     or ((total_mins / max(1, sess_cnt)) < 10.0 and total_mins < 600)
-                    or (has_meta and ext_domains < 4)
+                    or (has_meta and not disk["has_thread_url"])
+                    or (has_meta and datr_domains < 3 and ext_domains < 4)
                     or (ip_fraud_score is not None and ip_fraud_score >= 70)
                 ):
                     trust_score = min(76, score)

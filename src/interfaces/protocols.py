@@ -95,6 +95,10 @@ class IProfileManager(Protocol):
 
     def bulk_update_status(self, names: list[str], status: str | None) -> int: ...
 
+    def apply_schedule_tags(self, tag_map: dict[str, str]) -> int: ...
+
+    def clear_schedule_tags(self) -> int: ...
+
     def update_profile_dates(
         self,
         name: str,

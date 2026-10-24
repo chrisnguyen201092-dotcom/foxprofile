@@ -14,6 +14,7 @@ from ..services.proxy.geo_check import (
     lookup_ip_isp,
     lookup_ip_risk,
 )
+from ..services.scheduler import SchedulePlan
 from ..utils.totp import (
     format_oauth_reader_line,
     generate_totp,
@@ -45,6 +46,7 @@ from .dialogs import (
     open_prelaunch_guard_dialog,
     open_profile_dates_dialog,
     open_proxy_pool_dialog,
+    open_safe_schedule_dialog,
     open_session_history_dialog,
     open_status_dialog,
     open_trash_dialog,
@@ -1150,4 +1152,60 @@ class AppHandlers:
             created_at=getattr(p, "created_at", None),
             banned_at=getattr(p, "banned_at", None),
             on_apply=_apply,
+        )
+
+    def on_open_safe_schedule(self) -> None:
+        page = self._get_page()
+        assert page is not None
+        snap = self._monitor.snapshot(
+            list(self._pm.profiles.values()),
+            self._bl.running_profile_names() | self._state.loading_names(),
+        )
+
+        def _apply_plan(plan: SchedulePlan) -> None:
+            tag_map = plan.status_tag_map()
+            cnt = self._pm.apply_schedule_tags(tag_map)
+            self._monitor.record_schedule_applied(
+                plan.pairing_records(),
+                plan.shift_records(),
+                plan.cycle_days,
+            )
+            self._state.sort_by = "schedule"
+            self._state.current_page = 1
+            refs = self._get_refs()
+            if refs is not None and refs.sort_dropdown is not None:
+                refs.sort_dropdown.value = "schedule"
+            self._log(
+                get_string(
+                    "schedule_applied_log",
+                    count=cnt,
+                    days=plan.cycle_days,
+                )
+            )
+            self._refresh()
+
+        def _copy_md(md_text: str) -> None:
+            _set_clipboard_text(page, md_text)
+            self._log(get_string("schedule_copied_log"))
+
+        def _clear_tags() -> None:
+            cnt = self._pm.clear_schedule_tags()
+            if self._state.sort_by == "schedule":
+                self._state.sort_by = "custom"
+                refs = self._get_refs()
+                if refs is not None and refs.sort_dropdown is not None:
+                    refs.sort_dropdown.value = "custom"
+            self._log(get_string("schedule_cleared_log", count=cnt))
+            self._refresh()
+
+        open_safe_schedule_dialog(
+            page,
+            list(self._pm.profiles.values()),
+            snap,
+            initial_cycle_days=self._monitor.schedule_cycle_days,
+            last_pairings=self._monitor.last_pairings,
+            last_shifts=self._monitor.last_shifts,
+            on_apply_schedule=_apply_plan,
+            on_copy_schedule=_copy_md,
+            on_clear_schedule=_clear_tags,
         )
