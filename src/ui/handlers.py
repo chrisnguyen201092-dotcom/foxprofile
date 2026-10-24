@@ -47,6 +47,7 @@ from .dialogs import (
     open_session_history_dialog,
     open_status_dialog,
     open_trash_dialog,
+    open_warmup_sites_dialog,
 )
 from .refs import UIRefs
 from .state import AppState
@@ -653,6 +654,18 @@ class AppHandlers:
             on_copy_text=_copy_text,
             initial_tab=initial_tab,
         )
+
+    def on_open_warmup_sites(self) -> None:
+        page = self._get_page()
+        if page is None:
+            return
+
+        def _copy_text(val: str, log_msg: str) -> None:
+            if page is not None and hasattr(page, "run_task"):
+                page.run_task(_set_clipboard_text, page, val)
+            self._log(log_msg)
+
+        open_warmup_sites_dialog(page, on_copy_text=_copy_text)
 
     def on_start_edit_proxy(self, name: str) -> None:
         self._state.editing_note = None

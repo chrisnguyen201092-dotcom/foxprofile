@@ -10,15 +10,15 @@ from ..theme.styles import ACCENT_STYLE, RAIL_STYLE
 # (filter id, string key) in display order; counts come from the app.
 FILTERS = (
     ("all", "filter_all"),
-    ("pinned", "filter_pinned"),
     ("running", "filter_running"),
     ("ready_launch", "filter_ready_launch"),
+    ("pinned", "filter_pinned"),
     ("cooldown", "filter_cooldown"),
     ("warnings", "filter_warnings"),
-    ("proxy", "filter_proxy"),
     ("direct", "filter_direct"),
     ("chrome", "filter_chrome"),
 )
+_ALWAYS_VISIBLE_FILTERS = {"all", "running", "ready_launch"}
 
 
 def _filter_row(
@@ -26,7 +26,7 @@ def _filter_row(
 ) -> ft.Container:
     on = fid == active
     return ft.Container(
-        height=34,
+        height=32,
         border_radius=7,
         padding=ft.Padding.symmetric(horizontal=10),
         bgcolor=COLORS["cover_ink"] if on else None,
@@ -38,7 +38,7 @@ def _filter_row(
             controls=[
                 ft.Text(
                     label_text,
-                    size=13.5,
+                    size=13,
                     font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
                     color=COLORS["sidebar"] if on else COLORS["cover_ink"],
                     no_wrap=True,
@@ -47,7 +47,47 @@ def _filter_row(
                 ),
                 ft.Text(
                     str(count),
+                    size=11.5,
+                    font_family=FONT_DATA,
+                    color=COLORS["sidebar"] if on else COLORS["cover_muted"],
+                ),
+            ],
+        ),
+    )
+
+
+def _tag_chip(
+    fid: str,
+    label_text: str,
+    count: int,
+    active: str,
+    on_filter: Callable[[str], None],
+) -> ft.Container:
+    on = fid == active
+    return ft.Container(
+        height=26,
+        padding=ft.Padding.symmetric(horizontal=9),
+        border_radius=6,
+        bgcolor=COLORS["cover_ink"] if on else COLORS["cover_deep"],
+        border=ft.Border.all(
+            1, COLORS["cover_ink"] if on else ft.Colors.with_opacity(0.22, COLORS["cover_muted"])
+        ),
+        ink=True,
+        on_click=lambda _, f=fid: on_filter(f),
+        content=ft.Row(
+            spacing=5,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    label_text,
                     size=12,
+                    font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
+                    color=COLORS["sidebar"] if on else COLORS["cover_ink"],
+                ),
+                ft.Text(
+                    str(count),
+                    size=11,
                     font_family=FONT_DATA,
                     color=COLORS["sidebar"] if on else COLORS["cover_muted"],
                 ),
@@ -63,41 +103,57 @@ def build_filter_buttons(
     group_counts: dict[str, int] | None = None,
     status_counts: dict[str, int] | None = None,
 ) -> list[ft.Control]:
-    """The rail's filter list; the active filter is set in cover ink."""
+    """The rail's filter list; secondary filters with 0 count auto-hide to reduce clutter."""
     controls: list[ft.Control] = [
         _filter_row(fid, get_string(key), counts.get(fid, 0), active, on_filter)
         for fid, key in FILTERS
+        if fid in _ALWAYS_VISIBLE_FILTERS or counts.get(fid, 0) > 0 or active == fid
     ]
     if status_counts:
         controls.append(
             ft.Container(
-                padding=ft.Padding.only(left=10, top=12, bottom=4),
+                padding=ft.Padding.only(left=10, top=10, bottom=4),
                 content=ft.Text(
                     get_string("status_filter_title"),
-                    size=11.5,
+                    size=11,
                     font_family=FONT_SEMIBOLD,
                     color=COLORS["cover_muted"],
                 ),
             )
         )
+        status_chips: list[ft.Control] = []
         for st_val, cnt in status_counts.items():
             disp = resolve_status_display(st_val, get_string)
             lbl = disp[0] if disp is not None else st_val
-            controls.append(_filter_row(f"status:{st_val}", lbl, cnt, active, on_filter))
+            status_chips.append(_tag_chip(f"status:{st_val}", lbl, cnt, active, on_filter))
+        controls.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6),
+                content=ft.Row(spacing=6, run_spacing=6, wrap=True, controls=status_chips),
+            )
+        )
     if group_counts:
         controls.append(
             ft.Container(
-                padding=ft.Padding.only(left=10, top=12, bottom=4),
+                padding=ft.Padding.only(left=10, top=10, bottom=4),
                 content=ft.Text(
                     get_string("groups_title"),
-                    size=11.5,
+                    size=11,
                     font_family=FONT_SEMIBOLD,
                     color=COLORS["cover_muted"],
                 ),
             )
         )
-        for grp, cnt in group_counts.items():
-            controls.append(_filter_row(f"group:{grp}", grp, cnt, active, on_filter))
+        group_chips = [
+            _tag_chip(f"group:{grp}", grp, cnt, active, on_filter)
+            for grp, cnt in group_counts.items()
+        ]
+        controls.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6),
+                content=ft.Row(spacing=6, run_spacing=6, wrap=True, controls=group_chips),
+            )
+        )
     return controls
 
 
@@ -119,9 +175,26 @@ def build_sidebar(
     trash_btn: ft.Control | None = None,
 ) -> ft.Container:
     log_toggle_btn.on_click = on_toggle_log
-    bottom_tools: list[ft.Control] = (
-        [ft.Container(height=8), trash_btn] if trash_btn is not None else []
+    mcp_icon_btn = ft.Container(
+        width=34,
+        height=34,
+        border_radius=7,
+        bgcolor=COLORS["cover_deep"],
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip=get_string("mcp_button"),
+        on_click=on_mcp,
+        content=ft.Icon(
+            ft.Icons.SMART_TOY_OUTLINED,
+            size=16,
+            color=COLORS["cover_ink"],
+        ),
     )
+    bottom_row_controls: list[ft.Control] = []
+    if trash_btn is not None:
+        bottom_row_controls.append(trash_btn)
+    bottom_row_controls.extend([mcp_icon_btn, _language_switch(language, on_language)])
     return ft.Container(
         width=240,
         bgcolor=COLORS["sidebar"],
@@ -190,12 +263,12 @@ def build_sidebar(
                         ),
                     ],
                 ),
-                ft.Container(height=22),
+                ft.Container(height=18),
                 ft.Container(
-                    padding=ft.Padding.only(left=10, bottom=6),
+                    padding=ft.Padding.only(left=10, bottom=4),
                     content=ft.Text(
                         get_string("filter_title"),
-                        size=12,
+                        size=11.5,
                         font_family=FONT_SEMIBOLD,
                         color=COLORS["cover_muted"],
                     ),
@@ -218,47 +291,34 @@ def build_sidebar(
                     ],
                 ),
                 log_column,
-                *bottom_tools,
                 ft.Container(height=8),
-                ft.OutlinedButton(
-                    get_string("mcp_button"),
-                    icon=ft.Icons.SMART_TOY_OUTLINED,
-                    width=208,
-                    height=38,
-                    style=RAIL_STYLE,
-                    on_click=on_mcp,
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=bottom_row_controls,
                 ),
-                ft.Container(height=8),
-                _language_switch(language, on_language),
             ],
         ),
     )
 
 
 def _language_switch(active: str, on_language: Callable[[str], None] | None) -> ft.Container:
-    """Segmented Tiếng Việt / English switch, as in the web panel."""
-
-    def seg(code: str, label: str) -> ft.Container:
-        on = code == active
-        return ft.Container(
-            expand=True,
-            height=30,
-            border_radius=6,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=COLORS["sidebar"] if on else None,
-            ink=not on,
-            on_click=None if on or on_language is None else (lambda _, c=code: on_language(c)),
-            content=ft.Text(
-                label,
-                size=13,
-                font_family=FONT_SEMIBOLD if on else FONT_MEDIUM,
-                color=COLORS["cover_ink"] if on else COLORS["cover_muted"],
-            ),
-        )
-
+    """Compact VI / EN switch pill."""
+    next_code = "en" if active == "vi" else "vi"
     return ft.Container(
-        padding=3,
-        border_radius=8,
+        height=34,
+        padding=ft.Padding.symmetric(horizontal=8),
+        border_radius=7,
         bgcolor=COLORS["cover_deep"],
-        content=ft.Row(spacing=0, controls=[seg("vi", "Tiếng Việt"), seg("en", "English")]),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
+        alignment=ft.Alignment(0, 0),
+        ink=on_language is not None,
+        tooltip="Tiếng Việt / English",
+        on_click=None if on_language is None else (lambda _: on_language(next_code)),
+        content=ft.Text(
+            active.upper(),
+            size=11.5,
+            font_family=FONT_DATA,
+            color=COLORS["cover_ink"],
+        ),
     )

@@ -52,6 +52,7 @@ def build_header_row(
     on_open_proxy_pool: Callable[[], None] | None = None,
     cooldown_chip_label: str = "",
     on_open_cooldown: Callable[[], None] | None = None,
+    on_open_warmup_sites: Callable[[], None] | None = None,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
         return ft.Text(
@@ -64,31 +65,19 @@ def build_header_row(
         tooltip: str,
         on_click: Callable[[], None],
     ) -> ft.Container:
+        full_tip = f"{text}: {tooltip}" if text and text not in tooltip else tooltip
         return ft.Container(
-            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            padding=ft.Padding.symmetric(horizontal=5, vertical=3),
             border_radius=4,
             bgcolor=COLORS["input_bg"],
             border=ft.Border.all(1, COLORS["rule_strong"]),
             ink=True,
-            tooltip=tooltip,
+            tooltip=full_tip,
             on_click=lambda _: on_click(),
-            content=ft.Row(
-                spacing=3,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[
-                    ft.Icon(
-                        icon,
-                        size=11,
-                        color=COLORS["text_sub"],
-                    ),
-                    ft.Text(
-                        text,
-                        size=10.5,
-                        font_family=FONT_MEDIUM,
-                        color=COLORS["text_sub"],
-                    ),
-                ],
+            content=ft.Icon(
+                icon,
+                size=13,
+                color=COLORS["text_sub"],
             ),
         )
 
@@ -96,6 +85,23 @@ def build_header_row(
         value=all_selected,
         tooltip=get_string("deselect_page") if all_selected else get_string("select_page"),
         on_change=lambda e: on_select_all(not all_selected),
+    )
+    profile_header: ft.Control = (
+        ft.Row(
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                label("col_profile"),
+                _head_chip(
+                    ft.Icons.PUBLIC_ROUNDED,
+                    get_string("warmup_sites_btn"),
+                    get_string("warmup_sites_title"),
+                    on_open_warmup_sites,
+                ),
+            ],
+        )
+        if on_open_warmup_sites is not None
+        else label("col_profile")
     )
     proxy_header: ft.Control = (
         ft.Row(
@@ -141,7 +147,7 @@ def build_header_row(
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
                 _cell("select", box),
-                _cell("name", label("col_profile")),
+                _cell("name", profile_header),
                 _cell("device", label("col_device")),
                 _cell("proxy", proxy_header),
                 _cell("geo", geo_header),

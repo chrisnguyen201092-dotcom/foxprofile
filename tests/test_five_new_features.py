@@ -1955,3 +1955,55 @@ def test_mail_credentials_storage_bulk_import_and_dialog(isolated_pm, tmp_path):
         ],
     )
     assert len(fp.dialogs) == 1
+
+
+def test_warmup_sites_vault_and_dialog(tmp_path):
+    """Test warmup sites parser, random picker, persistence, and UI dialog."""
+    import flet as ft
+
+    from src.ui.dialogs import open_warmup_sites_dialog
+    from src.utils.warmup_sites import (
+        DEFAULT_WARMUP_TEXT,
+        load_warmup_text,
+        parse_warmup_groups,
+        pick_random_warmup_site,
+        save_warmup_text,
+    )
+
+    groups = parse_warmup_groups(DEFAULT_WARMUP_TEXT)
+    assert len(groups) == 6
+    assert groups[0]["title"] == "Web vào Meta không bị chặn"
+    assert len(groups[0]["items"]) == 1  # type: ignore[arg-type]
+    assert len(groups[1]["items"]) == 4  # type: ignore[arg-type]
+    assert len(groups[2]["items"]) == 6  # type: ignore[arg-type]
+    assert len(groups[3]["items"]) == 3  # type: ignore[arg-type]
+    assert len(groups[4]["items"]) == 3  # type: ignore[arg-type]
+    assert len(groups[5]["items"]) == 3  # type: ignore[arg-type]
+
+    picked = pick_random_warmup_site(DEFAULT_WARMUP_TEXT)
+    assert picked is not None
+    assert picked["url"].startswith("https://")
+
+    custom_file = tmp_path / "warmup_sites.json"
+    assert load_warmup_text(custom_file) == DEFAULT_WARMUP_TEXT
+    assert save_warmup_text("Nhóm Test\nhttps://example.com — Trang test", custom_file)
+    assert "https://example.com" in load_warmup_text(custom_file)
+
+    class FakePage:
+        def __init__(self):
+            self.dialogs: list[ft.AlertDialog] = []
+
+        def update(self):
+            pass
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+    fp = FakePage()
+    open_warmup_sites_dialog(fp, on_copy_text=lambda u, m: None)  # type: ignore[arg-type]
+    assert len(fp.dialogs) == 1
+

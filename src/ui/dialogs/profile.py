@@ -31,6 +31,12 @@ from ...utils.validation import (
     validate_timezone,
     validate_two_fa,
 )
+from ...utils.warmup_sites import (
+    DEFAULT_WARMUP_TEXT,
+    load_warmup_text,
+    parse_warmup_groups,
+    save_warmup_text,
+)
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_engine_dropdown, build_os_dropdown
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
@@ -1610,3 +1616,329 @@ def open_mail_credentials_dialog(
         and (mail_token_field.value or "").strip()
     ):
         _trigger_read_inbox()
+
+
+def open_warmup_sites_dialog(
+    page: ft.Page,
+    on_copy_text: Callable[[str, str], None] | None = None,
+) -> None:
+    """Dialog to browse, 1-click copy, and customize human-trust warmup sites."""
+    active_tab: list[str] = ["list"]
+    current_text: list[str] = [load_warmup_text()]
+
+    feedback_text = ft.Text("", size=12, color=COLORS["success"], visible=False)
+    groups_col = ft.Column(
+        tight=True,
+        spacing=10,
+        scroll=ft.ScrollMode.AUTO,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    edit_field = ft.TextField(
+        value=current_text[0],
+        multiline=True,
+        min_lines=12,
+        max_lines=16,
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+
+    def _copy_url(url: str, custom_msg: str | None = None) -> None:
+        clean_url = (url or "").strip()
+        if not clean_url:
+            return
+        log_msg = custom_msg or get_string("warmup_copied_log", url=clean_url)
+        if on_copy_text is not None:
+            on_copy_text(clean_url, log_msg)
+        feedback_text.value = f"✓ {log_msg}"
+        feedback_text.color = COLORS["success"]
+        feedback_text.visible = True
+        page.update()
+
+    def _rebuild_groups_list() -> None:
+        groups = parse_warmup_groups(current_text[0])
+        blocks: list[ft.Control] = []
+        for grp in groups:
+            title_str = str(grp.get("title") or "")
+            sub_str = str(grp.get("subtitle") or "")
+            items = grp.get("items") or []
+            item_rows: list[ft.Control] = []
+            if isinstance(items, list):
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    u = str(it.get("url") or "")
+                    n = str(it.get("note") or "")
+                    item_rows.append(
+                        ft.Container(
+                            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+                            border_radius=7,
+                            bgcolor=COLORS["card_bg"],
+                            border=ft.Border.all(1, COLORS["rule_strong"]),
+                            ink=True,
+                            tooltip=u,
+                            on_click=lambda _, url_val=u: _copy_url(url_val),
+                            content=ft.Row(
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Column(
+                                        spacing=2,
+                                        tight=True,
+                                        expand=True,
+                                        controls=[
+                                            ft.Text(
+                                                u,
+                                                size=12.5,
+                                                font_family=FONT_DATA,
+                                                weight=ft.FontWeight.W_600,
+                                                color=COLORS["accent"],
+                                                no_wrap=True,
+                                                overflow=ft.TextOverflow.ELLIPSIS,
+                                            ),
+                                            *(
+                                                [
+                                                    ft.Text(
+                                                        n,
+                                                        size=11.5,
+                                                        color=COLORS["text_sub"],
+                                                    )
+                                                ]
+                                                if n
+                                                else []
+                                            ),
+                                        ],
+                                    ),
+                                    ft.Container(
+                                        padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                                        border_radius=5,
+                                        bgcolor=COLORS["input_bg"],
+                                        border=ft.Border.all(1, COLORS["accent"]),
+                                        content=ft.Row(
+                                            spacing=4,
+                                            tight=True,
+                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                            controls=[
+                                                ft.Icon(
+                                                    ft.Icons.CONTENT_COPY_ROUNDED,
+                                                    size=12,
+                                                    color=COLORS["accent"],
+                                                ),
+                                                ft.Text(
+                                                    get_string("warmup_copy_pill"),
+                                                    size=11,
+                                                    font_family=FONT_SEMIBOLD,
+                                                    color=COLORS["accent"],
+                                                ),
+                                            ],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        )
+                    )
+            blocks.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                    border_radius=8,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["rule_strong"]),
+                    content=ft.Column(
+                        tight=True,
+                        spacing=6,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        controls=[
+                            ft.Text(
+                                title_str,
+                                size=13,
+                                font_family=FONT_BOLD,
+                                color=COLORS["text_main"],
+                            ),
+                            *(
+                                [
+                                    ft.Text(
+                                        sub_str,
+                                        size=11.5,
+                                        color=COLORS["text_dim"],
+                                    )
+                                ]
+                                if sub_str
+                                else []
+                            ),
+                            *item_rows,
+                        ],
+                    ),
+                )
+            )
+        groups_col.controls = blocks
+
+    _rebuild_groups_list()
+
+    list_body = ft.Column(
+        tight=True,
+        spacing=8,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Container(
+                height=420,
+                content=groups_col,
+            ),
+        ],
+    )
+
+    edit_body = ft.Column(
+        tight=True,
+        spacing=8,
+        visible=False,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Text(
+                get_string("warmup_edit_hint"),
+                size=12,
+                color=COLORS["text_sub"],
+            ),
+            edit_field,
+        ],
+    )
+
+    reset_btn = ft.OutlinedButton(
+        get_string("warmup_reset_default_btn"),
+        icon=ft.Icons.RESTORE_ROUNDED,
+        height=36,
+        style=OUTLINE_STYLE,
+        visible=False,
+    )
+    save_btn = ft.Button(
+        get_string("save_changes"),
+        icon=ft.Icons.SAVE,
+        style=ACCENT_STYLE,
+        visible=False,
+    )
+    tab_row_slot = ft.Container()
+
+    def _switch_tab(tab: str) -> None:
+        active_tab[0] = tab
+        list_body.visible = tab == "list"
+        edit_body.visible = tab == "edit"
+        reset_btn.visible = tab == "edit"
+        save_btn.visible = tab == "edit"
+        feedback_text.visible = False
+        _rebuild_tabs()
+        page.update()
+
+    def _rebuild_tabs() -> None:
+        cur = active_tab[0]
+
+        def _tab_pill(code: str, label_str: str, icon: ft.IconData) -> ft.Container:
+            is_act = cur == code
+            return ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                border_radius=6,
+                bgcolor=COLORS["sidebar"] if is_act else COLORS["input_bg"],
+                border=ft.Border.all(
+                    1, COLORS["sidebar"] if is_act else COLORS["rule_strong"]
+                ),
+                ink=True,
+                on_click=lambda _, c=code: _switch_tab(c),
+                content=ft.Row(
+                    spacing=5,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Icon(
+                            icon,
+                            size=14,
+                            color=COLORS["cover_ink"] if is_act else COLORS["text_sub"],
+                        ),
+                        ft.Text(
+                            label_str,
+                            size=11.5,
+                            font_family=FONT_SEMIBOLD if is_act else FONT_MEDIUM,
+                            color=COLORS["cover_ink"] if is_act else COLORS["text_main"],
+                        ),
+                    ],
+                ),
+            )
+
+        tab_row_slot.content = ft.Row(
+            spacing=6,
+            controls=[
+                _tab_pill("list", get_string("warmup_tab_list"), ft.Icons.PUBLIC_ROUNDED),
+                _tab_pill("edit", get_string("warmup_tab_edit"), ft.Icons.EDIT_NOTE_ROUNDED),
+            ],
+        )
+
+    def _on_reset(_: ft.ControlEvent) -> None:
+        edit_field.value = DEFAULT_WARMUP_TEXT
+        current_text[0] = DEFAULT_WARMUP_TEXT
+        save_warmup_text(DEFAULT_WARMUP_TEXT)
+        _rebuild_groups_list()
+        feedback_text.value = f"✓ {get_string('warmup_saved_log')}"
+        feedback_text.color = COLORS["success"]
+        feedback_text.visible = True
+        page.update()
+
+    def _on_save(_: ft.ControlEvent) -> None:
+        new_txt = (edit_field.value or "").strip() or DEFAULT_WARMUP_TEXT
+        current_text[0] = new_txt
+        save_warmup_text(new_txt)
+        _rebuild_groups_list()
+        _switch_tab("list")
+        feedback_text.value = f"✓ {get_string('warmup_saved_log')}"
+        feedback_text.color = COLORS["success"]
+        feedback_text.visible = True
+        page.update()
+
+    reset_btn.on_click = _on_reset
+    save_btn.on_click = _on_save
+    _rebuild_tabs()
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
+        title=ft.Column(
+            spacing=6,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("warmup_sites_title"),
+                    size=18,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                ft.Text(
+                    get_string("warmup_sites_subtitle"),
+                    size=12.5,
+                    color=COLORS["text_sub"],
+                ),
+                tab_row_slot,
+            ],
+        ),
+        content=ft.Container(
+            width=540,
+            content=ft.Column(
+                tight=True,
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    list_body,
+                    edit_body,
+                    feedback_text,
+                ],
+            ),
+        ),
+        actions=[
+            reset_btn,
+            ft.TextButton(
+                get_string("cancel"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            save_btn,
+        ],
+    )
+    page.show_dialog(dlg)
+

@@ -66,8 +66,8 @@ class App:
         self._trash_btn = ft.OutlinedButton(
             get_string("trash_button", count=0),
             icon=ft.Icons.DELETE_OUTLINE,
-            width=208,
-            height=36,
+            expand=True,
+            height=34,
             style=RAIL_STYLE,
         )
         self._arrange_btn = ft.OutlinedButton(
@@ -172,8 +172,8 @@ class App:
         self._trash_btn = ft.OutlinedButton(
             get_string("trash_button", count=len(self.pm.list_trashed_profiles())),
             icon=ft.Icons.DELETE_OUTLINE,
-            width=208,
-            height=36,
+            expand=True,
+            height=34,
             style=RAIL_STYLE,
             on_click=lambda _: self.h.on_open_trash(),
         )
@@ -579,6 +579,7 @@ class App:
                 on_open_proxy_pool=self.h.on_open_proxy_pool,
                 cooldown_chip_label=self._cooldown_chip_text(),
                 on_open_cooldown=self.h.on_open_cooldown_settings,
+                on_open_warmup_sites=self.h.on_open_warmup_sites,
             )
             if page_profiles
             else None
