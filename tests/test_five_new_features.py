@@ -2643,13 +2643,14 @@ def test_safe_farming_scheduler_and_dialog(isolated_pm, tmp_path):
         isolated_pm.profiles[s_name].created_at = "2026-10-18"
         mon._live_stopped_at[s_name] = now_dt - dt.timedelta(hours=68 if idx_s == 0 else 20)
 
-    # Empty draft slot (no email, no Live page)
+    # Empty numbered draft slot (even with default pages=["Live"], no email & 0 cookies -> skipped)
     isolated_pm.add_profile(
         "24",
         "http://u:p@198.98.62.18:9775",
         "windows",
         timezone="America/New_York",
         locale="en-US",
+        pages=["Live"],
     )
 
     p_list = list(isolated_pm.profiles.values())
@@ -2778,6 +2779,141 @@ def test_safe_farming_scheduler_and_dialog(isolated_pm, tmp_path):
     clear_btn = dlg.actions[1]
     clear_btn.on_click(None)
     assert len(cleared_calls) == 1
+
+
+def test_parallel_work_squad_and_cluster_guard(isolated_pm, tmp_path):
+    import datetime as dt
+
+    from src.services.monitor import MonitorService
+    from src.services.scheduler import select_parallel_work_squad
+    from src.ui.dialogs import open_work_squad_dialog
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+
+    # Create profiles on shared /64 nodes (usa101..104) and gateway 209.141.40.174
+    isolated_pm.add_profile("U101_A", "http://u:p@sp02-usa101.proxysystem.net:30001", "windows")
+    isolated_pm.add_profile("U101_B", "http://u:p@sp02-usa101.nguonproxy.com:30002", "windows")
+    isolated_pm.add_profile("U102_A", "http://u:p@sp02-usa102.proxysystem.net:30011", "windows")
+    isolated_pm.add_profile("U103_A", "http://u:p@sp02-usa103.proxysystem.net:30021", "windows")
+    isolated_pm.add_profile("GW_1", "http://u:p@209.141.40.174:41001", "windows")
+    isolated_pm.add_profile("GW_2", "http://u:p@209.141.40.174:41002", "windows")
+
+    # Populate valid timezone/locale so prelaunch has no timezone warning
+    for p in isolated_pm.profiles.values():
+        p.ip_timezone = "America/Chicago"
+        p.ip_locale = "en-US"
+        p.created_at = "2026-01-01"
+
+    p_list = list(isolated_pm.profiles.values())
+
+    # 1. When U101_A is running, U101_B should have cluster_busy_by=['U101_A'] and prelaunch warning
+    snap_running = mon.snapshot(p_list, {"U101_A"})
+    assert snap_running.profiles["U101_B"].cluster == "usa101"
+    assert snap_running.profiles["U101_B"].cluster_busy_by == ["U101_A"]
+    assert snap_running.profiles["U101_B"].can_open_parallel is False
+    assert snap_running.profiles["U102_A"].can_open_parallel is True
+
+    pre_u101b = mon.check_prelaunch(isolated_pm.profiles["U101_B"], p_list, {"U101_A"})
+    assert any(it.code == "cluster_busy" for it in pre_u101b)
+
+    # 2. Bulk prelaunch with U101_A + U101_B should warn batch_cluster_collision
+    bulk_check = mon.check_bulk_prelaunch(
+        ["U101_A", "U101_B"],
+        p_list,
+        set(),
+    )
+    assert "U101_B" in bulk_check
+    assert any(it.code == "batch_cluster_collision" for it in bulk_check["U101_B"])
+
+    # 3. select_parallel_work_squad avoids busy cluster usa101 when U101_A is running
+    now_dt = dt.datetime(2026, 10, 25, 11, 0, 0)
+    # Mark U103_A as having run 2 hours ago (fatigued today)
+    mon._live_stopped_at["U103_A"] = now_dt - dt.timedelta(hours=2)
+    snap_with_fatigue = mon.snapshot(p_list, {"U101_A"})
+
+    squad_rot = select_parallel_work_squad(
+        p_list,
+        snap_with_fatigue,
+        running_names={"U101_A"},
+        count=4,
+        mode="rotation",
+        now=now_dt,
+    )
+    selected_names = [c.name for c in squad_rot.candidates]
+    # U101_B must NOT be selected because U101_A is running on usa101
+    assert "U101_B" not in selected_names
+    # U102_A, GW_1, GW_2 are fresh and conflict-free so they are picked before fatigued U103_A
+    assert selected_names[:3] == ["U102_A", "GW_1", "GW_2"] or set(selected_names[:3]) == {
+        "U102_A",
+        "GW_1",
+        "GW_2",
+    }
+
+    # 4. Test open_work_squad_dialog rendering and apply callback
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, d):
+            self.dialogs.append(d)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    dp = DummyPage()
+    applied = []
+    open_work_squad_dialog(
+        dp,  # type: ignore[arg-type]
+        p_list,
+        snap_with_fatigue,
+        running_names={"U101_A"},
+        on_select_squad=lambda names, mode: applied.append((names, mode)),
+    )
+    assert len(dp.dialogs) == 1
+    dlg = dp.dialogs[0]
+    apply_btn = dlg.actions[-1]
+    apply_btn.on_click(None)
+    assert len(applied) == 1
+    assert "U101_B" not in applied[0][0]
+    assert applied[0][1] == "rotation"
+
+
+def test_rename_preserves_legacy_parenthesized_log_sessions(tmp_path):
+    """Renaming 'Sienna' -> '#2  Sienna' must also migrate older 'Sienna (note)' log sessions."""
+    from src.services.monitor import MonitorService
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    log_file = log_dir / "foxprofile_20261015.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026-10-15 10:00:00 | INFO | runner | [Sienna (hoangvanluan)] BROWSER_STARTED",
+                "2026-10-15 11:00:00 | INFO | runner | [Sienna (hoangvanluan)] BROWSER_CLOSED",
+                "2026-10-24 16:00:00 | INFO | runner | [Sienna] BROWSER_STARTED",
+                "2026-10-24 17:01:00 | INFO | runner | [Sienna] BROWSER_CLOSED",
+                "2026-10-25 12:44:12 | INFO | manager | Updated profile: Sienna -> #2  Sienna",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    sessions = mon.get_profile_sessions("#2  Sienna")
+    assert len(sessions) == 2
+    assert sum(s["duration_mins"] for s in sessions) == 121
+
 
 
 

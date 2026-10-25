@@ -10,9 +10,12 @@ from ...services.scheduler import (
     ScheduledDay,
     ScheduledPair,
     SchedulePlan,
+    SquadCandidate,
+    WorkSquadPlan,
     build_safe_schedule,
     format_schedule_markdown,
     is_gateway_ipv6_cluster,
+    select_parallel_work_squad,
 )
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_SEMIBOLD
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, ERROR_STYLE, OUTLINE_STYLE
@@ -871,6 +874,420 @@ def open_safe_schedule_dialog(
                 style=ACCENT_STYLE,
                 on_click=_apply,
             ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+_SQUAD_SIZES = (2, 4, 6, 8, 10)
+
+
+def _build_squad_candidate_row(
+    idx: int,
+    cand: SquadCandidate,
+    *,
+    is_opened: bool = False,
+    on_open_one: Callable[[str], None] | None = None,
+) -> ft.Container:
+    is_gw = is_gateway_ipv6_cluster(cand.cluster)
+    cluster_col = "#0284C7" if is_gw else "#059669"
+    tier_sym = {
+        "diamond": "✦",
+        "trusted": "◈",
+        "warming": "◇",
+        "cold": "○",
+    }.get(cand.trust_tier, "◈")
+    tier_col = (
+        "#15803D"
+        if cand.trust_tier == "diamond"
+        else ("#1D4ED8" if cand.trust_tier == "trusted" else COLORS["accent"])
+    )
+    display_name = (
+        cand.name
+        if cand.name == cand.email or not cand.email
+        else f"{cand.name} · {cand.email}"
+    )
+    rest_h = int(round(cand.rest_hours))
+
+    right_badges: list[ft.Control] = [
+        ft.Container(
+            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+            border_radius=4,
+            bgcolor=cluster_col,
+            content=ft.Text(
+                f"{cand.cluster}{cand.port}",
+                size=11,
+                font_family=FONT_DATA,
+                color="#FFFFFF",
+            ),
+        ),
+        ft.Container(
+            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            border_radius=4,
+            bgcolor=ft.Colors.with_opacity(0.11, tier_col),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.55, tier_col)),
+            content=ft.Text(
+                f"{tier_sym} {cand.trust_score}",
+                size=11,
+                font_family=FONT_DATA,
+                weight=ft.FontWeight.W_700,
+                color=tier_col,
+            ),
+        ),
+        ft.Container(
+            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+            border_radius=4,
+            bgcolor=COLORS["card_bg"],
+            border=ft.Border.all(1, COLORS["rule_strong"]),
+            content=ft.Text(
+                get_string("work_squad_rest_badge", hours=rest_h),
+                size=11,
+                font_family=FONT_DATA,
+                color=COLORS["text_sub"],
+            ),
+        ),
+    ]
+    if cand.is_rising_star:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(1, COLORS["accent"]),
+                content=ft.Text(
+                    get_string("work_squad_rising_badge"),
+                    size=10.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["accent"],
+                ),
+            )
+        )
+
+    if is_opened:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=9, vertical=4),
+                border_radius=5,
+                bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
+                border=ft.Border.all(1, COLORS["success"]),
+                content=ft.Text(
+                    get_string("work_squad_row_opened_badge"),
+                    size=11,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["success"],
+                ),
+            )
+        )
+    elif on_open_one is not None:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+                border_radius=5,
+                bgcolor=COLORS["sidebar"],
+                ink=True,
+                on_click=lambda _, n=cand.name: on_open_one(n),
+                content=ft.Text(
+                    get_string("work_squad_row_open_btn"),
+                    size=11,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["cover_ink"],
+                ),
+            )
+        )
+
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        border_radius=8,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["card_border"]),
+        content=ft.Row(
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Container(
+                    width=28,
+                    height=24,
+                    border_radius=5,
+                    bgcolor=COLORS["sidebar"],
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        f"#{idx}",
+                        size=11,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["cover_ink"],
+                    ),
+                ),
+                ft.Text(
+                    display_name,
+                    size=13,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_main"],
+                    expand=True,
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Row(spacing=6, tight=True, controls=right_badges),
+            ],
+        ),
+    )
+
+
+def open_work_squad_dialog(
+    page: ft.Page,
+    profiles: list[Profile],
+    snap: MonitorSnapshot,
+    running_names: set[str],
+    *,
+    on_select_squad: Callable[[list[str], str], None],
+    on_launch_single: Callable[[str], None] | None = None,
+    on_launch_staggered: Callable[[list[str], str], None] | None = None,
+) -> None:
+    """Compact modal to pick and launch a conflict-free parallel work squad across distinct /64 subnets."""
+    launched_in_dialog: set[str] = set()
+    state: dict[str, object] = {
+        "mode": "rotation",
+        "size": 4,
+        "seed": 0,
+        "plan": None,
+    }
+
+    controls_row = ft.Row(spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    banner_slot = ft.Container(visible=False)
+    list_col = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, height=310)
+    select_only_btn = ft.OutlinedButton(
+        "",
+        icon=ft.Icons. CHECKLIST_ROUNDED,
+        style=OUTLINE_STYLE,
+    )
+    apply_btn = ft.Button(
+        "",
+        icon=ft.Icons.ROCKET_LAUNCH_ROUNDED,
+        style=ACCENT_STYLE,
+    )
+
+    def _pill_btn(label_str: str, active: bool, on_click_fn: Callable[[], None]) -> ft.Container:
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+            border_radius=6,
+            bgcolor=COLORS["sidebar"] if active else COLORS["input_bg"],
+            border=ft.Border.all(
+                1,
+                COLORS["sidebar"] if active else COLORS["rule_strong"],
+            ),
+            ink=True,
+            on_click=lambda _: on_click_fn(),
+            content=ft.Text(
+                label_str,
+                size=12,
+                font_family=FONT_SEMIBOLD if active else FONT_DATA,
+                color=COLORS["cover_ink"] if active else COLORS["text_main"],
+            ),
+        )
+
+    def _set_mode(m: str) -> None:
+        state["mode"] = m
+        _refresh_squad(recompute=True)
+        page.update()
+
+    def _set_size(sz: int) -> None:
+        state["size"] = sz
+        _refresh_squad(recompute=True)
+        page.update()
+
+    def _shuffle(_: ft.ControlEvent) -> None:
+        state["seed"] = int(state["seed"]) + 1  # type: ignore[arg-type]
+        _refresh_squad(recompute=True)
+        page.update()
+
+    def _handle_open_one(name: str) -> None:
+        if name in launched_in_dialog:
+            return
+        launched_in_dialog.add(name)
+        if on_launch_single is not None:
+            on_launch_single(name)
+        _refresh_squad(recompute=False)
+        page.update()
+
+    def _select_only(_: ft.ControlEvent) -> None:
+        plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
+        page.pop_dialog()
+        if plan is not None and plan.candidates:
+            on_select_squad([c.name for c in plan.candidates], str(state["mode"]))
+
+    def _apply(_: ft.ControlEvent) -> None:
+        plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
+        page.pop_dialog()
+        if plan is not None and plan.candidates:
+            names = [c.name for c in plan.candidates]
+            mode_str = str(state["mode"])
+            if on_launch_staggered is not None:
+                on_launch_staggered(names, mode_str)
+            else:
+                on_select_squad(names, mode_str)
+
+    select_only_btn.on_click = _select_only
+    apply_btn.on_click = _apply
+
+    def _refresh_squad(*, recompute: bool = True) -> None:
+        plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
+        if recompute or plan is None:
+            plan = select_parallel_work_squad(
+                profiles,
+                snap,
+                running_names | launched_in_dialog,
+                count=int(state["size"]),  # type: ignore[arg-type]
+                mode=str(state["mode"]),
+                shuffle_seed=int(state["seed"]) * 53,  # type: ignore[arg-type]
+            )
+            state["plan"] = plan
+
+        bar_items: list[ft.Control] = [
+            ft.Text(
+                get_string("work_squad_mode_label"),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_sub"],
+            ),
+            _pill_btn(
+                get_string("work_squad_mode_rotation"),
+                state["mode"] == "rotation",
+                lambda: _set_mode("rotation"),
+            ),
+            _pill_btn(
+                get_string("work_squad_mode_prime"),
+                state["mode"] == "prime",
+                lambda: _set_mode("prime"),
+            ),
+            ft.Container(width=6),
+            ft.Text(
+                get_string("work_squad_size_label"),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_sub"],
+            ),
+            *[
+                _pill_btn(str(sz), state["size"] == sz, lambda s=sz: _set_size(s))
+                for sz in _SQUAD_SIZES
+            ],
+            ft.OutlinedButton(
+                get_string("schedule_reshuffle_btn"),
+                icon=ft.Icons.SHUFFLE_ROUNDED,
+                height=30,
+                style=OUTLINE_STYLE,
+                on_click=_shuffle,
+            ),
+        ]
+        controls_row.controls = bar_items
+
+        if plan.busy_clusters:
+            locked_str = ", ".join(
+                f"{cl} ({', '.join(names)})"
+                for cl, names in sorted(plan.busy_clusters.items())
+            )
+            banner_slot.visible = True
+            banner_slot.content = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                border_radius=6,
+                bgcolor=ft.Colors.with_opacity(0.11, COLORS["warning"]),
+                border=ft.Border.all(1, COLORS["warning"]),
+                content=ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Icon(ft.Icons.LOCK_CLOCK_OUTLINED, size=14, color=COLORS["warning"]),
+                        ft.Text(
+                            get_string("work_squad_busy_banner", clusters=locked_str),
+                            size=11.5,
+                            color=COLORS["text_main"],
+                            expand=True,
+                        ),
+                    ],
+                ),
+            )
+        else:
+            banner_slot.visible = False
+
+        if plan.candidates:
+            list_col.controls = [
+                _build_squad_candidate_row(
+                    i + 1,
+                    c,
+                    is_opened=(c.name in launched_in_dialog),
+                    on_open_one=_handle_open_one,
+                )
+                for i, c in enumerate(plan.candidates)
+            ]
+            remaining_cnt = sum(1 for c in plan.candidates if c.name not in launched_in_dialog)
+            select_only_btn.disabled = False
+            select_only_btn.content = get_string("work_squad_select_only_btn", count=len(plan.candidates))
+            apply_btn.disabled = remaining_cnt == 0
+            apply_btn.content = get_string(
+                "work_squad_apply_btn",
+                count=remaining_cnt if remaining_cnt > 0 else len(plan.candidates),
+            )
+        else:
+            list_col.controls = [
+                ft.Container(
+                    padding=20,
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("work_squad_empty"),
+                        size=13,
+                        color=COLORS["text_sub"],
+                    ),
+                )
+            ]
+            select_only_btn.disabled = True
+            select_only_btn.content = get_string("work_squad_select_only_btn", count=0)
+            apply_btn.disabled = True
+            apply_btn.content = get_string("work_squad_apply_btn", count=0)
+
+    _refresh_squad(recompute=True)
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=10, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=18),
+        title=ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("work_squad_dialog_title"),
+                    size=17,
+                    font_family=FONT_BOLD,
+                    color=COLORS["text_main"],
+                ),
+                ft.Text(
+                    get_string("work_squad_dialog_subtitle"),
+                    size=12,
+                    color=COLORS["text_sub"],
+                ),
+            ],
+        ),
+        content=ft.Container(
+            width=740,
+            content=ft.Column(
+                spacing=10,
+                tight=True,
+                controls=[
+                    controls_row,
+                    banner_slot,
+                    list_col,
+                ],
+            ),
+        ),
+        actions=[
+            ft.OutlinedButton(
+                get_string("close_btn"),
+                style=OUTLINE_STYLE,
+                on_click=lambda _: page.pop_dialog(),
+            ),
+            select_only_btn,
+            apply_btn,
         ],
     )
     page.show_dialog(dlg)

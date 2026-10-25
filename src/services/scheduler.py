@@ -326,6 +326,8 @@ def _order_shift_pairs(
                 c_prev = {pa.cluster} | ({pb.cluster} if pb else set())
                 overlap = c_curr & c_prev
                 score += len(overlap) * 1000.0
+                # Heavy penalty for repeating the same /64 node (usa10X) back-to-back
+                score += sum(3000.0 for c in overlap if not is_gateway_ipv6_cluster(c))
                 # Extra penalty if two IPv6 gateway pairs run back-to-back when a pure Detroit pair exists
                 if any(is_gateway_ipv6_cluster(c) for c in overlap):
                     score += 500.0
@@ -354,6 +356,13 @@ def _order_shift_pairs(
     else:
         best_perm = tuple(raw_pairs)
 
+    gw_counts_in_shift: dict[str, int] = {}
+    for a, b in best_perm:
+        for c in ({a.cluster} | ({b.cluster} if b else set())):
+            if is_gateway_ipv6_cluster(c):
+                gw_counts_in_shift[c] = gw_counts_in_shift.get(c, 0) + 1
+    max_non_adj_in_shift = (len(best_perm) + 1) // 2
+
     result: list[ScheduledPair] = []
     for offset, (a, b) in enumerate(best_perm):
         # Put gateway account first in the pair display for visual consistency
@@ -364,7 +373,12 @@ def _order_shift_pairs(
         if offset > 0:
             prev_clusters = result[-1].clusters
             curr_clusters = {a.cluster} | ({b.cluster} if b else set())
-            adj_overlap = bool(prev_clusters & curr_clusters)
+            ov = prev_clusters & curr_clusters
+            adj_overlap = any(
+                (not is_gateway_ipv6_cluster(c))
+                or gw_counts_in_shift.get(c, 0) <= max_non_adj_in_shift
+                for c in ov
+            )
         result.append(
             ScheduledPair(
                 pair_index=start_index + offset,
@@ -431,6 +445,16 @@ def _split_and_order_day_shifts(
             pen += 400.0
         if solo_in_morning:
             pen += 400.0
+        # Penalize duplicate /64 non-gateway clusters (usa10X) within the same shift so 2 accounts
+        # on the same /64 node are separated into Morning vs Evening shifts.
+        for shift_list in (m_ordered, e_ordered):
+            seen_non_gw: set[str] = set()
+            for p in shift_list:
+                for c in p.clusters:
+                    if c and not is_gateway_ipv6_cluster(c):
+                        if c in seen_non_gw:
+                            pen += 2500.0
+                        seen_non_gw.add(c)
         pen += sum(1000.0 for p in m_ordered if p.has_adjacent_overlap)
         pen += sum(1000.0 for p in e_ordered if p.has_adjacent_overlap)
         for p in m_ordered:
@@ -491,10 +515,22 @@ def build_safe_schedule(
         if not (p.proxy or "").strip():
             continue
         info = snap.profiles.get(p.name)
+        if info and info.is_banned:
+            continue
+        has_disk_activity = bool(
+            info
+            and (
+                info.hatch_gw
+                or info.hatch_sess
+                or info.cookie_count > 0
+                or info.session_count > 0
+                or info.history_pages > 0
+            )
+        )
         has_account = (
             bool((p.email or "").strip())
-            or "live" in pgs_lower
-            or bool(info and (info.hatch_gw or info.hatch_sess))
+            or has_disk_activity
+            or ("live" in pgs_lower and not p.name.strip().isdigit())
         )
         if not has_account:
             skipped_drafts.append(p.name)
@@ -524,6 +560,13 @@ def build_safe_schedule(
         if created_dt is not None:
             age_h = max(rest_h, (now_dt - created_dt).total_seconds() / 3600.0)
             days_old = (now_dt.date() - created_dt.date()).days
+            if (
+                info is not None
+                and info.datr_age_days > 0.0
+                and abs(days_old - info.datr_age_days) <= 3.0
+            ):
+                days_old = int(info.datr_age_days)
+                age_h = max(rest_h, info.datr_age_days * 24.0)
         else:
             age_h = max(rest_h, 120.0)
             days_old = 5
@@ -628,9 +671,48 @@ def build_safe_schedule(
     other_accounts = [a for a in sched_accounts if a.cluster not in gateway_day_targets]
     ordered_for_bucketing = [*gateway_accounts, *other_accounts]
 
+    rem_by_cluster: dict[str, int] = dict(total_by_cluster)
+    rem_other_total = len(other_accounts)
+
+    def _effective_min_day(a: ScheduledAccount) -> int:
+        raw_d = _min_day_for_account(a)
+        if raw_d <= 0:
+            return 0
+        c = a.cluster
+        rem_c = rem_by_cluster.get(c, 1) if c else 1
+        is_gw = c in gateway_day_targets
+        while raw_d > 0:
+            # 1. Check if remaining cluster capacity in days [raw_d .. cycle_days-1] can hold `rem_c`
+            avail_c = sum(
+                max(
+                    0,
+                    _cluster_cap_for_day(c, k, relax=0)
+                    - day_cluster_counts[k].get(c, 0),
+                )
+                for k in range(raw_d, cycle_days)
+            )
+            if avail_c < rem_c:
+                raw_d -= 1
+                continue
+            # 2. For non-gateway accounts, check if remaining open slots in days [raw_d .. cycle_days-1] can hold `rem_other_total`
+            if not is_gw:
+                avail_open = sum(
+                    max(0, quotas[k] - len(day_buckets[k]))
+                    for k in range(raw_d, cycle_days)
+                )
+                if avail_open < rem_other_total:
+                    raw_d -= 1
+                    continue
+            break
+        return raw_d
+
     unassigned: list[ScheduledAccount] = []
     for acc in ordered_for_bucketing:
-        min_d = _min_day_for_account(acc)
+        min_d = _effective_min_day(acc)
+        if acc.cluster:
+            rem_by_cluster[acc.cluster] = max(0, rem_by_cluster.get(acc.cluster, 1) - 1)
+        if acc.cluster not in gateway_day_targets:
+            rem_other_total = max(0, rem_other_total - 1)
         placed = False
         for relax in (0, 1):
             for d_idx in range(min_d, cycle_days):
@@ -764,6 +846,63 @@ def build_safe_schedule(
             if acc.shared_endpoint and acc.endpoint:
                 endpoint_assigned_days.setdefault(acc.endpoint, []).append(target_d)
 
+    # 4b. Rebalance any non-gateway /64 cluster (e.g. usa109) that exceeded its strict even cap
+    # (`relax=0`, typically <= 2 per day) by swapping with an earlier/other day that has room.
+    for d_over in range(cycle_days - 1, -1, -1):
+        for c_over in list(day_cluster_counts[d_over].keys()):
+            if not c_over or c_over in gateway_day_targets:
+                continue
+            cap_over = _cluster_cap_for_day(c_over, d_over, relax=0)
+            while day_cluster_counts[d_over].get(c_over, 0) > cap_over:
+                swapped_c = False
+                over_indices = [
+                    i
+                    for i, a in enumerate(day_buckets[d_over])
+                    if a.cluster == c_over and not a.shared_endpoint and not a.completed_today
+                ]
+                over_indices.sort(key=lambda i: -day_buckets[d_over][i].rest_hours)
+                for idx_a in over_indices:
+                    acc_over = day_buckets[d_over][idx_a]
+                    for d_under in range(cycle_days - 1, -1, -1):
+                        if d_under == d_over:
+                            continue
+                        if day_cluster_counts[d_under].get(c_over, 0) >= _cluster_cap_for_day(
+                            c_over, d_under, relax=0
+                        ):
+                            continue
+                        cand_indices = [
+                            j
+                            for j, b in enumerate(day_buckets[d_under])
+                            if b.cluster != c_over
+                            and b.cluster not in gateway_day_targets
+                            and not b.shared_endpoint
+                            and not b.completed_today
+                            and day_cluster_counts[d_over].get(b.cluster, 0)
+                            < _cluster_cap_for_day(b.cluster, d_over, relax=0)
+                        ]
+                        cand_indices.sort(
+                            key=lambda j: abs(day_buckets[d_under][j].rest_hours - acc_over.rest_hours)
+                        )
+                        if cand_indices:
+                            idx_b = cand_indices[0]
+                            acc_under = day_buckets[d_under][idx_b]
+                            day_buckets[d_over][idx_a] = acc_under
+                            day_buckets[d_under][idx_b] = acc_over
+                            day_cluster_counts[d_over][c_over] -= 1
+                            day_cluster_counts[d_over][acc_under.cluster] = (
+                                day_cluster_counts[d_over].get(acc_under.cluster, 0) + 1
+                            )
+                            day_cluster_counts[d_under][acc_under.cluster] -= 1
+                            day_cluster_counts[d_under][c_over] = (
+                                day_cluster_counts[d_under].get(c_over, 0) + 1
+                            )
+                            swapped_c = True
+                            break
+                    if swapped_c:
+                        break
+                if not swapped_c:
+                    break
+
     # 5. Pair accounts within each day and order Morning / Evening shifts
     days_out: list[ScheduledDay] = []
     collision_total = 0
@@ -857,4 +996,185 @@ def format_schedule_markdown(plan: SchedulePlan) -> str:
                 lines.append(f"- **Cặp {pr.pair_index}:** {s1}{s2}")
         lines.append("")
     return "\n".join(lines).strip()
+
+
+@dataclass
+class SquadCandidate:
+    name: str
+    email: str
+    cluster: str
+    port: str
+    endpoint: str
+    trust_score: int
+    trust_tier: str
+    rest_hours: float
+    today_minutes: int
+    active_days: int
+    total_minutes: int
+    hatch_gw: bool
+    is_rising_star: bool = False
+
+
+@dataclass
+class WorkSquadPlan:
+    mode: str  # "rotation" | "prime"
+    target_size: int
+    candidates: list[SquadCandidate] = field(default_factory=list)
+    busy_clusters: dict[str, list[str]] = field(default_factory=dict)
+
+
+def select_parallel_work_squad(
+    profiles: list[Profile],
+    snap: MonitorSnapshot,
+    running_names: set[str] | None = None,
+    *,
+    count: int = 4,
+    mode: str = "rotation",
+    shuffle_seed: int = 0,
+    now: dt.datetime | None = None,
+) -> WorkSquadPlan:
+    """Select `count` conflict-free profiles across distinct IPv6 /64 clusters for parallel work."""
+    now_dt = now or dt.datetime.now()
+    active_set = set(running_names or ())
+    target_n = max(1, min(12, int(count)))
+
+    busy_clusters: dict[str, list[str]] = {}
+    for p in profiles:
+        if p.name not in active_set:
+            continue
+        cl = extract_proxy_cluster(p.proxy)
+        if cl:
+            busy_clusters.setdefault(cl, []).append(p.name)
+
+    fresh_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
+    rested_fallback_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
+
+    for p in profiles:
+        if p.name in active_set:
+            continue
+        grp = (p.group or "").strip().lower()
+        pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
+        if grp == "disconnected" or "disconnected" in pgs_lower:
+            continue
+        if not (p.proxy or "").strip():
+            continue
+        info = snap.profiles.get(p.name)
+        if info is None or info.is_banned:
+            continue
+        if info.has_warning or info.cluster_busy_by:
+            continue
+        if any(
+            c in info.audit_codes
+            for c in ("burned_proxy", "burned_ip", "duplicate_fingerprint")
+        ):
+            continue
+        has_disk_activity = bool(
+            info.hatch_gw
+            or info.hatch_sess
+            or info.cookie_count > 0
+            or info.session_count > 0
+            or info.history_pages > 0
+        )
+        has_account = (
+            bool((p.email or "").strip())
+            or has_disk_activity
+            or (not p.name.strip().isdigit())
+        )
+        if not has_account:
+            continue
+
+        cl = extract_proxy_cluster(p.proxy)
+        if not cl:
+            continue
+        if not is_gateway_ipv6_cluster(cl) and cl in busy_clusters:
+            continue
+
+        lc = info.last_closed
+        rest_h = (
+            max(0.0, (now_dt - lc).total_seconds() / 3600.0)
+            if lc is not None
+            else 72.0
+        )
+        is_rising = bool(info.hatch_gw and 48 <= info.trust_score < 80)
+        cand = SquadCandidate(
+            name=p.name,
+            email=(p.email or p.name).strip(),
+            cluster=cl,
+            port=extract_proxy_port(p.proxy),
+            endpoint=extract_proxy_endpoint(p.proxy),
+            trust_score=info.trust_score,
+            trust_tier=info.trust_tier,
+            rest_hours=rest_h,
+            today_minutes=info.today_minutes,
+            active_days=info.active_days,
+            total_minutes=info.total_minutes,
+            hatch_gw=info.hatch_gw,
+            is_rising_star=is_rising,
+        )
+
+        # Fatigue check: avoid picking accounts that already worked today or closed recently
+        min_rest_h = 18.0 if mode == "rotation" else 12.0
+        is_fatigued = info.today_minutes >= 15 or rest_h < min_rest_h
+
+        gw_bonus = 1000.0 if info.hatch_gw else (300.0 if info.hatch_sess else 0.0)
+        jitter = _jitter_hash(p.name, shuffle_seed + 7) * 16.0
+        if mode == "prime":
+            rank_score = (
+                gw_bonus
+                + info.trust_score * 5.0
+                + min(96.0, rest_h) * 0.6
+                + jitter
+            )
+        else:
+            # Rotation mode: prioritize well-rested accounts and rising stars so strong accounts rest safely
+            rising_bonus = 40.0 if (is_rising and rest_h >= 24.0) else 0.0
+            rank_score = (
+                gw_bonus
+                + min(120.0, rest_h) * 2.5
+                + info.trust_score * 0.8
+                + rising_bonus
+                + jitter
+            )
+
+        bucket = rested_fallback_by_cluster if is_fatigued else fresh_by_cluster
+        bucket.setdefault(cl, []).append((rank_score, cand))
+
+    # Pick top representative(s) per cluster: 1 for each usa10X /64 node, up to 2-3 for /48 gateway
+    picked_pool: list[tuple[int, float, SquadCandidate]] = []
+    all_clusters = sorted(set(fresh_by_cluster) | set(rested_fallback_by_cluster))
+    max_gw_take = min(3, max(1, (target_n + 2) // 3))
+
+    for cl in all_clusters:
+        is_gw = is_gateway_ipv6_cluster(cl)
+        busy_cnt = len(busy_clusters.get(cl, []))
+        cap = max(0, max_gw_take - busy_cnt) if is_gw else 1
+        if cap <= 0:
+            continue
+        fresh_list = sorted(fresh_by_cluster.get(cl, []), key=lambda x: -x[0])
+        fb_list = sorted(rested_fallback_by_cluster.get(cl, []), key=lambda x: -x[0])
+        chosen_for_cl: list[tuple[int, float, SquadCandidate]] = []
+        seen_eps: set[str] = set()
+        for tier_priority, src_list in ((0, fresh_list), (1, fb_list)):
+            for sc, c_item in src_list:
+                if len(chosen_for_cl) >= cap:
+                    break
+                if c_item.endpoint and c_item.endpoint in seen_eps:
+                    continue
+                if c_item.endpoint:
+                    seen_eps.add(c_item.endpoint)
+                # Slightly defer extra gateway slots (2nd/3rd on 209.141.40.174) behind primary /64 nodes
+                slot_pen = len(chosen_for_cl) * 120.0
+                picked_pool.append((tier_priority, -(sc - slot_pen), c_item))
+                chosen_for_cl.append((tier_priority, sc, c_item))
+
+    picked_pool.sort(key=lambda item: (item[0], item[1], item[2].name.casefold()))
+    final_candidates = [item[2] for item in picked_pool[:target_n]]
+
+    return WorkSquadPlan(
+        mode=mode,
+        target_size=target_n,
+        candidates=final_candidates,
+        busy_clusters=busy_clusters,
+    )
+
 

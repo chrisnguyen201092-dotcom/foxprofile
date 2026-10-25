@@ -47,6 +47,7 @@ def build_ui_refs(
         options=[
             ft.dropdown.Option("custom", get_string("sort_custom")),
             ft.dropdown.Option("schedule", get_string("sort_schedule")),
+            ft.dropdown.Option("parallel_ready", get_string("sort_parallel_ready")),
             ft.dropdown.Option("cooldown_desc", get_string("sort_cooldown_desc")),
             ft.dropdown.Option("cooldown_asc", get_string("sort_cooldown_asc")),
             ft.dropdown.Option("trust_desc", get_string("sort_trust_desc")),

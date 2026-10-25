@@ -42,6 +42,7 @@ TOKEN_BURST_THRESHOLD = 12
 _RE_PORT = re.compile(r":(\d{2,5})(?=:|$|\s|/)")
 _RE_LEGACY_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
 _RE_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_RE_USA_CLUSTER = re.compile(r"\b(usa\d+)\b", re.IGNORECASE)
 _RE_LOG_LINE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?:\||-)\s+(?P<lvl>\w+)\s+(?:\||-)\s+"
     r"(?P<mod>[\w\.]+)\s+(?:\||-)\s+(?P<msg>.*)$"
@@ -179,6 +180,21 @@ def extract_proxy_endpoint(proxy_str: str | None) -> str:
     return f"{host}:{m.group(1)}" if host else f":{m.group(1)}"
 
 
+def extract_proxy_cluster(proxy_str: str | None) -> str:
+    ep = extract_proxy_endpoint(proxy_str)
+    if not ep or ":" not in ep:
+        return ""
+    host = ep.rsplit(":", 1)[0].strip().lower()
+    if not host:
+        return ""
+    m_usa = _RE_USA_CLUSTER.search(host)
+    return m_usa.group(1).lower() if m_usa else host
+
+
+def is_gateway_ipv6_cluster(cluster: str) -> bool:
+    return bool(cluster and cluster[0].isdigit())
+
+
 def _ipv6_prefix_64(ip: str | None) -> str:
     clean = (ip or "").strip().lower()
     if ":" not in clean:
@@ -264,6 +280,9 @@ class ProfileMonitorInfo:
     trust_score: int = 0
     trust_tier: str = "cold"
     audit_codes: list[str] = field(default_factory=list)
+    cluster: str = ""
+    cluster_busy_by: list[str] = field(default_factory=list)
+    can_open_parallel: bool = False
 
     @property
     def has_warning(self) -> bool:
@@ -679,6 +698,7 @@ class MonitorService:
         if not old_name or not new_name or old_name == new_name:
             return
         changed = False
+        merged_before = self._merged_completed_sessions(old_name)
         if old_name in self._last_used_ports:
             self._last_used_ports[new_name] = self._last_used_ports.pop(old_name)
             changed = True
@@ -693,6 +713,11 @@ class MonitorService:
             prev_sess = self._live_sessions.pop(old_name)
             self._live_sessions.setdefault(new_name, []).extend(prev_sess)
             changed = True
+        if merged_before and len(merged_before) > len(self._live_sessions.get(new_name, [])):
+            self._live_sessions[new_name] = list(reversed(merged_before[:50]))
+            changed = True
+        self._log_cache_key = ()
+        self._log_history.clear()
         if old_name in self._disk_cache:
             self._disk_cache[new_name] = self._disk_cache.pop(old_name)
         if old_name in self._last_shifts:
@@ -902,20 +927,34 @@ class MonitorService:
                 if mr:
                     old_p = mr.group("old").strip()
                     new_p = mr.group("new").strip()
-                    if old_p != new_p and old_p in hist:
-                        nh = _ensure(new_p)
-                        oh = hist.pop(old_p)
-                        new_port = self._last_used_ports.get(new_p, "")
-                        for s_item in oh["sessions"]:
-                            s_item["port"] = new_port
-                        nh["sessions"].extend(oh["sessions"])
-                        nh["today_seconds"] += oh["today_seconds"]
-                        if oh["last_closed"] and (
-                            not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
-                        ):
-                            nh["last_closed"] = oh["last_closed"]
-                        if oh["_open_start"] and not nh["_open_start"]:
-                            nh["_open_start"] = oh["_open_start"]
+                    if old_p != new_p:
+                        old_prefix = f"{old_p} ("
+                        match_keys = [
+                            k
+                            for k in list(hist.keys())
+                            if k == old_p or (k.startswith(old_prefix) and k.endswith(")"))
+                        ]
+                        if match_keys:
+                            nh = _ensure(new_p)
+                            new_port = self._last_used_ports.get(new_p, "")
+                            existing_starts = {s["start"] for s in nh["sessions"]}
+                            for mk in match_keys:
+                                oh = hist.pop(mk)
+                                for s_item in oh["sessions"]:
+                                    if s_item["start"] not in existing_starts:
+                                        copied = dict(s_item)
+                                        if new_port:
+                                            copied["port"] = new_port
+                                        nh["sessions"].append(copied)
+                                        existing_starts.add(s_item["start"])
+                                nh["today_seconds"] += oh["today_seconds"]
+                                if oh["last_closed"] and (
+                                    not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
+                                ):
+                                    nh["last_closed"] = oh["last_closed"]
+                                if oh["_open_start"] and not nh["_open_start"]:
+                                    nh["_open_start"] = oh["_open_start"]
+                            nh["sessions"].sort(key=lambda item: str(item.get("start", "")))
                     continue
 
                 mt = _RE_TRASH_PROFILE.match(msg)
@@ -1470,8 +1509,6 @@ class MonitorService:
                 st_str = str(s_item.get("start", ""))
                 if len(st_str) >= 10:
                     active_dates_set.add(st_str[:10])
-                if len(en_str) >= 10:
-                    active_dates_set.add(en_str[:10])
                 total_all_mins += max(1, int(s_item.get("duration_mins") or 0))
                 if en_str.startswith(today_str) or st_str.startswith(today_str):
                     try:
@@ -1484,7 +1521,6 @@ class MonitorService:
             sess_cnt = len(completed)
             if p.name in running_names:
                 sess_cnt += 1
-                active_dates_set.add(today_str)
                 start_dt = self._live_started_at.get(p.name) or h.get("_open_start")
                 if start_dt is not None:
                     active_dates_set.add(start_dt.strftime("%Y-%m-%d"))
@@ -1492,8 +1528,14 @@ class MonitorService:
                     total_all_mins += int(run_s // 60)
                     today_st = max(start_dt, midnight_today)
                     secs += max(0.0, (now - today_st).total_seconds())
+                else:
+                    active_dates_set.add(today_str)
             today_mins_map[p.name] = int(secs // 60)
-            sess_stats_map[p.name] = (sess_cnt, len(active_dates_set), total_all_mins)
+            sess_stats_map[p.name] = (
+                sess_cnt,
+                min(len(active_dates_set), sess_cnt),
+                total_all_mins,
+            )
 
         if ports_seeded:
             self._save_settings()
@@ -1513,11 +1555,26 @@ class MonitorService:
                 snap.proxy_collisions.append((port_label, running_on_port))
         snap.active_ports = len(active_ports_set)
 
+        running_by_cluster: dict[str, list[str]] = {}
+        running_by_v6_64: dict[str, list[str]] = {}
+        for p_run in profiles:
+            if p_run.name not in running_names:
+                continue
+            r_cl = extract_proxy_cluster(p_run.proxy)
+            if r_cl:
+                running_by_cluster.setdefault(r_cl, []).append(p_run.name)
+            r_entries = self._ip_history.get(p_run.name, [])
+            r_ip = r_entries[0].get("ip", "") if r_entries else ""
+            r_v6 = _ipv6_prefix_64(r_ip)
+            if r_v6:
+                running_by_v6_64.setdefault(r_v6, []).append(p_run.name)
+
         cd_target = self._cooldown_minutes
         for p in profiles:
             is_run = p.name in running_names
             port = extract_proxy_port(p.proxy)
             ep = extract_proxy_endpoint(p.proxy)
+            cluster = extract_proxy_cluster(p.proxy)
             siblings = port_to_profiles.get(ep, [p.name]) if ep else [p.name]
             busy_by = [m for m in siblings if m != p.name and m in running_names]
 
@@ -1629,19 +1686,31 @@ class MonitorService:
             cookie_domains = int(disk.get("cookie_domains") or 0)
             history_pages = int(disk.get("history_pages") or 0)
             history_domains = int(disk.get("history_domains") or 0)
-            age_days = compute_days_since(p.created_at) or 0
+            cal_age_days = compute_days_since(p.created_at) or 0
+            sess_cnt, active_days, total_mins = sess_stats_map.get(p.name, (0, 0, 0))
+            if datr_age_days > 0.0:
+                # Use full 24-hour days since login (`int(datr_age_days)`) unless the user
+                # manually set an older historical `created_at` (>3 days older than cookie).
+                if cal_age_days - datr_age_days > 3.0:
+                    age_days = cal_age_days
+                else:
+                    age_days = int(datr_age_days)
+            elif cookie_count == 0 and sess_cnt == 0 and history_pages == 0 and cal_age_days <= 3:
+                age_days = 0
+            else:
+                age_days = cal_age_days
             eff_datr_age = round(
                 datr_age_days
                 if datr_age_days > 0
                 else (float(age_days) if (not has_meta and cookie_count > 0) else 0.0),
                 1,
             )
-            sess_cnt, active_days, total_mins = sess_stats_map.get(p.name, (0, 0, 0))
+            raw_sess_cnt = sess_cnt
             if sess_cnt == 0 and (cookie_count > 0 or history_pages > 0):
                 sess_cnt = 1
                 active_days = 1
             if (
-                active_days <= 1
+                raw_sess_cnt == 0
                 and eff_datr_age >= 10.0
                 and cookie_count >= 25
                 and (datr_domains >= 4 or ext_domains >= 4)
@@ -1796,6 +1865,35 @@ class MonitorService:
             else:
                 trust_tier = "cold"
 
+            cluster_busy_by: list[str] = []
+            if not is_run and not busy_by:
+                if cluster and not is_gateway_ipv6_cluster(cluster):
+                    cluster_busy_by = [
+                        m for m in running_by_cluster.get(cluster, []) if m != p.name
+                    ]
+                elif cluster and is_gateway_ipv6_cluster(cluster):
+                    r_gw = [m for m in running_by_cluster.get(cluster, []) if m != p.name]
+                    if len(r_gw) >= 4:
+                        cluster_busy_by = list(r_gw)
+                my_v6 = _ipv6_prefix_64(last_ip)
+                if my_v6 and my_v6 in running_by_v6_64:
+                    for m in running_by_v6_64[my_v6]:
+                        if m != p.name and m not in cluster_busy_by:
+                            cluster_busy_by.append(m)
+
+            can_open_parallel = bool(
+                running_names
+                and not is_run
+                and not is_banned
+                and p.proxy
+                and not busy_by
+                and port_cooldown_by is None
+                and not cluster_busy_by
+                and not proxy_port_changed
+                and not ip_country_changed
+                and disk["burst_10m"] < TOKEN_BURST_THRESHOLD
+            )
+
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
                 port=port,
@@ -1848,6 +1946,9 @@ class MonitorService:
                 is_banned=is_banned,
                 trust_score=trust_score,
                 trust_tier=trust_tier,
+                cluster=cluster,
+                cluster_busy_by=cluster_busy_by,
+                can_open_parallel=can_open_parallel,
             )
 
         self._populate_audit_findings(profiles, disk_map, snap)
@@ -2108,6 +2209,19 @@ class MonitorService:
                         ),
                     )
                 )
+            # Layer 2c: Shared IPv6 /64 cluster is currently active on another running profile
+            elif info and info.cluster_busy_by:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="cluster_busy",
+                        level="warning",
+                        message=get_string(
+                            "guard_cluster_busy",
+                            cluster=info.cluster or "/64",
+                            others=", ".join(info.cluster_busy_by),
+                        ),
+                    )
+                )
 
             # Layer 4: Proxy is set, but Timezone or Locale is missing (unpinned)
             if not (profile.timezone or "").strip() or not (profile.locale or "").strip():
@@ -2163,6 +2277,7 @@ class MonitorService:
         snap = self.snapshot(all_profiles, active_names)
         by_name = {p.name: p for p in all_profiles}
         seen_ports: dict[str, str] = {}
+        seen_clusters: dict[str, str] = {}
         issues: dict[str, list[PreLaunchWarning]] = {}
 
         for name in target_names:
@@ -2180,8 +2295,11 @@ class MonitorService:
             )
             port = extract_proxy_port(p.proxy)
             ep = extract_proxy_endpoint(p.proxy)
+            cluster = extract_proxy_cluster(p.proxy)
+            port_collided = False
             if ep:
                 if ep in seen_ports:
+                    port_collided = True
                     wlist.insert(
                         0,
                         PreLaunchWarning(
@@ -2196,6 +2314,22 @@ class MonitorService:
                     )
                 else:
                     seen_ports[ep] = name
+            if not port_collided and cluster and not is_gateway_ipv6_cluster(cluster):
+                if cluster in seen_clusters:
+                    wlist.insert(
+                        0,
+                        PreLaunchWarning(
+                            code="batch_cluster_collision",
+                            level="warning",
+                            message=get_string(
+                                "guard_batch_cluster_collision",
+                                cluster=cluster,
+                                other=seen_clusters[cluster],
+                            ),
+                        ),
+                    )
+                else:
+                    seen_clusters[cluster] = name
             if wlist:
                 issues[name] = wlist
 

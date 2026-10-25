@@ -52,6 +52,7 @@ from .dialogs import (
     open_trash_dialog,
     open_trust_monitor_dialog,
     open_warmup_sites_dialog,
+    open_work_squad_dialog,
 )
 from .refs import UIRefs
 from .state import AppState
@@ -1208,4 +1209,84 @@ class AppHandlers:
             on_apply_schedule=_apply_plan,
             on_copy_schedule=_copy_md,
             on_clear_schedule=_clear_tags,
+        )
+
+    def on_open_work_squad(self) -> None:
+        page = self._get_page()
+        assert page is not None
+        running_names = self._bl.running_profile_names() | self._state.loading_names()
+        snap = self._monitor.snapshot(
+            list(self._pm.profiles.values()),
+            running_names,
+        )
+
+        def _apply_squad(selected_names: list[str], mode: str) -> None:
+            self._state.clear_selection()
+            for n in selected_names:
+                self._state.toggle_selection(n)
+            self._state.sort_by = "parallel_ready"
+            self._state.current_page = 1
+            refs = self._get_refs()
+            if refs is not None and refs.sort_dropdown is not None:
+                refs.sort_dropdown.value = "parallel_ready"
+            mode_label = get_string(
+                "work_squad_mode_rotation" if mode == "rotation" else "work_squad_mode_prime"
+            )
+            self._log(
+                get_string(
+                    "work_squad_applied_log",
+                    count=len(selected_names),
+                    mode=mode_label,
+                )
+            )
+            self._refresh()
+
+        def _launch_one(name: str) -> None:
+            if not self._bl.is_running(name) and not self._state.is_loading(name):
+                launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+                self._refresh()
+
+        def _stagger_launch_squad(selected_names: list[str], mode: str) -> None:
+            self._state.clear_selection()
+            for n in selected_names:
+                self._state.toggle_selection(n)
+            self._state.sort_by = "parallel_ready"
+            self._state.current_page = 1
+            refs = self._get_refs()
+            if refs is not None and refs.sort_dropdown is not None:
+                refs.sort_dropdown.value = "parallel_ready"
+            to_open = [
+                n
+                for n in selected_names
+                if not self._bl.is_running(n) and not self._state.is_loading(n)
+            ]
+            mode_label = get_string(
+                "work_squad_mode_rotation" if mode == "rotation" else "work_squad_mode_prime"
+            )
+            self._log(
+                get_string(
+                    "work_squad_stagger_started_log",
+                    count=len(to_open),
+                    mode=mode_label,
+                )
+            )
+            self._refresh()
+            if to_open:
+                bulk_launch_profiles(
+                    to_open,
+                    self._pm,
+                    self._bl,
+                    self._state,
+                    self._log,
+                    stagger_seconds=(40, 60),
+                )
+
+        open_work_squad_dialog(
+            page,
+            list(self._pm.profiles.values()),
+            snap,
+            running_names=running_names,
+            on_select_squad=_apply_squad,
+            on_launch_single=_launch_one,
+            on_launch_staggered=_stagger_launch_squad,
         )

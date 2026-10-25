@@ -25,6 +25,7 @@ from .safety_guard import (
     open_prelaunch_guard_dialog,
     open_safe_schedule_dialog,
     open_token_burst_alert_dialog,
+    open_work_squad_dialog,
 )
 from .trash import open_trash_dialog
 
@@ -55,4 +56,5 @@ __all__ = [
     "open_trash_dialog",
     "open_trust_monitor_dialog",
     "open_warmup_sites_dialog",
+    "open_work_squad_dialog",
 ]

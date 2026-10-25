@@ -6,30 +6,30 @@ import re
 
 from ..core.config import PROFILES_FILE
 
-DEFAULT_WARMUP_TEXT = """Nhóm 1: Hệ Meta & Muse Chính Chủ (Tín hiệu First-Party — Quan trọng số 1)
-(Camoufox cô lập cookie giữa các trang bằng Total Cookie Protection; chỉ các trang họ Meta/Muse dưới đây mới đồng bộ trực tiếp cookie `datr`, `ps_l`, `layout_state` mà Meta Sigma kiểm tra)
-https://muse.ai/?aymh_complete=1 — Link vào thẳng Muse (bypass vòng lặp /aymh/redirect-cycle/ khi mở lại acc).
-https://www.facebook.com — Lướt 1–2 phút làm tươi trực tiếp cookie gốc `.facebook.com` (`datr`, `fr`, `ps_l`, `wd`).
-https://www.instagram.com — Giữ ấm phiên Instagram liên kết trong Meta Accounts Center (`datr`, `ig_did`, `ps_l`).
+DEFAULT_WARMUP_TEXT = """Nhóm 1: Hệ sinh thái Meta & Muse Chính thức (Tín hiệu First-Party — Ưu tiên số 1)
+(Camoufox cô lập cookie giữa các trang bằng Total Cookie Protection; chỉ các trang thuộc hệ Meta/Muse dưới đây mới đồng bộ trực tiếp cookie `datr`, `ps_l`, `layout_state` mà Meta Sigma kiểm tra)
+https://muse.ai/?aymh_complete=1 — Đường dẫn truy cập trực tiếp Muse (bỏ qua vòng lặp chuyển hướng /aymh/redirect-cycle/).
+https://www.facebook.com — Duyệt 1–2 phút để làm mới trực tiếp cookie gốc `.facebook.com` (`datr`, `fr`, `ps_l`, `wd`).
+https://www.instagram.com — Duyệt giữ phiên Instagram liên kết trong Meta Accounts Center (`datr`, `ig_did`, `ps_l`).
 https://accountscenter.meta.com — Kiểm tra đồng bộ tài khoản Meta Accounts Center (`.accountscenter.meta.com`).
 
-Nhóm 2: Báo Mỹ Chuẩn 100% IPv6 `AAAA` (Tùy chọn — Tải nhanh <2.5s, không dính Captcha)
-(Tùy chọn — KHÔNG bắt buộc để lên điểm Kim Cương; chỉ dùng khi bạn muốn mở kèm 1–2 tab nhẹ để kiểm tra mạng hoặc giữ kết nối Proxy IPv6 sống tự nhiên khi treo máy)
+Nhóm 2: Báo chí & Chuyên trang Mỹ Chuẩn IPv6 `AAAA` (Tùy chọn — Phản hồi nhanh <2.5s, không phát sinh Captcha)
+(Tùy chọn — Dùng khi cần mở kèm 1–2 tab nhẹ để kiểm tra kết nối hoặc duy trì lưu lượng Proxy IPv6 tự nhiên)
 https://www.cnet.com — Chuyên trang công nghệ Mỹ (IPv6 1.9s, đã kiểm chứng trên profile Kim Cương).
-https://www.cntraveler.com — Tạp chí du lịch Mỹ (IPv6 2.5s, tải mượt không bao giờ chặn proxy).
+https://www.cntraveler.com — Tạp chí du lịch Mỹ (IPv6 2.5s, tải mượt và ổn định qua proxy).
 https://www.self.com — Tạp chí đời sống Mỹ (IPv6 2.7s, phản hồi nhanh trên IPv6 thuần).
-https://www.bonappetit.com — Chuyên trang ẩm thực Mỹ (IPv6 2.2s, rất nhẹ khi treo tab).
-https://www.wired.com — Tạp chí AI & Công nghệ Mỹ (IPv6 2.3s, tải sạch không dính Captcha).
+https://www.bonappetit.com — Chuyên trang ẩm thực Mỹ (IPv6 2.2s, dung lượng nhẹ).
+https://www.wired.com — Tạp chí AI & Công nghệ Mỹ (IPv6 2.3s, tải sạch không phát sinh Captcha).
 https://www.pcmag.com — Tạp chí phần cứng & PC Mỹ (IPv6 1.8s, phản hồi rất nhanh).
-https://www.lifehacker.com — Mẹo công nghệ & phần mềm Mỹ (IPv6 3.0s, tương thích tốt IPv6).
-https://techcrunch.com — Tin tức Startup & AI Mỹ (IPv6 2.7s, nhẹ và ổn định).
+https://www.lifehacker.com — Chuyên trang phần mềm & giải pháp số Mỹ (IPv6 3.0s, tương thích tốt IPv6).
+https://techcrunch.com — Tin tức Công nghệ & AI Mỹ (IPv6 2.7s, nhẹ và ổn định).
 https://www.gq.com — Tạp chí phong cách Mỹ (IPv6 2.5s, phản hồi nhanh).
-https://www.vanityfair.com — Tạp chí văn hóa Mỹ (IPv6 2.1s, không dính Captcha).
+https://www.vanityfair.com — Tạp chí văn hóa Mỹ (IPv6 2.1s, không phát sinh Captcha).
 https://www.espn.com — Tin tức thể thao Mỹ (IPv6 1.9s, cấp cookie vùng `edition` US).
-https://www.npr.org — Đài phát thanh quốc gia Mỹ (IPv6 2.1s, trang siêu nhẹ).
+https://www.npr.org — Đài phát thanh quốc gia Mỹ (IPv6 2.1s, giao diện tối giản).
 
-Nhóm 3: Hệ sinh thái Google (Tùy chọn — Chuẩn IPv6 `AAAA`, kiểm tra mạng & tìm kiếm)
-(Đã loại bỏ YouTube vì bị nhà mạng proxy chặn 403 và bỏ toàn bộ hệ Microsoft/Bing vì bạn đọc Hotmail trên máy chủ ngoài)
+Nhóm 3: Hệ sinh thái Google (Tùy chọn — Chuẩn IPv6 `AAAA`, kiểm tra kết nối & tìm kiếm)
+(Đã loại trừ YouTube do hạn chế băng thông từ nhà mạng proxy và loại trừ hệ thống Microsoft/Bing)
 https://www.google.com — Tìm kiếm 1–2 từ khóa tiếng Anh (IPv6 1.7s, cấp cookie `NID` / `AEC` / `UULE`).
 https://news.google.com — Đọc lướt tiêu đề tin tức công nghệ Mỹ trên Google News (IPv6)."""
 

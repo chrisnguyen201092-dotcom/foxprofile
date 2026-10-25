@@ -55,6 +55,7 @@ def build_header_row(
     on_open_warmup_sites: Callable[[], None] | None = None,
     on_open_trust_monitor: Callable[[], None] | None = None,
     on_open_safe_schedule: Callable[[], None] | None = None,
+    on_open_work_squad: Callable[[], None] | None = None,
     audit_alert: bool = False,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
@@ -118,35 +119,26 @@ def build_header_row(
                 on_open_safe_schedule,
             )
         )
-    profile_header: ft.Control = (
-        ft.Row(
-            spacing=6,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=prof_chips,
+    if on_open_work_squad is not None:
+        prof_chips.append(
+            _head_chip(
+                ft.Icons.GROUPS_ROUNDED,
+                get_string("work_squad_btn"),
+                get_string("tooltip_work_squad_btn"),
+                on_open_work_squad,
+            )
         )
-        if len(prof_chips) > 1
-        else label("col_profile")
-    )
-    proxy_header: ft.Control = (
-        ft.Row(
-            spacing=6,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[
-                label("col_proxy"),
-                _head_chip(
-                    ft.Icons.HUB_OUTLINED,
-                    get_string("proxy_pool_btn"),
-                    get_string("proxy_pool_title"),
-                    on_open_proxy_pool,
-                ),
-            ],
+    if on_open_proxy_pool is not None:
+        prof_chips.append(
+            _head_chip(
+                ft.Icons.HUB_OUTLINED,
+                get_string("proxy_pool_btn"),
+                get_string("proxy_pool_title"),
+                on_open_proxy_pool,
+            )
         )
-        if on_open_proxy_pool is not None
-        else label("col_proxy")
-    )
-    geo_chips: list[ft.Control] = [label("col_geo")]
     if on_open_cooldown is not None and cooldown_chip_label:
-        geo_chips.append(
+        prof_chips.append(
             _head_chip(
                 ft.Icons.TIMER_OUTLINED,
                 cooldown_chip_label,
@@ -155,22 +147,23 @@ def build_header_row(
             )
         )
     if on_open_trust_monitor is not None:
-        geo_chips.append(
+        prof_chips.append(
             _head_chip(
                 ft.Icons.VERIFIED_USER_OUTLINED,
                 get_string("trust_monitor_btn"),
                 get_string("trust_monitor_title"),
                 on_open_trust_monitor,
+                alert=audit_alert,
             )
         )
-    geo_header: ft.Control = (
+    profile_header: ft.Control = (
         ft.Row(
             spacing=5,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=geo_chips,
+            controls=prof_chips,
         )
-        if len(geo_chips) > 1
-        else label("col_geo")
+        if len(prof_chips) > 1
+        else label("col_profile")
     )
     return ft.Container(
         height=40,
@@ -184,8 +177,8 @@ def build_header_row(
                 _cell("select", box),
                 _cell("name", profile_header),
                 _cell("device", label("col_device")),
-                _cell("proxy", proxy_header),
-                _cell("geo", geo_header),
+                _cell("proxy", label("col_proxy")),
+                _cell("geo", label("col_geo")),
                 _cell("actions", None),
             ],
         ),
@@ -687,7 +680,14 @@ def build_profile_card(
                 _cell("name", _drag_wrap(name_cell_content, disable_drag=editing_note)),
                 _cell(
                     "device",
-                    _drag_wrap(_device(profile, device, on_edit_dates=on_edit_dates)),
+                    _drag_wrap(
+                        _device(
+                            profile,
+                            device,
+                            on_edit_dates=on_edit_dates,
+                            monitor_info=monitor_info,
+                        )
+                    ),
                 ),
                 _cell(
                     "proxy",
@@ -776,10 +776,16 @@ def _device(
     device: str,
     *,
     on_edit_dates: Callable[[str], None] | None = None,
+    monitor_info: ProfileMonitorInfo | None = None,
 ) -> ft.Row:
     chrome = profile.engine == "chrome"
     engine_name = "Chrome" if chrome else "Camoufox"
-    age_days = compute_days_since(getattr(profile, "created_at", None))
+    raw_created = getattr(profile, "created_at", None)
+    cal_days = compute_days_since(raw_created)
+    if monitor_info is not None and raw_created is not None:
+        age_days: int | None = monitor_info.age_days
+    else:
+        age_days = cal_days
     ban_days = compute_days_since(getattr(profile, "banned_at", None))
 
     if age_days is not None or ban_days is not None:
@@ -922,6 +928,13 @@ def _proxy(
         other, left = monitor_info.port_cooldown_by
         sub_label = get_string("proxy_cooldown_by", left=left, other=other)
         sub_color = COLORS["warning"]
+    elif monitor_info is not None and getattr(monitor_info, "cluster_busy_by", None):
+        sub_label = get_string(
+            "proxy_cluster_busy_by",
+            cluster=getattr(monitor_info, "cluster", "") or "/64",
+            other=monitor_info.cluster_busy_by[0],
+        )
+        sub_color = COLORS["warning"]
     elif monitor_info is not None and monitor_info.proxy_port_changed:
         sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
         sub_color = COLORS["error"]
@@ -935,6 +948,17 @@ def _proxy(
     elif proxy_check_state is not None:
         _, st_msg = proxy_check_state
         sub_label = st_msg
+        sub_color = COLORS["success"]
+    elif monitor_info is not None and getattr(monitor_info, "can_open_parallel", False):
+        if monitor_info.last_exit_ip:
+            short_ip = _shorten_ip_label(
+                monitor_info.last_exit_ip,
+                monitor_info.last_exit_country,
+                getattr(monitor_info, "last_exit_ip_type", ""),
+            )
+            sub_label = f"{get_string('proxy_parallel_ok')} · {short_ip}"
+        else:
+            sub_label = get_string("proxy_parallel_ok")
         sub_color = COLORS["success"]
     elif monitor_info is not None and monitor_info.last_exit_ip:
         short_ip = _shorten_ip_label(

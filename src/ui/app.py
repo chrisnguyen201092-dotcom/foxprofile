@@ -388,7 +388,11 @@ class App:
                 p.proxy
                 and not self.bl.is_running(p.name)
                 and not self.state.is_loading(p.name)
-                and not (snap and p.name in snap.profiles and snap.profiles[p.name].has_warning)
+                and not (
+                    snap
+                    and p.name in snap.profiles
+                    and (snap.profiles[p.name].has_warning or snap.profiles[p.name].cluster_busy_by)
+                )
             ),
             "cooldown": lambda p: bool(
                 snap
@@ -458,6 +462,32 @@ class App:
         sort_by = self.state.sort_by
         if sort_by == "schedule":
             all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), p.name.casefold()))
+        elif sort_by == "parallel_ready":
+            snap = self._last_monitor_snap or self.monitor.snapshot(
+                self.pm.list_profiles(),
+                self.bl.running_profile_names() | self.state.loading,
+            )
+
+            def _parallel_key(p: object) -> tuple:
+                pname = getattr(p, "name", "")
+                info = snap.profiles.get(pname)
+                is_sel = self.state.is_selected(pname)
+                is_run = self.bl.is_running(pname)
+                can_open = bool(info and info.can_open_parallel)
+                has_conf = bool(
+                    info and (info.cluster_busy_by or info.busy_by or info.port_cooldown_by or info.has_warning)
+                )
+                score = info.trust_score if info is not None else 0
+                return (
+                    0 if is_sel else 1,
+                    0 if is_run else 1,
+                    0 if can_open else 1,
+                    1 if has_conf else 0,
+                    -score,
+                    pname.casefold(),
+                )
+
+            all_profiles.sort(key=_parallel_key)
         elif sort_by == "name_asc":
             all_profiles.sort(key=lambda p: p.name.casefold())
         elif sort_by == "name_desc":
@@ -517,11 +547,12 @@ class App:
 
             def _age_key(p: object) -> tuple:
                 pname = getattr(p, "name", "")
-                days = compute_days_since(getattr(p, "created_at", None))
-                if days is None:
-                    info = snap.profiles.get(pname)
-                    if info is not None and info.age_days > 0:
-                        days = info.age_days
+                info = snap.profiles.get(pname)
+                days = (
+                    info.age_days
+                    if info is not None
+                    else compute_days_since(getattr(p, "created_at", None))
+                )
                 if days is None:
                     return (1, 0, pname.casefold())
                 return (0, -days if sort_by == "age_desc" else days, pname.casefold())
@@ -655,6 +686,7 @@ class App:
                 on_open_warmup_sites=self.h.on_open_warmup_sites,
                 on_open_trust_monitor=self.h.on_open_trust_monitor,
                 on_open_safe_schedule=self.h.on_open_safe_schedule,
+                on_open_work_squad=self.h.on_open_work_squad,
                 audit_alert=bool(snap.audit_findings),
             )
             if page_profiles

@@ -1,4 +1,7 @@
 import asyncio
+import random
+import threading
+import time
 from collections.abc import Callable
 
 import flet as ft
@@ -188,10 +191,52 @@ def bulk_launch_profiles(
     bl: IBrowserLauncher,
     state: AppState,
     log: Callable[[str], None],
+    *,
+    stagger_seconds: tuple[int, int] = (40, 60),
 ) -> None:
-    for name in names:
-        if not bl.is_running(name) and not state.is_loading(name):
-            launch_or_stop(name, pm, bl, state, log)
+    to_launch = [
+        name
+        for name in names
+        if name in pm.profiles and not bl.is_running(name) and not state.is_loading(name)
+    ]
+    if not to_launch:
+        return
+
+    # Launch the first profile immediately so the user sees instant response
+    first = to_launch[0]
+    launch_or_stop(first, pm, bl, state, log)
+
+    rest = to_launch[1:]
+    if not rest:
+        return
+
+    min_s, max_s = stagger_seconds
+    if max_s <= 0:
+        for name in rest:
+            if not bl.is_running(name) and not state.is_loading(name):
+                launch_or_stop(name, pm, bl, state, log)
+        return
+
+    total = len(to_launch)
+
+    def _stagger_worker() -> None:
+        for idx, name in enumerate(rest, start=2):
+            delay_s = random.randint(max(1, min_s), max(min_s, max_s))
+            log(
+                get_string(
+                    "bulk_stagger_wait_log",
+                    idx=idx,
+                    total=total,
+                    delay=delay_s,
+                    name=name,
+                )
+            )
+            state.schedule_refresh()
+            time.sleep(delay_s)
+            if name in pm.profiles and not bl.is_running(name) and not state.is_loading(name):
+                launch_or_stop(name, pm, bl, state, log)
+
+    threading.Thread(target=_stagger_worker, daemon=True).start()
 
 
 def bulk_stop_profiles(
