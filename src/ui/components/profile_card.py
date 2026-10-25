@@ -501,81 +501,19 @@ def build_profile_card(
                 ),
             )
             sub_parts.append(totp_chip)
-        if password_val:
-            pass_chip = ft.Container(
-                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
-                border_radius=4,
-                bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(1, COLORS["rule_strong"]),
-                ink=on_copy_password is not None,
-                tooltip=get_string("tooltip_copy_password"),
-                on_click=(
-                    (lambda _, n=profile.name: on_copy_password(n))
-                    if on_copy_password is not None
-                    else None
-                ),
-                content=ft.Text(
-                    get_string("badge_copy_pass"),
-                    size=10,
-                    font_family=FONT_MEDIUM,
-                    color=COLORS["text_sub"],
-                ),
-            )
-            sub_parts.append(pass_chip)
-        if token_val and on_fetch_mail_otp is not None:
-            otp_mail_chip = ft.Container(
-                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
-                border_radius=4,
-                bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(1, COLORS["accent"]),
-                ink=True,
-                tooltip=get_string("tooltip_fetch_mail_otp"),
-                on_click=lambda _, n=profile.name: on_fetch_mail_otp(n),
-                content=ft.Text(
-                    get_string("badge_fetch_mail_otp"),
-                    size=10,
-                    font_family=FONT_SEMIBOLD,
-                    color=COLORS["accent"],
-                ),
-            )
-            sub_parts.append(otp_mail_chip)
-        if recovery_val:
-            rec_chip = ft.Container(
-                padding=ft.Padding.symmetric(horizontal=5, vertical=0.5),
-                border_radius=4,
-                bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(1, COLORS["rule_strong"]),
-                ink=on_copy_recovery is not None,
-                tooltip=get_string("tooltip_copy_recovery", email=recovery_val),
-                on_click=(
-                    (lambda _, n=profile.name: on_copy_recovery(n))
-                    if on_copy_recovery is not None
-                    else None
-                ),
-                content=ft.Text(
-                    get_string("badge_copy_recovery"),
-                    size=10,
-                    font_family=FONT_MEDIUM,
-                    color=COLORS["text_sub"],
-                ),
-            )
-            sub_parts.append(rec_chip)
         if on_open_mail_credentials is not None:
             vault_chip = ft.Container(
                 padding=ft.Padding.symmetric(horizontal=4, vertical=2),
                 border_radius=4,
                 bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(
-                    1,
-                    COLORS["accent"] if has_saved_creds else COLORS["rule_strong"],
-                ),
+                border=ft.Border.all(1, COLORS["rule_strong"]),
                 ink=True,
                 tooltip=get_string("tooltip_mail_credentials"),
                 on_click=lambda _, n=profile.name: on_open_mail_credentials(n),
                 content=ft.Icon(
-                    ft.Icons.KEY_ROUNDED if has_saved_creds else ft.Icons.MAIL_LOCK_OUTLINED,
+                    ft.Icons.MAIL_LOCK_OUTLINED,
                     size=12,
-                    color=COLORS["accent"] if has_saved_creds else COLORS["text_dim"],
+                    color=COLORS["text_dim"],
                 ),
             )
             sub_parts.append(vault_chip)
