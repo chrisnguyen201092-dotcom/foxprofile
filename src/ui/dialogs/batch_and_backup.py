@@ -1295,6 +1295,16 @@ def _build_trust_score_chip(info: ProfileMonitorInfo) -> ft.Container:
     )
 
 
+def _format_duration_mins(mins: int) -> str:
+    m = max(0, int(mins))
+    if m < 60:
+        return get_string("running_minutes", mins=m)
+    h, rem = divmod(m, 60)
+    if rem == 0:
+        return f"{h}h"
+    return get_string("running_hours", hours=h, mins=rem)
+
+
 def open_session_history_dialog(
     page: ft.Page,
     profile_name: str,
@@ -1759,8 +1769,8 @@ def open_session_history_dialog(
                             get_string(
                                 "session_hist_subtitle",
                                 count=total_count,
-                                total=total_mins,
-                                today=today_mins,
+                                total=_format_duration_mins(total_mins),
+                                today=_format_duration_mins(today_mins),
                                 port=last_port or "-",
                             ),
                             size=12.5,
@@ -2280,7 +2290,7 @@ def open_trust_monitor_dialog(
             detail_tip = (
                 f"Cần làm: {summary_str}\n"
                 f"Hiện tại: Cookie {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
-                f"{info.active_days}d mở ({info.session_count} phiên, {info.total_minutes}p)"
+                f"{info.active_days}d mở ({info.session_count} phiên, {_format_duration_mins(info.total_minutes)})"
             )
 
             right_controls: list[ft.Control] = []
