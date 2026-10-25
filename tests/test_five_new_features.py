@@ -2301,12 +2301,13 @@ def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
         "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
     )
     now_exp = int(time.time()) + 86400 * 30
-    aged_ctime = int((time.time() - 86400 * 12) * 1_000_000)
+    aged_ctime = int((time.time() - 86400 * 25) * 1_000_000)
     rows = [
         (".google.com", "_GRECAPTCHA", aged_ctime, now_exp),
         ("muse.ai", "hatch_gw", aged_ctime, now_exp),
         ("muse.ai", "hatch_vml", aged_ctime, now_exp),
         (".muse.ai", "hatch_sess", aged_ctime, now_exp),
+        (".muse.ai", "datr", aged_ctime, now_exp),
         (".facebook.com", "datr", aged_ctime, now_exp),
         (".auth.meta.com", "datr", aged_ctime, now_exp),
         (".accountscenter.meta.com", "datr", aged_ctime, now_exp),
@@ -2335,6 +2336,16 @@ def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
     (p2_dir / "fingerprint.json").write_text(json.dumps(fp_payload), encoding="utf-8")
 
     mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    mon._live_sessions["DiamondAcc"] = [
+        {
+            "start": f"2026-10-{1 + (idx % 15):02d} 10:{idx:02d}:00",
+            "end": f"2026-10-{1 + (idx % 15):02d} 11:{idx:02d}:00",
+            "duration_mins": 60,
+            "port": ":10001",
+            "is_live": False,
+        }
+        for idx in range(26)
+    ]
     mon.record_exit_ip(
         "DiamondAcc",
         "2600:1700:ef01:9999::111",
@@ -2453,7 +2464,7 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
 
     now_ts = time.time()
     now_exp = int(now_ts + 86400 * 30)
-    datr_10d = int((now_ts - 86400 * 10.2) * 1_000_000)
+    datr_10d = int((now_ts - 86400 * 22.0) * 1_000_000)
 
     # 1. Unopened profile (has proxy + geo, but 0 cookies / 0 sessions / 0 history) -> 0 score, no geo badge
     (data_dir / "Unopened").mkdir()
@@ -2467,18 +2478,21 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
     ck_conn.execute(
         "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
     )
+    ws_rows = [
+        ("muse.ai", "__Host-hatch_one_tap", datr_10d, now_exp),
+        (".muse.ai", "layout_state", datr_10d, now_exp),
+        (".muse.ai", "hatch_sess", datr_10d, now_exp),
+        (".muse.ai", "datr", datr_10d, now_exp),
+        (".auth.meta.com", "datr", datr_10d, now_exp),
+        (".accountscenter.meta.com", "datr", datr_10d, now_exp),
+        (".facebook.com", "datr", datr_10d, now_exp),
+        (".facebook.com", "ps_l", datr_10d, now_exp),
+    ]
+    for i in range(16):
+        ws_rows.append((".facebook.com", f"extra_ck_{i}", datr_10d, now_exp))
     ck_conn.executemany(
         "INSERT INTO moz_cookies VALUES (?, ?, ?, ?)",
-        [
-            ("muse.ai", "__Host-hatch_one_tap", datr_10d, now_exp),
-            (".muse.ai", "layout_state", datr_10d, now_exp),
-            (".muse.ai", "hatch_sess", datr_10d, now_exp),
-            (".muse.ai", "datr", datr_10d, now_exp),
-            (".auth.meta.com", "datr", datr_10d, now_exp),
-            (".accountscenter.meta.com", "datr", datr_10d, now_exp),
-            (".facebook.com", "datr", datr_10d, now_exp),
-            (".facebook.com", "ps_l", datr_10d, now_exp),
-        ],
+        ws_rows,
     )
     ck_conn.commit()
     ck_conn.close()
@@ -2519,16 +2533,16 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
     cf_conn.close()
 
     mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
-    # Seed 6 active days, 10 sessions, 300 total minutes for WorkspaceAcc
+    # Seed 14 active days, 25 sessions, 1250 total minutes for WorkspaceAcc
     mon._live_sessions["WorkspaceAcc"] = [
         {
-            "start": f"2026-10-{10 + (idx % 6):02d} 10:{idx:02d}:00",
-            "end": f"2026-10-{10 + (idx % 6):02d} 10:{idx:02d}:00",
-            "duration_mins": 30,
+            "start": f"2026-10-{1 + (idx % 14):02d} 10:{idx:02d}:00",
+            "end": f"2026-10-{1 + (idx % 14):02d} 10:{idx:02d}:00",
+            "duration_mins": 50,
             "port": ":10001",
             "is_live": False,
         }
-        for idx in range(10)
+        for idx in range(25)
     ]
     mon.record_exit_ip("WorkspaceAcc", "1.2.3.4", country="US", proxy="http://u:p@1.2.3.4:10001")
     mon.record_ip_risk("1.2.3.4", {"fraud_score": 51, "proxy_flag": True})
@@ -2567,9 +2581,9 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
 
     assert w_info.hatch_gw is True
     assert w_info.ext_domains == 4
-    assert w_info.active_days == 6
-    assert w_info.session_count == 10
-    assert w_info.total_minutes == 300
+    assert w_info.active_days == 14
+    assert w_info.session_count == 25
+    assert w_info.total_minutes == 1250
     assert w_info.trust_score >= 80
     assert w_info.trust_tier == "diamond"
 

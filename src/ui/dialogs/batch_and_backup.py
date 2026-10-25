@@ -2231,28 +2231,30 @@ def open_trust_monitor_dialog(
                     action_color = COLORS["warning"]
 
                 if info.trust_tier == "trusted":
-                    if info.has_meta and info.datr_domains < 3 and info.ext_domains < 4:
-                        steps.append("Mở Facebook/Instagram đồng bộ phiên")
-                    if info.active_days < 6:
-                        steps.append(f"Mở thêm {6 - info.active_days} ngày")
-                    elif info.session_count < 10:
-                        steps.append(f"Thêm {10 - info.session_count} phiên")
-                    if info.total_minutes < 300:
-                        steps.append(f"Treo thêm {300 - info.total_minutes}p")
+                    if info.has_meta and info.datr_domains < 4:
+                        steps.append("Mở Facebook/Instagram đồng bộ (≥4 miền)")
+                    if info.active_days < 14:
+                        steps.append(f"Mở thêm {14 - info.active_days} ngày")
+                    elif info.session_count < 25:
+                        steps.append(f"Thêm {25 - info.session_count} phiên")
+                    if info.total_minutes < 1200:
+                        steps.append(
+                            f"Treo thêm {_format_duration_mins(1200 - info.total_minutes)}"
+                        )
                     elif (
                         info.total_minutes / max(1, info.session_count)
-                    ) < 10.0 and info.total_minutes < 600:
-                        steps.append("Treo phiên dài ≥20p")
-                    if info.datr_age_days < 10.0 and len(steps) < 3:
+                    ) < 20.0 and info.total_minutes < 1800:
+                        steps.append("Treo phiên dài ≥25p")
+                    if info.datr_age_days < 21.0 and len(steps) < 3:
                         steps.append(
-                            f"Đợi cookie +{max(1, int(round(10.0 - info.datr_age_days)))}d"
+                            f"Đợi cookie +{max(1, int(round(21.0 - info.datr_age_days)))}d"
                         )
                     if (
                         info.ip_fraud_score is not None
-                        and info.ip_fraud_score >= 70
+                        and info.ip_fraud_score >= 65
                         and len(steps) < 3
                     ):
-                        steps.append("Đổi IP sạch (<70pt)")
+                        steps.append("Đổi IP sạch (<65pt)")
                     if not steps and not info.has_thread_url:
                         steps.append("Mở 1 hội thoại Muse")
                     if not steps:
@@ -2266,22 +2268,25 @@ def open_trust_monitor_dialog(
                         steps.append("Đăng nhập Muse")
                     if info.has_meta and not info.has_ps_l:
                         steps.append("Mở Facebook/Meta lấy ps_l")
-                    elif info.has_meta and info.datr_domains < 2 and info.ext_domains < 2:
-                        steps.append("Mở Facebook/Instagram đồng bộ")
+                    elif info.has_meta and info.datr_domains < 3:
+                        steps.append("Mở Facebook/Instagram đồng bộ (≥3 miền)")
                     if (
-                        info.session_count >= 3
-                        and (info.total_minutes / max(1, info.session_count)) < 5.0
+                        info.session_count >= 4
+                        and (info.total_minutes / max(1, info.session_count)) < 15.0
+                        and info.total_minutes < 900
                     ):
-                        steps.append("Giữ phiên >10p (tránh tắt nhanh)")
-                    if info.active_days < 4:
-                        steps.append(f"Mở thêm {4 - info.active_days} ngày")
-                    elif info.session_count < 5:
-                        steps.append(f"Thêm {5 - info.session_count} phiên")
-                    if info.total_minutes < 90:
-                        steps.append(f"Treo thêm {90 - info.total_minutes}p")
-                    if info.datr_age_days < 6.0 and len(steps) < 3:
+                        steps.append("Giữ phiên ≥20p (tránh tắt nhanh)")
+                    if info.active_days < 7:
+                        steps.append(f"Mở thêm {7 - info.active_days} ngày")
+                    elif info.session_count < 12:
+                        steps.append(f"Thêm {12 - info.session_count} phiên")
+                    if info.total_minutes < 480:
                         steps.append(
-                            f"Đợi cookie +{max(1, int(round(6.0 - info.datr_age_days)))}d"
+                            f"Treo thêm {_format_duration_mins(480 - info.total_minutes)}"
+                        )
+                    if info.datr_age_days < 12.0 and len(steps) < 3:
+                        steps.append(
+                            f"Đợi cookie +{max(1, int(round(12.0 - info.datr_age_days)))}d"
                         )
                     if not steps and not info.has_thread_url:
                         steps.append("Mở 1 hội thoại Muse")

@@ -881,7 +881,11 @@ def build_safe_schedule(
                             < _cluster_cap_for_day(b.cluster, d_over, relax=0)
                         ]
                         cand_indices.sort(
-                            key=lambda j: abs(day_buckets[d_under][j].rest_hours - acc_over.rest_hours)
+                            key=lambda j: (
+                                day_buckets[d_under][j].rest_hours
+                                if d_under < d_over
+                                else -day_buckets[d_under][j].rest_hours
+                            )
                         )
                         if cand_indices:
                             idx_b = cand_indices[0]
@@ -902,6 +906,58 @@ def build_safe_schedule(
                         break
                 if not swapped_c:
                     break
+
+    # 4c. Intra-cluster monotonic rest order: within every cluster, ensure accounts with longer
+    # rest_hours are always scheduled in earlier days and accounts with shorter rest_hours in later days.
+    clusters_seen = {a.cluster for d in range(cycle_days) for a in day_buckets[d] if a.cluster}
+    for c_name in clusters_seen:
+        positions: list[tuple[int, int]] = []
+        c_accs: list[ScheduledAccount] = []
+        for d_idx in range(cycle_days):
+            for s_idx, a in enumerate(day_buckets[d_idx]):
+                if a.cluster == c_name and not a.completed_today and not a.shared_endpoint:
+                    positions.append((d_idx, s_idx))
+                    c_accs.append(a)
+        if len(c_accs) > 1:
+            c_accs.sort(key=lambda x: (-int(x.rest_hours // 3.0), -x.rest_hours))
+            for (d_idx, s_idx), a_sorted in zip(positions, c_accs, strict=False):
+                day_buckets[d_idx][s_idx] = a_sorted
+
+    # 4d. Cross-cluster monotonic rest refinement: if an account in a later day has rested significantly
+    # longer than an account in an earlier day, swap them whenever cluster caps and min_day allow.
+    for _pass in range(3):
+        any_swapped = False
+        for d_early in range(cycle_days - 1):
+            for d_late in range(cycle_days - 1, d_early, -1):
+                for i_e, a_e in enumerate(day_buckets[d_early]):
+                    if a_e.completed_today or a_e.shared_endpoint:
+                        continue
+                    for i_l, a_l in enumerate(day_buckets[d_late]):
+                        if a_l.completed_today or a_l.shared_endpoint:
+                            continue
+                        if a_l.rest_hours <= a_e.rest_hours + 4.0:
+                            continue
+                        if d_early < _min_day_for_account(a_l) or d_late < _min_day_for_account(a_e):
+                            continue
+                        if a_e.cluster != a_l.cluster:
+                            if a_e.cluster in gateway_day_targets or a_l.cluster in gateway_day_targets:
+                                continue
+                            c_l_in_early = day_cluster_counts[d_early].get(a_l.cluster, 0) + 1
+                            c_e_in_late = day_cluster_counts[d_late].get(a_e.cluster, 0) + 1
+                            if c_l_in_early > _cluster_cap_for_day(a_l.cluster, d_early, relax=0):
+                                continue
+                            if c_e_in_late > _cluster_cap_for_day(a_e.cluster, d_late, relax=0):
+                                continue
+                            day_cluster_counts[d_early][a_e.cluster] -= 1
+                            day_cluster_counts[d_early][a_l.cluster] = c_l_in_early
+                            day_cluster_counts[d_late][a_l.cluster] -= 1
+                            day_cluster_counts[d_late][a_e.cluster] = c_e_in_late
+                        day_buckets[d_early][i_e] = a_l
+                        day_buckets[d_late][i_l] = a_e
+                        a_e = a_l
+                        any_swapped = True
+        if not any_swapped:
+            break
 
     # 5. Pair accounts within each day and order Morning / Evening shifts
     days_out: list[ScheduledDay] = []

@@ -1711,14 +1711,14 @@ class MonitorService:
                 active_days = 1
             if (
                 raw_sess_cnt == 0
-                and eff_datr_age >= 10.0
+                and eff_datr_age >= 21.0
                 and cookie_count >= 25
-                and (datr_domains >= 4 or ext_domains >= 4)
+                and (datr_domains >= 3 or ext_domains >= 4)
             ):
                 # Veteran profile whose local session logs were rotated
-                active_days = 7
-                sess_cnt = max(sess_cnt, 10)
-                total_mins = max(total_mins, 300)
+                active_days = 16
+                sess_cnt = max(sess_cnt, 28)
+                total_mins = max(total_mins, 1500)
             is_banned = bool(
                 p.banned_at
                 or is_ban_status(p.status)
@@ -1726,95 +1726,112 @@ class MonitorService:
                 or is_ban_page(p.group)
             )
 
-            # Calculate Strict Meta Sigma & Hatch OIDC Trust Score with Safety Buffer (0 - 100)
+            # Calculate Strict Meta Sigma (L14/L28) & Hatch OIDC Trust Score with Safety Buffer (0 - 100)
             score = 0
-            # 1. Meta `datr` Device-Identity Age, AYMH Cross-Domain Sync & Multi-Day Rhythm (max 40)
-            if eff_datr_age >= 10.0:
-                score += 18
-            elif eff_datr_age >= 8.0:
-                score += 14
-            elif eff_datr_age >= 6.0:
-                score += 10
+            # 1. Meta `datr` Device-Identity Age (L28), Multi-Day Rhythm & Cumulative Runtime (max 60)
+            # 1a. Cookie `datr` Age (max 25)
+            if eff_datr_age >= 30.0:
+                score += 25
+            elif eff_datr_age >= 21.0:
+                score += 20
+            elif eff_datr_age >= 14.0:
+                score += 15
+            elif eff_datr_age >= 10.0:
+                score += 11
+            elif eff_datr_age >= 7.0:
+                score += 7
             elif eff_datr_age >= 3.0:
-                score += 5
-            elif eff_datr_age >= 1.0:
-                score += 2
+                score += 3
             elif eff_datr_age > 0.0:
                 score += 1
 
-            if datr_domains >= 4 or (not has_meta and has_grecaptcha):
-                score += 3
-            elif datr_domains >= 2:
-                score += 1
-
-            if active_days >= 6 and total_mins >= 300:
-                score += 19
-            elif active_days >= 5 and total_mins >= 180:
+            # 1b. Active Days & Session Consistency (max 18)
+            if active_days >= 18 and sess_cnt >= 30:
+                score += 18
+            elif active_days >= 14 and sess_cnt >= 25:
                 score += 15
-            elif active_days >= 4 and total_mins >= 90:
+            elif active_days >= 10 and sess_cnt >= 18:
                 score += 11
-            elif active_days >= 3 and total_mins >= 45:
-                score += 7
-            elif active_days >= 2 and total_mins >= 25:
-                score += 4
-            elif active_days >= 1:
+            elif active_days >= 7 and sess_cnt >= 12:
+                score += 8
+            elif active_days >= 5 and sess_cnt >= 7:
+                score += 5
+            elif active_days >= 3 and sess_cnt >= 4:
+                score += 3
+            elif active_days >= 2 and sess_cnt >= 2:
                 score += 1
 
-            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 20)
-            if disk["hatch_gw"]:
-                score += 9
-            if hatch_vml or (disk["hatch_gw"] and not has_meta):
-                score += 4
-            if disk["hatch_sess"]:
-                score += 3
-            if disk["has_thread_url"]:
-                score += 4
-
-            # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Ecosystem Depth & HTTP Cache2 ETag Sync (max 20)
-            if has_ps_l or (not has_meta and has_grecaptcha):
-                score += 5
-            if (datr_domains >= 4 and cookie_count >= 25) or ext_domains >= 5:
+            # 1c. Cumulative Runtime Hours (max 17)
+            if total_mins >= 2100:
+                score += 17
+            elif total_mins >= 1200:
+                score += 14
+            elif total_mins >= 720:
                 score += 11
-            elif (datr_domains >= 3 and cookie_count >= 20) or ext_domains >= 4:
-                score += 9
-            elif (datr_domains >= 3 and cookie_count >= 12) or ext_domains >= 3:
-                score += 6
-            elif datr_domains >= 2 or ext_domains >= 2:
-                score += 4
-            elif datr_domains >= 1 or ext_domains >= 1:
-                score += 2
-            if has_cache2 and cookie_count > 0:
-                score += 4
+            elif total_mins >= 480:
+                score += 8
+            elif total_mins >= 240:
+                score += 5
+            elif total_mins >= 120:
+                score += 3
+            elif total_mins >= 45:
+                score += 1
 
-            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 20)
+            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 15)
+            if disk["hatch_gw"]:
+                score += 7
+            if hatch_vml or (disk["hatch_gw"] and not has_meta):
+                score += 3
+            if disk["hatch_sess"]:
+                score += 2
+            if disk["has_thread_url"]:
+                score += 3
+
+            # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Cross-Domain Sync & HTTP Cache2 ETag (max 10)
+            if has_ps_l or (not has_meta and has_grecaptcha):
+                score += 3
+            if (datr_domains >= 4 and cookie_count >= 20) or cookie_count >= 45:
+                score += 4
+            elif (datr_domains >= 3 and cookie_count >= 14) or cookie_count >= 30:
+                score += 2
+            elif datr_domains >= 2 or cookie_count >= 10:
+                score += 1
+            if has_cache2 and cookie_count > 0:
+                score += 3
+
+            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 15)
             if p.proxy:
                 if p.timezone and p.locale:
-                    score += 6
+                    score += 4
                 else:
-                    score += 2
+                    score += 1
                 if ip_fraud_score is not None:
                     if ip_fraud_score <= 15 and not ip_proxy_flag:
-                        score += 14
+                        score += 11
                     elif ip_fraud_score <= 30 and not ip_proxy_flag:
-                        score += 10
+                        score += 9
                     elif ip_fraud_score <= 55:
+                        score += 6
+                    elif ip_fraud_score < 65:
                         score += 3
                 elif last_ip:
-                    score += 3
+                    score += 4
 
-            # 5. Strict Meta Sigma Risk Penalties & Hard Device Gates (Safety Buffer)
+            # 5. Strict Meta Sigma Risk Penalties & Progressive Hard Gates (Safety Buffer)
             if has_meta_checkpoint:
-                score -= 25
+                score -= 30
             if disk["hatch_sess"] and not disk["hatch_gw"]:
                 score -= 15
             if proxy_port_changed or ip_country_changed:
-                score -= 20
+                score -= 25
             if disk["burst_10m"] >= TOKEN_BURST_THRESHOLD:
                 score -= 15
             if sess_cnt >= 3 and (total_mins / max(1, sess_cnt)) < 5.0:
                 # Ping-check bot pattern (opening & closing in < 5m per session)
-                score -= 10
-            if has_meta and datr_domains < 2 and cookie_count < 10 and ext_domains == 0:
+                score -= 15
+            elif sess_cnt >= 6 and (total_mins / max(1, sess_cnt)) < 8.0 and total_mins < 480:
+                score -= 6
+            if has_meta and datr_domains < 2 and cookie_count < 10:
                 # Incomplete Meta/Muse cookie ecosystem state
                 score -= 10
 
@@ -1824,29 +1841,39 @@ class MonitorService:
                 trust_score = 0
             else:
                 if not disk["hatch_gw"]:
-                    trust_score = min(45, score)
+                    trust_score = min(42, score)
+                elif eff_datr_age < 3.0 or active_days < 2 or total_mins < 30:
+                    # Stage 0a: Infant account (< 3d cookie or < 2 active days or < 30m total)
+                    trust_score = min(38, score)
+                elif eff_datr_age < 7.0 or active_days < 4 or total_mins < 120:
+                    # Stage 0b: Early warmup (< 7d cookie or < 4 active days or < 2h total)
+                    trust_score = min(48, score)
                 elif (
-                    eff_datr_age < 6.0
-                    or active_days < 4
-                    or sess_cnt < 5
-                    or total_mins < 90
-                    or (has_meta and ((datr_domains < 3 and ext_domains < 2) or not has_ps_l))
+                    eff_datr_age < 12.0
+                    or active_days < 7
+                    or sess_cnt < 12
+                    or total_mins < 480
+                    or ((total_mins / max(1, sess_cnt)) < 15.0 and total_mins < 900)
+                    or (has_meta and (datr_domains < 3 or not has_ps_l))
+                    or (has_meta and not disk["has_thread_url"])
                     or has_meta_checkpoint
                     or proxy_port_changed
                     or ip_country_changed
                 ):
-                    trust_score = min(56, score)
+                    # Stage 1: Mid/Late warmup — capped at 58 until passing all Trusted gates
+                    trust_score = min(58, score)
                 elif (
-                    eff_datr_age < 10.0
-                    or active_days < 6
-                    or sess_cnt < 10
-                    or total_mins < 300
-                    or ((total_mins / max(1, sess_cnt)) < 10.0 and total_mins < 600)
+                    eff_datr_age < 21.0
+                    or active_days < 14
+                    or sess_cnt < 25
+                    or total_mins < 1200
+                    or ((total_mins / max(1, sess_cnt)) < 20.0 and total_mins < 1800)
                     or (has_meta and not disk["has_thread_url"])
-                    or (has_meta and datr_domains < 3 and ext_domains < 4)
-                    or (ip_fraud_score is not None and ip_fraud_score >= 70)
+                    or (has_meta and datr_domains < 4)
+                    or (ip_fraud_score is not None and ip_fraud_score >= 65)
                 ):
-                    trust_score = min(76, score)
+                    # Stage 2: Trusted — capped at 78 until passing all Diamond L21/14d/25sess/20h gates
+                    trust_score = min(78, score)
                 else:
                     trust_score = score
                 trust_score = max(1, trust_score)
