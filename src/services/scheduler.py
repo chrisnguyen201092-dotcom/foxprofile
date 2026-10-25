@@ -22,7 +22,7 @@ import itertools
 import re
 from dataclasses import dataclass, field
 
-from ..models.profile import Profile
+from ..models.profile import Profile, parse_schedule_shift, parse_schedule_tag
 from .monitor import MonitorSnapshot, extract_proxy_endpoint, extract_proxy_port
 
 _RE_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
@@ -152,12 +152,13 @@ class SchedulePlan:
     repeated_pair_count: int = 0
 
     def status_tag_map(self) -> dict[str, str]:
-        """Return `{profile_name: '<weekday>-C<pair>'}` for all scheduled accounts (clearing tags for accounts already opened today)."""
+        """Return `{profile_name: '<weekday>-C<pair>-<S|T>'}` for all scheduled accounts (clearing tags for accounts already opened today)."""
         done_names = {a.name for a in self.completed_today}
         mapping: dict[str, str] = {}
         for d in self.days:
             for pr in d.all_pairs:
-                tag = f"{d.weekday_tag}-C{pr.pair_index}"
+                shift_code = "S" if pr.shift == "morning" else "T"
+                tag = f"{d.weekday_tag}-C{pr.pair_index}-{shift_code}"
                 mapping[pr.first.name] = "" if pr.first.name in done_names else tag
                 if pr.second is not None:
                     mapping[pr.second.name] = "" if pr.second.name in done_names else tag
@@ -398,82 +399,69 @@ def _split_and_order_day_shifts(
     *,
     day_index: int,
 ) -> tuple[list[ScheduledPair], list[ScheduledPair]]:
-    """Split a day's pairs into Morning (`Ca Sáng`) and Evening (`Ca Tối`) to minimize adjacent overlaps."""
+    """Prioritize Morning (`Ca Sáng`) for all non-conflicting /64 pairs; push only duplicate /64 pairs to Evening (`Ca Tối`)."""
     total_p = len(day_pairs)
     if total_p == 0:
         return [], []
     if total_p == 1:
         return _order_shift_pairs(day_pairs, "morning", last_shifts, 1), []
 
-    morning_count = (total_p + 1) // 2
-    indices = range(total_p)
+    # Order pairs so full pairs with distinct /64 clusters come first, while shared-endpoint (on Day 0)
+    # or trailing solo pairs are considered last so they naturally overflow to Evening if needed.
+    ordered_candidates = sorted(
+        day_pairs,
+        key=lambda ab: (
+            1 if ab[1] is None else 0,
+            1
+            if (
+                day_index == 0
+                and (ab[0].shared_endpoint or (ab[1] is not None and ab[1].shared_endpoint))
+            )
+            else 0,
+            # Prefer pairs with only 1 non-gateway /64 cluster over pairs with 2 non-gateway clusters
+            sum(
+                1
+                for c in ({ab[0].cluster} | ({ab[1].cluster} if ab[1] else set()))
+                if c and not is_gateway_ipv6_cluster(c)
+            ),
+        ),
+    )
 
-    best_score = float("inf")
-    best_m: list[ScheduledPair] = []
-    best_e: list[ScheduledPair] = []
+    m_raw: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
+    e_raw: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
+    morning_non_gw: set[str] = set()
 
-    for m_idx_tuple in itertools.combinations(indices, morning_count):
-        m_set = set(m_idx_tuple)
-        m_raw = [day_pairs[i] for i in indices if i in m_set]
-        e_raw = [day_pairs[i] for i in indices if i not in m_set]
-
-        # On Day 0, if any pair has a shared endpoint (e.g. usa106:10291), prefer placing it in Evening shift
-        shared_in_morning = any(
+    for a, b in ordered_candidates:
+        non_gw = {
+            c
+            for c in ({a.cluster} | ({b.cluster} if b is not None else set()))
+            if c and not is_gateway_ipv6_cluster(c)
+        }
+        has_shared_d0 = day_index == 0 and (
             a.shared_endpoint or (b is not None and b.shared_endpoint)
-            for a, b in m_raw
         )
-        # Also keep any odd solo in Evening shift
-        solo_in_morning = any(b is None for _, b in m_raw)
+        is_solo = b is None
+        if (non_gw & morning_non_gw) or has_shared_d0 or (is_solo and len(m_raw) >= 1):
+            e_raw.append((a, b))
+        else:
+            m_raw.append((a, b))
+            morning_non_gw.update(non_gw)
 
-        m_ordered = _order_shift_pairs(
-            m_raw,
-            "morning",
-            last_shifts,
-            1,
-            force_late_shared=(day_index == 0),
-        )
-        e_ordered = _order_shift_pairs(
-            e_raw,
-            "evening",
-            last_shifts,
-            len(m_ordered) + 1,
-            force_late_shared=True,
-        )
-
-        pen = 0.0
-        if day_index == 0 and shared_in_morning:
-            pen += 400.0
-        if solo_in_morning:
-            pen += 400.0
-        # Penalize duplicate /64 non-gateway clusters (usa10X) within the same shift so 2 accounts
-        # on the same /64 node are separated into Morning vs Evening shifts.
-        for shift_list in (m_ordered, e_ordered):
-            seen_non_gw: set[str] = set()
-            for p in shift_list:
-                for c in p.clusters:
-                    if c and not is_gateway_ipv6_cluster(c):
-                        if c in seen_non_gw:
-                            pen += 2500.0
-                        seen_non_gw.add(c)
-        pen += sum(1000.0 for p in m_ordered if p.has_adjacent_overlap)
-        pen += sum(1000.0 for p in e_ordered if p.has_adjacent_overlap)
-        for p in m_ordered:
-            if last_shifts.get(p.first.name) == "morning":
-                pen += 8.0
-            if p.second and last_shifts.get(p.second.name) == "morning":
-                pen += 8.0
-        for p in e_ordered:
-            if last_shifts.get(p.first.name) == "evening":
-                pen += 8.0
-            if p.second and last_shifts.get(p.second.name) == "evening":
-                pen += 8.0
-
-        if pen < best_score:
-            best_score = pen
-            best_m = m_ordered
-            best_e = e_ordered
-
-    return best_m, best_e
+    m_ordered = _order_shift_pairs(
+        m_raw,
+        "morning",
+        last_shifts,
+        1,
+        force_late_shared=(day_index == 0),
+    )
+    e_ordered = _order_shift_pairs(
+        e_raw,
+        "evening",
+        last_shifts,
+        len(m_ordered) + 1,
+        force_late_shared=True,
+    )
+    return m_ordered, e_ordered
 
 
 def build_safe_schedule(
@@ -607,6 +595,214 @@ def build_safe_schedule(
         return (ran_flag, rest_band, _jitter_hash(a.name, seed_int))
 
     sched_accounts.sort(key=_urgency_key)
+
+    # 3b. If existing schedule tags (e.g. T2-C1..T6-C7) are already applied on profiles and the user
+    # has not requested a reshuffle (`shuffle_seed is None`), preserve the exact tagged day & pair
+    # assignments so the schedule dialog matches the profile list tags 100%, while placing any untagged
+    # accounts (such as accounts whose previous day's tag was cleared after completion) into the open day(s).
+    cycle_wd_tags = [
+        WEEKDAY_TAGS[(now_dt + dt.timedelta(days=d)).weekday()]
+        for d in range(cycle_days)
+    ]
+    wd_to_day_idx = {wd: d for d, wd in enumerate(cycle_wd_tags)}
+    acc_by_name = {a.name: a for a in sched_accounts}
+    shift_by_name: dict[str, str] = {}
+    tagged_by_day_pair: dict[int, dict[int, list[ScheduledAccount]]] = {}
+    all_tag_wds: set[str] = set()
+    tagged_names: set[str] = set()
+    for p in live_Raw:
+        parsed_tag = parse_schedule_tag(p.status)
+        if parsed_tag is not None and p.name in acc_by_name:
+            wd_tag, pair_num = parsed_tag
+            all_tag_wds.add(wd_tag)
+            sh_tag = parse_schedule_shift(p.status)
+            if sh_tag:
+                shift_by_name[p.name] = sh_tag
+            if wd_tag in wd_to_day_idx and pair_num > 0:
+                d_idx = wd_to_day_idx[wd_tag]
+                tagged_by_day_pair.setdefault(d_idx, {}).setdefault(pair_num, []).append(
+                    acc_by_name[p.name]
+                )
+                tagged_names.add(p.name)
+
+    empty_days = [d for d in range(cycle_days) if d not in tagged_by_day_pair]
+    untagged_accs = [a for a in sched_accounts if a.name not in tagged_names]
+    untagged_today = [a for a in untagged_accs if a.completed_today]
+    untagged_non_today = [a for a in untagged_accs if not a.completed_today]
+
+    if (
+        shuffle_seed is None
+        and tagged_names
+        and all_tag_wds.issubset(set(wd_to_day_idx.keys()))
+        and (not untagged_non_today or bool(empty_days))
+    ):
+        untagged_day_buckets: dict[int, list[ScheduledAccount]] = {d: [] for d in range(cycle_days)}
+        if untagged_today:
+            if 0 in tagged_by_day_pair:
+                rem_map = {a.name: a for a in untagged_today}
+                # 1. Fill any half-pair on Today using its saved partner from last_pairings first
+                for p_num in sorted(tagged_by_day_pair[0].keys()):
+                    if len(tagged_by_day_pair[0][p_num]) == 1 and rem_map:
+                        sole_name = tagged_by_day_pair[0][p_num][0].name
+                        partner_name = next(
+                            (
+                                (item[1] if item[0] == sole_name else item[0])
+                                for item in (last_pairings or [])
+                                if isinstance(item, (list, tuple))
+                                and len(item) == 2
+                                and sole_name in item
+                                and (item[1] if item[0] == sole_name else item[0]) in rem_map
+                            ),
+                            None,
+                        )
+                        if partner_name is not None:
+                            tagged_by_day_pair[0][p_num].append(rem_map.pop(partner_name))
+                for p_num in sorted(tagged_by_day_pair[0].keys()):
+                    while len(tagged_by_day_pair[0][p_num]) < 2 and rem_map:
+                        first_k = next(iter(rem_map))
+                        tagged_by_day_pair[0][p_num].append(rem_map.pop(first_k))
+                if rem_map:
+                    extra_pairs: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
+                    for item in last_pairings or []:
+                        if (
+                            isinstance(item, (list, tuple))
+                            and len(item) == 2
+                            and item[0] in rem_map
+                            and item[1] in rem_map
+                        ):
+                            extra_pairs.append((rem_map.pop(item[0]), rem_map.pop(item[1])))
+                    if rem_map:
+                        extra_pairs.extend(
+                            _pair_day_accounts(list(rem_map.values()), prev_pair_set, seed_int)
+                        )
+                    max_existing_p = max(tagged_by_day_pair[0].keys(), default=0)
+                    missing_slots = [
+                        k
+                        for k in range(1, max_existing_p + len(extra_pairs) + 1)
+                        if k not in tagged_by_day_pair[0]
+                    ]
+                    for slot_pnum, (a_ex, b_ex) in zip(missing_slots, extra_pairs, strict=False):
+                        grp = [a_ex] + ([b_ex] if b_ex is not None else [])
+                        tagged_by_day_pair[0][slot_pnum] = grp
+            else:
+                untagged_day_buckets[0].extend(untagged_today)
+
+        target_empty_days = [
+            d for d in empty_days if not (d == 0 and untagged_day_buckets[0])
+        ] or empty_days
+        if untagged_non_today and target_empty_days:
+            sub_quotas = _compute_even_day_quotas(len(untagged_non_today), len(target_empty_days))
+            cursor = 0
+            for d_target, q_target in zip(target_empty_days, sub_quotas, strict=False):
+                untagged_day_buckets[d_target].extend(untagged_non_today[cursor : cursor + q_target])
+                cursor += q_target
+
+        days_preserved: list[ScheduledDay] = []
+        collision_total = 0
+        adj_overlap_total = 0
+        repeated_pair_total = 0
+
+        for d_idx in range(cycle_days):
+            day_dt = now_dt + dt.timedelta(days=d_idx)
+            wd = day_dt.weekday()
+            if d_idx in tagged_by_day_pair:
+                sorted_pnums = sorted(tagged_by_day_pair[d_idx].keys())
+                m_pairs: list[ScheduledPair] = []
+                e_pairs: list[ScheduledPair] = []
+                morning_non_gw: set[str] = set()
+                for p_num in sorted_pnums:
+                    grp_accs = tagged_by_day_pair[d_idx][p_num]
+                    a = grp_accs[0]
+                    b = grp_accs[1] if len(grp_accs) > 1 else None
+                    if (
+                        b is not None
+                        and is_gateway_ipv6_cluster(b.cluster)
+                        and not is_gateway_ipv6_cluster(a.cluster)
+                    ):
+                        a, b = b, a
+                    non_gw = {
+                        c
+                        for c in ({a.cluster} | ({b.cluster} if b is not None else set()))
+                        if c and not is_gateway_ipv6_cluster(c)
+                    }
+                    explicit_sh = shift_by_name.get(a.name) or (
+                        shift_by_name.get(b.name) if b is not None else None
+                    )
+                    if explicit_sh:
+                        shift = explicit_sh
+                    elif non_gw & morning_non_gw:
+                        shift = "evening"
+                    else:
+                        shift = "morning"
+                    if shift == "morning":
+                        morning_non_gw.update(non_gw)
+                    target_list = m_pairs if shift == "morning" else e_pairs
+                    collision = bool(b is not None and a.cluster and a.cluster == b.cluster)
+                    adj_overlap = False
+                    if target_list:
+                        prev_clusters = target_list[-1].clusters
+                        curr_clusters = {a.cluster} | ({b.cluster} if b else set())
+                        ov = prev_clusters & curr_clusters
+                        adj_overlap = any(not is_gateway_ipv6_cluster(c) for c in ov)
+                    target_list.append(
+                        ScheduledPair(
+                            pair_index=p_num,
+                            shift=shift,
+                            first=a,
+                            second=b,
+                            has_cluster_collision=collision,
+                            has_adjacent_overlap=adj_overlap,
+                        )
+                    )
+            else:
+                raw_pairs = _pair_day_accounts(
+                    untagged_day_buckets.get(d_idx, []),
+                    prev_pair_set,
+                    seed_int + d_idx * 31,
+                )
+                m_pairs, e_pairs = _split_and_order_day_shifts(
+                    raw_pairs,
+                    prev_shifts,
+                    day_index=d_idx,
+                )
+
+            for pr in [*m_pairs, *e_pairs]:
+                if pr.has_cluster_collision:
+                    collision_total += 1
+                if pr.has_adjacent_overlap:
+                    adj_overlap_total += 1
+                if pr.second is not None:
+                    k = (
+                        (pr.first.name, pr.second.name)
+                        if pr.first.name < pr.second.name
+                        else (pr.second.name, pr.first.name)
+                    )
+                    if k in prev_pair_set:
+                        repeated_pair_total += 1
+
+            days_preserved.append(
+                ScheduledDay(
+                    day_index=d_idx,
+                    date_str=day_dt.strftime("%d/%m/%Y"),
+                    weekday_tag=WEEKDAY_TAGS[wd],
+                    weekday_name_vi=WEEKDAY_NAMES_VI[wd],
+                    weekday_name_en=WEEKDAY_NAMES_EN[wd],
+                    morning_pairs=m_pairs,
+                    evening_pairs=e_pairs,
+                )
+            )
+
+        return SchedulePlan(
+            generated_at=now_dt.strftime("%Y-%m-%d %H:%M"),
+            cycle_days=cycle_days,
+            total_live=len(sched_accounts),
+            days=days_preserved,
+            completed_today=completed_today_list,
+            skipped_drafts=skipped_drafts,
+            collision_count=collision_total,
+            adjacent_overlap_count=adj_overlap_total,
+            repeated_pair_count=repeated_pair_total,
+        )
 
     # 4. Partition into `cycle_days` daily buckets while enforcing:
     #    - Probation minimum day index (rest_hours + d_idx * 24 >= 72h for new accounts)

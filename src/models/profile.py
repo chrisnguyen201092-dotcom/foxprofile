@@ -106,7 +106,10 @@ def resolve_tag_label(tag: dict[str, str], get_str_fn=None) -> str:
     return tag.get("code") or ""
 
 
-_SCHEDULE_TAG_RE = re.compile(r"^(T[2-7]|CN)(?:[-·\s]*C(\d{1,2}))?$", re.IGNORECASE)
+_SCHEDULE_TAG_RE = re.compile(
+    r"^(T[2-7]|CN)(?:[-·\s]*C(\d{1,2}))?(?:[-·\s]*(S|T|M|E|SÁNG|TỐI|SANG|TOI))?$",
+    re.IGNORECASE,
+)
 _WEEKDAY_TAG_TO_INT: dict[str, int] = {
     "T2": 0,
     "T3": 1,
@@ -139,16 +142,33 @@ def parse_schedule_tag(status: str | None) -> tuple[str, int] | None:
     return day_tag, pair_num
 
 
-def schedule_sort_key(status: str | None, today: date | None = None) -> tuple[int, int, int]:
-    """Sort key ordering scheduled profiles by day offset from today (0..6) and pair number (C1, C2...)."""
+def parse_schedule_shift(status: str | None) -> str | None:
+    """Return `'morning'` or `'evening'` if the schedule tag encodes a shift suffix (`-S`/`-T`), else `None`."""
+    if not status:
+        return None
+    m = _SCHEDULE_TAG_RE.match(status.strip())
+    if not m or not m.group(3):
+        return None
+    raw_s = m.group(3).upper()
+    if raw_s in {"S", "M", "SÁNG", "SANG"}:
+        return "morning"
+    if raw_s in {"T", "E", "TỐI", "TOI"}:
+        return "evening"
+    return None
+
+
+def schedule_sort_key(status: str | None, today: date | None = None) -> tuple[int, int, int, int]:
+    """Sort key ordering scheduled profiles by day offset (0..6), shift (Sáng before Tối), and pair number."""
     parsed = parse_schedule_tag(status)
     if parsed is None:
-        return (1, 99, 99)
+        return (1, 99, 9, 99)
     day_tag, pair_num = parsed
+    shift = parse_schedule_shift(status)
+    shift_rank = 1 if shift == "evening" else 0
     ref_wd = (today or date.today()).weekday()
     day_wd = _WEEKDAY_TAG_TO_INT.get(day_tag, 0)
     day_offset = (day_wd - ref_wd) % 7
-    return (0, day_offset, pair_num if pair_num > 0 else 99)
+    return (0, day_offset, shift_rank, pair_num if pair_num > 0 else 99)
 
 
 def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, str] | None:
@@ -161,8 +181,13 @@ def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, st
     parsed_sched = parse_schedule_tag(clean)
     if parsed_sched is not None:
         day_tag, pair_num = parsed_sched
+        shift = parse_schedule_shift(clean)
         col = _WEEKDAY_COLORS.get(day_tag, "#2C524A")
         if pair_num > 0:
+            if shift == "morning":
+                return f"{day_tag}·C{pair_num}·Sáng", col
+            if shift == "evening":
+                return f"{day_tag}·C{pair_num}·Tối", col
             return f"{day_tag}·C{pair_num}", col
         return day_tag, col
     low = clean.casefold()

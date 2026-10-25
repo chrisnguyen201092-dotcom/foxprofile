@@ -3266,6 +3266,89 @@ def test_safe_schedule_account_pill_open_button():
     assert opened_badge.content.icon == ft.Icons.CHECK_ROUNDED
 
 
+def test_build_safe_schedule_preserves_existing_applied_tags(isolated_pm, tmp_path):
+    import datetime as dt
+
+    from src.services.monitor import MonitorService
+    from src.services.scheduler import build_safe_schedule
+
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    clusters = [
+        "209.141.40.174:5321",
+        "sp02-usa101.proxysystem.net:10101",
+        "209.141.40.174:5322",
+        "sp02-usa102.proxysystem.net:10102",
+        "198.98.62.18:9771",
+        "sp02-usa103.proxysystem.net:10103",
+        "198.98.62.18:9772",
+        "sp02-usa104.proxysystem.net:10104",
+    ]
+    for i, ep in enumerate(clusters):
+        name = f"Acc_{i + 1}"
+        isolated_pm.add_profile(
+            name,
+            f"http://u:p@{ep}",
+            "windows",
+            pages=["Live"],
+            email=f"u{i + 1}@hotmail.com",
+        )
+        isolated_pm.profiles[name].created_at = "2026-10-15"
+
+    # Monday 2026-10-26 (T2)
+    monday = dt.datetime(2026, 10, 26, 9, 0, 0)
+    isolated_pm.profiles["Acc_1"].status = "T2-C1"
+    isolated_pm.profiles["Acc_2"].status = "T2-C1"
+    isolated_pm.profiles["Acc_3"].status = "T2-C2"
+    isolated_pm.profiles["Acc_4"].status = "T2-C2"
+    isolated_pm.profiles["Acc_5"].status = "T3-C1"
+    isolated_pm.profiles["Acc_6"].status = "T3-C1"
+    # Acc_7 and Acc_8 have no tag (e.g., finished Sunday CN yesterday)
+
+    p_list = list(isolated_pm.profiles.values())
+    # Even when Acc_1 is currently running and last_pairings contains ["Acc_1", "Acc_2"],
+    # calling build_safe_schedule with shuffle_seed=None must preserve T2-C1, T2-C2, T3-C1!
+    snap = mon.snapshot(p_list, running_names={"Acc_1"})
+    plan = build_safe_schedule(
+        p_list,
+        snap,
+        cycle_days=4,
+        last_pairings=[["Acc_1", "Acc_2"], ["Acc_3", "Acc_4"]],
+        now=monday,
+    )
+    t2_pairs = plan.days[0].all_pairs
+    assert len(t2_pairs) == 2
+    assert {t2_pairs[0].first.name, t2_pairs[0].second.name} == {"Acc_1", "Acc_2"}
+    assert {t2_pairs[1].first.name, t2_pairs[1].second.name} == {"Acc_3", "Acc_4"}
+    t3_pairs = plan.days[1].all_pairs
+    assert len(t3_pairs) == 1
+    assert {t3_pairs[0].first.name, t3_pairs[0].second.name} == {"Acc_5", "Acc_6"}
+
+    from src.models.profile import resolve_status_display
+
+    tag_map = plan.status_tag_map()
+    # Both C1 (usa101) and C2 (usa102) have distinct /64 clusters -> both placed in Morning (-S)!
+    assert tag_map["Acc_2"] == "T2-C1-S"
+    assert tag_map["Acc_3"] == "T2-C2-S"
+
+    # If Acc_4 shares usa101 with Acc_2, C2 automatically moves to Evening (-T)
+    isolated_pm.profiles["Acc_4"].proxy = "http://u:p@sp02-usa101.proxysystem.net:10109"
+    plan_dup = build_safe_schedule(
+        list(isolated_pm.profiles.values()),
+        snap,
+        cycle_days=4,
+        now=monday,
+    )
+    assert plan_dup.status_tag_map()["Acc_3"] == "T2-C2-T"
+    disp_s = resolve_status_display("T2-C1-S")
+    disp_t = resolve_status_display("T2-C2-T")
+    assert disp_s is not None and disp_s[0] == "T2·C1·Sáng"
+    assert disp_t is not None and disp_t[0] == "T2·C2·Tối"
+
+
+
 
 
 

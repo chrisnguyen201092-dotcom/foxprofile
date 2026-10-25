@@ -17,6 +17,7 @@ from ...models.profile import (
     has_ban_page,
     is_ban_status,
     parse_flexible_date,
+    parse_schedule_shift,
     parse_schedule_tag,
     set_active_status_tags,
     today_ymd,
@@ -357,6 +358,37 @@ class ProfileManager:
                             ),
                         }
                         self.profiles[name] = Profile(**clean_data)
+                    # Auto-enrich legacy schedule tags (e.g. T2-C1 -> T2-C1-S / T2-C7-T) with shift suffix:
+                    # put all non-conflicting /64 pairs in Morning (-S) and only duplicate /64 pairs in Evening (-T).
+                    from ...services.scheduler import (
+                        extract_proxy_cluster,
+                        is_gateway_ipv6_cluster,
+                    )
+
+                    by_wd_pair: dict[str, dict[int, list[Profile]]] = {}
+                    for prof_item in self.profiles.values():
+                        parsed_st = parse_schedule_tag(prof_item.status)
+                        if parsed_st is not None and parsed_st[1] > 0:
+                            wd_k, p_idx = parsed_st
+                            by_wd_pair.setdefault(wd_k, {}).setdefault(p_idx, []).append(prof_item)
+                    for wd_k, pairs_map in by_wd_pair.items():
+                        morning_non_gw: set[str] = set()
+                        for p_idx in sorted(pairs_map.keys()):
+                            grp_profs = pairs_map[p_idx]
+                            non_gw = {
+                                c
+                                for p_obj in grp_profs
+                                if (c := extract_proxy_cluster(p_obj.proxy))
+                                and not is_gateway_ipv6_cluster(c)
+                            }
+                            if non_gw & morning_non_gw:
+                                sh_code = "T"
+                            else:
+                                sh_code = "S"
+                                morning_non_gw.update(non_gw)
+                            for p_obj in grp_profs:
+                                if parse_schedule_shift(p_obj.status) is None:
+                                    p_obj.status = f"{wd_k}-C{p_idx}-{sh_code}"
                 with contextlib.suppress(OSError):
                     self._disk_mtime = pathlib.Path(PROFILES_FILE).stat().st_mtime
                 logger.info("Loaded %d profiles", len(self.profiles))
