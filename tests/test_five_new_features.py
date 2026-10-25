@@ -2834,6 +2834,12 @@ def test_parallel_work_squad_and_cluster_guard(isolated_pm, tmp_path):
     pre_u101b = mon.check_prelaunch(isolated_pm.profiles["U101_B"], p_list, {"U101_A"})
     assert any(it.code == "cluster_busy" for it in pre_u101b)
 
+    # 1b. When U101_A stops, U101_B (different port :30002 on same usa101 /64 branch) must enter cooldown
+    mon.record_stopped("U101_A")
+    pre_u101b_cd = mon.check_prelaunch(isolated_pm.profiles["U101_B"], p_list, set())
+    assert any(it.code == "port_cooldown" for it in pre_u101b_cd)
+    mon._live_stopped_at.pop("U101_A", None)
+
     # 2. Bulk prelaunch with U101_A + U101_B should warn batch_cluster_collision
     bulk_check = mon.check_bulk_prelaunch(
         ["U101_A", "U101_B"],
@@ -2927,6 +2933,154 @@ def test_rename_preserves_legacy_parenthesized_log_sessions(tmp_path):
     sessions = mon.get_profile_sessions("#2  Sienna")
     assert len(sessions) == 2
     assert sum(s["duration_mins"] for s in sessions) == 121
+
+
+def test_fixed_work_squads_and_pinning_persistence(isolated_pm, tmp_path):
+    """Verify deterministic Fixed Squads (mode='fixed'), pinning persistence, and rename migration."""
+    import datetime as dt
+
+    from src.services.monitor import MonitorService
+    from src.services.scheduler import select_parallel_work_squad
+    from src.ui.dialogs import open_work_squad_dialog
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+
+    # Create 8 profiles across 4 distinct /64 clusters (2 per cluster)
+    clusters_ports = [
+        ("A1", "http://u:p@sp02-usa101.proxysystem.net:30001"),
+        ("A2", "http://u:p@sp02-usa101.proxysystem.net:30002"),
+        ("B1", "http://u:p@sp02-usa102.proxysystem.net:30011"),
+        ("B2", "http://u:p@sp02-usa102.proxysystem.net:30012"),
+        ("C1", "http://u:p@sp02-usa103.proxysystem.net:30021"),
+        ("C2", "http://u:p@sp02-usa103.proxysystem.net:30022"),
+        ("G1", "http://u:p@209.141.40.174:41001"),
+        ("G2", "http://u:p@209.141.40.174:41002"),
+    ]
+    for name, px in clusters_ports:
+        isolated_pm.add_profile(name, px, "windows")
+        p = isolated_pm.profiles[name]
+        p.ip_timezone = "America/Chicago"
+        p.ip_locale = "en-US"
+        p.created_at = "2026-01-01"
+
+    p_list = list(isolated_pm.profiles.values())
+    now_dt = dt.datetime(2026, 10, 25, 14, 0, 0)
+    snap = mon.snapshot(p_list, set())
+
+    # 1. Fixed mode partitions the 8 profiles into 2 conflict-free squads of 4
+    sq0 = select_parallel_work_squad(
+        p_list,
+        snap,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=0,
+        now=now_dt,
+    )
+    sq1 = select_parallel_work_squad(
+        p_list,
+        snap,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=1,
+        now=now_dt,
+    )
+    assert sq0.total_squads == 2
+    assert len(sq0.candidates) == 4
+    assert len(sq1.candidates) == 4
+    # Every squad has 4 distinct clusters
+    assert len({c.cluster for c in sq0.candidates}) == 4
+    assert len({c.cluster for c in sq1.candidates}) == 4
+    # Squad 0 and Squad 1 are disjoint
+    names0 = [c.name for c in sq0.candidates]
+    names1 = [c.name for c in sq1.candidates]
+    assert set(names0).isdisjoint(set(names1))
+
+    # 2. Fixed Squad 0 stays 100% identical even after A1 just closed 10 minutes ago
+    mon._live_stopped_at["A1"] = now_dt - dt.timedelta(minutes=10)
+    snap_after = mon.snapshot(p_list, set())
+    sq0_after = select_parallel_work_squad(
+        p_list,
+        snap_after,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=0,
+        now=now_dt,
+    )
+    assert [c.name for c in sq0_after.candidates] == names0
+
+    # 3. Pinning a custom squad ("4:0") locks those exact accounts and persists in MonitorService
+    custom_pinned = ["A2", "B2", "C1", "G2"]
+    mon.set_fixed_work_squad("4:0", custom_pinned)
+    mon_reloaded = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon_reloaded.fixed_work_squads.get("4:0") == custom_pinned
+
+    sq0_pinned = select_parallel_work_squad(
+        p_list,
+        snap_after,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=0,
+        pinned_squads=mon_reloaded.fixed_work_squads,
+        now=now_dt,
+    )
+    assert sq0_pinned.is_pinned is True
+    assert [c.name for c in sq0_pinned.candidates] == custom_pinned
+
+    # And Squad 1 automatically takes the remaining 4 accounts without duplicating Squad 0
+    sq1_remaining = select_parallel_work_squad(
+        p_list,
+        snap_after,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=1,
+        pinned_squads=mon_reloaded.fixed_work_squads,
+        now=now_dt,
+    )
+    assert set(c.name for c in sq1_remaining.candidates) == {"A1", "B1", "C2", "G1"}
+
+    # 4. Renaming a profile migrates it inside fixed_work_squads
+    mon_reloaded.rename_profile("A2", "A2_VIP")
+    assert mon_reloaded.fixed_work_squads["4:0"][0] == "A2_VIP"
+    mon_reloaded.set_fixed_work_squad("4:0", None)
+    assert "4:0" not in mon_reloaded.fixed_work_squads
+
+    # 5. Dialog interaction in fixed mode (pin & unpin)
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, d):
+            self.dialogs.append(d)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    dp = DummyPage()
+    saved_events = []
+    open_work_squad_dialog(
+        dp,  # type: ignore[arg-type]
+        p_list,
+        snap,
+        running_names=set(),
+        on_select_squad=lambda names, mode: None,
+        pinned_squads={},
+        on_save_fixed_squad=lambda key, names, idx: saved_events.append((key, names, idx)),
+    )
+    assert len(dp.dialogs) == 1
+
 
 
 

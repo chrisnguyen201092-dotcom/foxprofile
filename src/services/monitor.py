@@ -338,6 +338,7 @@ class MonitorService:
         self._last_pairings: list[list[str]] = []
         self._last_shifts: dict[str, str] = {}
         self._schedule_cycle_days: int = 5
+        self._fixed_work_squads: dict[str, list[str]] = {}
         self._load_settings()
 
     def _settings_file(self) -> pathlib.Path:
@@ -443,6 +444,15 @@ class MonitorService:
                 raw_cyc = raw.get("schedule_cycle_days")
                 if isinstance(raw_cyc, int) and 2 <= raw_cyc <= 7:
                     self._schedule_cycle_days = raw_cyc
+                raw_squads = raw.get("fixed_work_squads")
+                if isinstance(raw_squads, dict):
+                    clean_squads: dict[str, list[str]] = {}
+                    for sk, members in raw_squads.items():
+                        if isinstance(sk, str) and isinstance(members, list):
+                            m_list = [str(m).strip() for m in members if str(m).strip()]
+                            if m_list:
+                                clean_squads[sk] = m_list
+                    self._fixed_work_squads = clean_squads
 
     def _save_settings(self) -> None:
         path = self._settings_file()
@@ -460,6 +470,7 @@ class MonitorService:
                 "last_pairings": self._last_pairings,
                 "last_shifts": self._last_shifts,
                 "schedule_cycle_days": self._schedule_cycle_days,
+                "fixed_work_squads": self._fixed_work_squads,
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
@@ -483,6 +494,24 @@ class MonitorService:
     @property
     def schedule_cycle_days(self) -> int:
         return self._schedule_cycle_days
+
+    @property
+    def fixed_work_squads(self) -> dict[str, list[str]]:
+        return {k: list(v) for k, v in self._fixed_work_squads.items()}
+
+    def set_fixed_work_squad(self, key: str, names: list[str] | None) -> None:
+        """Pin or unpin a fixed parallel work squad (key format: '<size>:<squad_idx>')."""
+        clean_key = (key or "").strip()
+        if not clean_key:
+            return
+        if not names:
+            if self._fixed_work_squads.pop(clean_key, None) is not None:
+                self._save_settings()
+            return
+        clean_names = [str(n).strip() for n in names if str(n).strip()]
+        if clean_names:
+            self._fixed_work_squads[clean_key] = clean_names
+            self._save_settings()
 
     def record_schedule_applied(
         self,
@@ -730,6 +759,11 @@ class MonitorService:
                     changed = True
                 if pr[1] == old_name:
                     pr[1] = new_name
+                    changed = True
+        for sq_list in self._fixed_work_squads.values():
+            for idx, m_name in enumerate(sq_list):
+                if m_name == old_name:
+                    sq_list[idx] = new_name
                     changed = True
         if changed:
             self._save_settings()
@@ -1138,6 +1172,7 @@ class MonitorService:
             "tab_count": 0,
             "hatch_gw": cached.get("hatch_gw", False) if cached else False,
             "hatch_sess": cached.get("hatch_sess", False) if cached else False,
+            "has_muse_auth": cached.get("has_muse_auth", False) if cached else False,
             "sess_exp": cached.get("sess_exp", "-") if cached else "-",
             "burst_10m": 0,
             "last_active_ts": last_active_ts,
@@ -1219,6 +1254,7 @@ class MonitorService:
                 hatch_vml = False
                 hatch_sess = False
                 has_muse_onetap = False
+                has_muse_native_dev = False
                 has_muse_layout = False
                 has_grecaptcha = False
                 has_meta = False
@@ -1252,6 +1288,8 @@ class MonitorService:
                         has_chk_cookie = True
                     if is_hatch_host and cname_s == "__Host-hatch_one_tap":
                         has_muse_onetap = True
+                    if is_hatch_host and cname_s == "hatch_native_auth_device":
+                        has_muse_native_dev = True
                     if is_hatch_host and cname_s == "layout_state":
                         has_muse_layout = True
                     if cname_s == "datr":
@@ -1320,6 +1358,7 @@ class MonitorService:
                 result["hatch_gw"] = hatch_gw
                 result["hatch_vml"] = hatch_vml
                 result["hatch_sess"] = hatch_sess
+                result["has_muse_auth"] = bool(has_muse_onetap or has_muse_native_dev)
                 result["sess_exp"] = sess_exp
                 result["has_grecaptcha"] = has_grecaptcha
                 result["has_meta"] = has_meta
@@ -1439,12 +1478,21 @@ class MonitorService:
 
         hist = self._refresh_log_history()
 
-        # Group profiles by proxy endpoint (host:port) so identical port numbers on different servers never collide
+        # Group profiles by proxy endpoint (host:port) and by /64 cluster so same-branch cooldowns are tracked
         port_to_profiles: dict[str, list[str]] = {}
+        cluster_to_profiles: dict[str, list[str]] = {}
+        v6_to_profiles: dict[str, list[str]] = {}
         for p in profiles:
             ep = extract_proxy_endpoint(p.proxy)
             if ep:
                 port_to_profiles.setdefault(ep, []).append(p.name)
+            cl = extract_proxy_cluster(p.proxy)
+            if cl and not is_gateway_ipv6_cluster(cl):
+                cluster_to_profiles.setdefault(cl, []).append(p.name)
+            p_entries = self._ip_history.get(p.name, [])
+            p_v6 = _ipv6_prefix_64(p_entries[0].get("ip", "") if p_entries else "")
+            if p_v6:
+                v6_to_profiles.setdefault(p_v6, []).append(p.name)
 
         # Determine disk state, last_closed, and today_minutes per profile first
         today_str = now.strftime("%Y-%m-%d")
@@ -1595,11 +1643,22 @@ class MonitorService:
                     else 0
                 )
 
-            # Check if a sibling on the same proxy port closed < cooldown_minutes ago
+            # Check if a sibling on the same proxy port or same /64 branch closed < cooldown_minutes ago
             port_cooldown_by: tuple[str, int] | None = None
-            if cd_target > 0 and not is_run and not busy_by and len(siblings) > 1:
-                for sib in siblings:
-                    if sib == p.name:
+            if cd_target > 0 and not is_run and not busy_by:
+                ip_ent_cd = self._ip_history.get(p.name, [])
+                my_v6_cd = _ipv6_prefix_64(ip_ent_cd[0].get("ip", "") if ip_ent_cd else "")
+                cd_candidates: list[str] = list(siblings)
+                if cluster and not is_gateway_ipv6_cluster(cluster):
+                    for cm in cluster_to_profiles.get(cluster, []):
+                        if cm not in cd_candidates:
+                            cd_candidates.append(cm)
+                if my_v6_cd:
+                    for vm in v6_to_profiles.get(my_v6_cd, []):
+                        if vm not in cd_candidates:
+                            cd_candidates.append(vm)
+                for sib in cd_candidates:
+                    if sib == p.name or sib in running_names:
                         continue
                     sib_lc = last_closed_map.get(sib)
                     if sib_lc is not None:
@@ -1699,11 +1758,10 @@ class MonitorService:
                 age_days = 0
             else:
                 age_days = cal_age_days
-            eff_datr_age = round(
-                datr_age_days
+            eff_datr_age = (
+                max(0.1, round(datr_age_days, 1))
                 if datr_age_days > 0
-                else (float(age_days) if (not has_meta and cookie_count > 0) else 0.0),
-                1,
+                else round(float(age_days) if (not has_meta and cookie_count > 0) else 0.0, 1)
             )
             raw_sess_cnt = sess_cnt
             if sess_cnt == 0 and (cookie_count > 0 or history_pages > 0):
@@ -1790,7 +1848,7 @@ class MonitorService:
             # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Cross-Domain Sync & HTTP Cache2 ETag (max 10)
             if has_ps_l or (not has_meta and has_grecaptcha):
                 score += 3
-            if (datr_domains >= 4 and cookie_count >= 20) or cookie_count >= 45:
+            if (datr_domains >= 4 and cookie_count >= 18) or cookie_count >= 45:
                 score += 4
             elif (datr_domains >= 3 and cookie_count >= 14) or cookie_count >= 30:
                 score += 2
@@ -1815,12 +1873,12 @@ class MonitorService:
                     elif ip_fraud_score < 65:
                         score += 3
                 elif last_ip:
-                    score += 4
+                    score += 3
 
             # 5. Strict Meta Sigma Risk Penalties & Progressive Hard Gates (Safety Buffer)
             if has_meta_checkpoint:
                 score -= 30
-            if disk["hatch_sess"] and not disk["hatch_gw"]:
+            if disk["hatch_sess"] and not disk["hatch_gw"] and not disk.get("has_muse_auth"):
                 score -= 15
             if proxy_port_changed or ip_country_changed:
                 score -= 25
@@ -1900,7 +1958,7 @@ class MonitorService:
                     ]
                 elif cluster and is_gateway_ipv6_cluster(cluster):
                     r_gw = [m for m in running_by_cluster.get(cluster, []) if m != p.name]
-                    if len(r_gw) >= 4:
+                    if len(r_gw) >= 2:
                         cluster_busy_by = list(r_gw)
                 my_v6 = _ipv6_prefix_64(last_ip)
                 if my_v6 and my_v6 in running_by_v6_64:
@@ -2305,6 +2363,14 @@ class MonitorService:
         by_name = {p.name: p for p in all_profiles}
         seen_ports: dict[str, str] = {}
         seen_clusters: dict[str, str] = {}
+        seen_v6_64: dict[str, str] = {}
+        gw_batch_names: dict[str, list[str]] = {}
+        for r_name in active_names:
+            rp = by_name.get(r_name)
+            if rp is not None:
+                rcl = extract_proxy_cluster(rp.proxy)
+                if rcl and is_gateway_ipv6_cluster(rcl):
+                    gw_batch_names.setdefault(rcl, []).append(r_name)
         issues: dict[str, list[PreLaunchWarning]] = {}
 
         for name in target_names:
@@ -2323,6 +2389,8 @@ class MonitorService:
             port = extract_proxy_port(p.proxy)
             ep = extract_proxy_endpoint(p.proxy)
             cluster = extract_proxy_cluster(p.proxy)
+            info = snap.profiles.get(name)
+            my_v6 = _ipv6_prefix_64(info.last_exit_ip if info else "")
             port_collided = False
             if ep:
                 if ep in seen_ports:
@@ -2357,6 +2425,42 @@ class MonitorService:
                     )
                 else:
                     seen_clusters[cluster] = name
+            elif not port_collided and cluster and is_gateway_ipv6_cluster(cluster):
+                prev_gw = gw_batch_names.get(cluster, [])
+                if len(prev_gw) >= 2 and not any(w.code == "cluster_busy" for w in wlist):
+                    wlist.insert(
+                        0,
+                        PreLaunchWarning(
+                            code="batch_cluster_collision",
+                            level="warning",
+                            message=get_string(
+                                "guard_batch_cluster_collision",
+                                cluster=cluster,
+                                other=", ".join(prev_gw[:2]),
+                            ),
+                        ),
+                    )
+                gw_batch_names.setdefault(cluster, []).append(name)
+            if (
+                not port_collided
+                and my_v6
+                and not any(w.code == "batch_cluster_collision" for w in wlist)
+            ):
+                if my_v6 in seen_v6_64:
+                    wlist.insert(
+                        0,
+                        PreLaunchWarning(
+                            code="batch_cluster_collision",
+                            level="warning",
+                            message=get_string(
+                                "guard_batch_cluster_collision",
+                                cluster=my_v6,
+                                other=seen_v6_64[my_v6],
+                            ),
+                        ),
+                    )
+                else:
+                    seen_v6_64[my_v6] = name
             if wlist:
                 issues[name] = wlist
 

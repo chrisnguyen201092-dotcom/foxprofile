@@ -1220,6 +1220,13 @@ class AppHandlers:
             running_names,
         )
 
+        def _mode_label(mode: str) -> str:
+            if mode == "fixed":
+                return get_string("work_squad_mode_fixed")
+            if mode == "prime":
+                return get_string("work_squad_mode_prime")
+            return get_string("work_squad_mode_rotation")
+
         def _apply_squad(selected_names: list[str], mode: str) -> None:
             self._state.clear_selection()
             for n in selected_names:
@@ -1229,14 +1236,11 @@ class AppHandlers:
             refs = self._get_refs()
             if refs is not None and refs.sort_dropdown is not None:
                 refs.sort_dropdown.value = "parallel_ready"
-            mode_label = get_string(
-                "work_squad_mode_rotation" if mode == "rotation" else "work_squad_mode_prime"
-            )
             self._log(
                 get_string(
                     "work_squad_applied_log",
                     count=len(selected_names),
-                    mode=mode_label,
+                    mode=_mode_label(mode),
                 )
             )
             self._refresh()
@@ -1245,6 +1249,19 @@ class AppHandlers:
             if not self._bl.is_running(name) and not self._state.is_loading(name):
                 launch_or_stop(name, self._pm, self._bl, self._state, self._log)
                 self._refresh()
+
+        def _save_fixed_squad(key: str, names: list[str] | None, team_idx: int) -> None:
+            self._monitor.set_fixed_work_squad(key, names)
+            if names:
+                self._log(
+                    get_string(
+                        "work_squad_pinned_log",
+                        idx=team_idx,
+                        count=len(names),
+                    )
+                )
+            else:
+                self._log(get_string("work_squad_unpinned_log", idx=team_idx))
 
         def _stagger_launch_squad(selected_names: list[str], mode: str) -> None:
             self._state.clear_selection()
@@ -1260,14 +1277,11 @@ class AppHandlers:
                 for n in selected_names
                 if not self._bl.is_running(n) and not self._state.is_loading(n)
             ]
-            mode_label = get_string(
-                "work_squad_mode_rotation" if mode == "rotation" else "work_squad_mode_prime"
-            )
             self._log(
                 get_string(
                     "work_squad_stagger_started_log",
                     count=len(to_open),
-                    mode=mode_label,
+                    mode=_mode_label(mode),
                 )
             )
             self._refresh()
@@ -1279,6 +1293,7 @@ class AppHandlers:
                     self._state,
                     self._log,
                     stagger_seconds=(40, 60),
+                    shuffle_order=(mode == "fixed"),
                 )
 
         open_work_squad_dialog(
@@ -1289,4 +1304,6 @@ class AppHandlers:
             on_select_squad=_apply_squad,
             on_launch_single=_launch_one,
             on_launch_staggered=_stagger_launch_squad,
+            pinned_squads=self._monitor.fixed_work_squads,
+            on_save_fixed_squad=_save_fixed_squad,
         )

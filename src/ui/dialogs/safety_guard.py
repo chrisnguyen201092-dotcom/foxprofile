@@ -947,7 +947,37 @@ def _build_squad_candidate_row(
             ),
         ),
     ]
-    if cand.is_rising_star:
+    if cand.is_conflict:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.12, COLORS["warning"]),
+                border=ft.Border.all(1, COLORS["warning"]),
+                content=ft.Text(
+                    get_string("work_squad_busy_cluster_badge"),
+                    size=10.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["warning"],
+                ),
+            )
+        )
+    elif cand.today_minutes >= 15:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(1, "#0284C7"),
+                content=ft.Text(
+                    get_string("work_squad_done_today_badge", mins=cand.today_minutes),
+                    size=10.5,
+                    font_family=FONT_SEMIBOLD,
+                    color="#0284C7",
+                ),
+            )
+        )
+    elif cand.is_rising_star:
         right_badges.append(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=6, vertical=2),
@@ -978,7 +1008,7 @@ def _build_squad_candidate_row(
                 ),
             )
         )
-    elif on_open_one is not None:
+    elif on_open_one is not None and not cand.is_conflict:
         right_badges.append(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=10, vertical=4),
@@ -1041,22 +1071,29 @@ def open_work_squad_dialog(
     on_select_squad: Callable[[list[str], str], None],
     on_launch_single: Callable[[str], None] | None = None,
     on_launch_staggered: Callable[[list[str], str], None] | None = None,
+    pinned_squads: dict[str, list[str]] | None = None,
+    on_save_fixed_squad: Callable[[str, list[str] | None, int], None] | None = None,
 ) -> None:
     """Compact modal to pick and launch a conflict-free parallel work squad across distinct /64 subnets."""
     launched_in_dialog: set[str] = set()
+    local_pinned: dict[str, list[str]] = {
+        k: list(v) for k, v in (pinned_squads or {}).items()
+    }
     state: dict[str, object] = {
         "mode": "rotation",
         "size": 4,
         "seed": 0,
+        "squad_idx": 0,
         "plan": None,
     }
 
-    controls_row = ft.Row(spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    controls_row = ft.Row(spacing=7, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    squad_bar_slot = ft.Container(visible=False)
     banner_slot = ft.Container(visible=False)
     list_col = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, height=310)
     select_only_btn = ft.OutlinedButton(
         "",
-        icon=ft.Icons. CHECKLIST_ROUNDED,
+        icon=ft.Icons.CHECKLIST_ROUNDED,
         style=OUTLINE_STYLE,
     )
     apply_btn = ft.Button(
@@ -1091,11 +1128,51 @@ def open_work_squad_dialog(
 
     def _set_size(sz: int) -> None:
         state["size"] = sz
+        state["squad_idx"] = 0
+        _refresh_squad(recompute=True)
+        page.update()
+
+    def _set_squad_idx(idx: int) -> None:
+        state["squad_idx"] = idx
         _refresh_squad(recompute=True)
         page.update()
 
     def _shuffle(_: ft.ControlEvent) -> None:
         state["seed"] = int(state["seed"]) + 1  # type: ignore[arg-type]
+        _refresh_squad(recompute=True)
+        page.update()
+
+    def _toggle_pin_current(_: ft.ControlEvent) -> None:
+        plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
+        if plan is None or not plan.candidates:
+            return
+        sz = int(state["size"])  # type: ignore[arg-type]
+        if state["mode"] != "fixed":
+            # Find first unpinned slot (or slot 0) for this size and switch to fixed mode
+            target_idx = 0
+            for idx_cand in range(12):
+                if f"{sz}:{idx_cand}" not in local_pinned:
+                    target_idx = idx_cand
+                    break
+            key = f"{sz}:{target_idx}"
+            names = [c.name for c in plan.candidates]
+            local_pinned[key] = names
+            state["mode"] = "fixed"
+            state["squad_idx"] = target_idx
+            if on_save_fixed_squad is not None:
+                on_save_fixed_squad(key, names, target_idx + 1)
+        else:
+            s_idx = int(plan.squad_index)
+            key = f"{sz}:{s_idx}"
+            if plan.is_pinned:
+                local_pinned.pop(key, None)
+                if on_save_fixed_squad is not None:
+                    on_save_fixed_squad(key, None, s_idx + 1)
+            else:
+                names = [c.name for c in plan.candidates]
+                local_pinned[key] = names
+                if on_save_fixed_squad is not None:
+                    on_save_fixed_squad(key, names, s_idx + 1)
         _refresh_squad(recompute=True)
         page.update()
 
@@ -1118,7 +1195,13 @@ def open_work_squad_dialog(
         plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
         page.pop_dialog()
         if plan is not None and plan.candidates:
-            names = [c.name for c in plan.candidates]
+            names = [
+                c.name
+                for c in plan.candidates
+                if c.name not in (running_names | launched_in_dialog) and not c.is_conflict
+            ]
+            if not names:
+                names = [c.name for c in plan.candidates]
             mode_str = str(state["mode"])
             if on_launch_staggered is not None:
                 on_launch_staggered(names, mode_str)
@@ -1129,17 +1212,21 @@ def open_work_squad_dialog(
     apply_btn.on_click = _apply
 
     def _refresh_squad(*, recompute: bool = True) -> None:
+        active_all = running_names | launched_in_dialog
         plan: WorkSquadPlan | None = state["plan"]  # type: ignore[assignment]
         if recompute or plan is None:
             plan = select_parallel_work_squad(
                 profiles,
                 snap,
-                running_names | launched_in_dialog,
+                active_all,
                 count=int(state["size"]),  # type: ignore[arg-type]
                 mode=str(state["mode"]),
                 shuffle_seed=int(state["seed"]) * 53,  # type: ignore[arg-type]
+                squad_index=int(state["squad_idx"]),  # type: ignore[arg-type]
+                pinned_squads=local_pinned,
             )
             state["plan"] = plan
+            state["squad_idx"] = plan.squad_index
 
         bar_items: list[ft.Control] = [
             ft.Text(
@@ -1158,7 +1245,12 @@ def open_work_squad_dialog(
                 state["mode"] == "prime",
                 lambda: _set_mode("prime"),
             ),
-            ft.Container(width=6),
+            _pill_btn(
+                get_string("work_squad_mode_fixed"),
+                state["mode"] == "fixed",
+                lambda: _set_mode("fixed"),
+            ),
+            ft.Container(width=4),
             ft.Text(
                 get_string("work_squad_size_label"),
                 size=12,
@@ -1177,7 +1269,82 @@ def open_work_squad_dialog(
                 on_click=_shuffle,
             ),
         ]
+        if state["mode"] != "fixed" and plan.candidates:
+            bar_items.append(
+                ft.OutlinedButton(
+                    get_string("work_squad_save_as_fixed_btn"),
+                    icon=ft.Icons.PUSH_PIN_OUTLINED,
+                    height=30,
+                    style=OUTLINE_STYLE,
+                    on_click=_toggle_pin_current,
+                )
+            )
         controls_row.controls = bar_items
+
+        if state["mode"] == "fixed" and plan.total_squads > 0:
+            total_acc = sum(len(sq) for sq in plan.all_squads)
+            team_pills: list[ft.Control] = [
+                ft.Text(
+                    f"{get_string('work_squad_team_label')} ({plan.total_squads} · {total_acc} acc)",
+                    size=12,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_sub"],
+                ),
+            ]
+            for s_idx in range(plan.total_squads):
+                is_pinned_tab = s_idx in plan.pinned_indices
+                lbl = get_string(
+                    "work_squad_team_pinned_pill" if is_pinned_tab else "work_squad_team_pill",
+                    idx=s_idx + 1,
+                )
+                team_pills.append(
+                    _pill_btn(
+                        lbl,
+                        plan.squad_index == s_idx,
+                        lambda target=s_idx: _set_squad_idx(target),
+                    )
+                )
+            pin_btn_ctrl = ft.OutlinedButton(
+                get_string("work_squad_unpin_btn" if plan.is_pinned else "work_squad_pin_btn"),
+                icon=ft.Icons.PUSH_PIN_ROUNDED if plan.is_pinned else ft.Icons.PUSH_PIN_OUTLINED,
+                height=30,
+                style=OUTLINE_STYLE,
+                on_click=_toggle_pin_current,
+            )
+            squad_bar_slot.visible = True
+            squad_bar_slot.content = ft.Container(
+                padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+                border_radius=8,
+                bgcolor=COLORS["bg"],
+                border=ft.Border.all(1, COLORS["card_border"]),
+                content=ft.Column(
+                    spacing=5,
+                    tight=True,
+                    controls=[
+                        ft.Row(
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Row(
+                                    spacing=5,
+                                    wrap=True,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    expand=True,
+                                    controls=team_pills,
+                                ),
+                                pin_btn_ctrl,
+                            ],
+                        ),
+                        ft.Text(
+                            get_string("work_squad_fixed_hint"),
+                            size=11,
+                            color=COLORS["text_sub"],
+                        ),
+                    ],
+                ),
+            )
+        else:
+            squad_bar_slot.visible = False
 
         if plan.busy_clusters:
             locked_str = ", ".join(
@@ -1212,12 +1379,16 @@ def open_work_squad_dialog(
                 _build_squad_candidate_row(
                     i + 1,
                     c,
-                    is_opened=(c.name in launched_in_dialog),
+                    is_opened=(c.name in active_all),
                     on_open_one=_handle_open_one,
                 )
                 for i, c in enumerate(plan.candidates)
             ]
-            remaining_cnt = sum(1 for c in plan.candidates if c.name not in launched_in_dialog)
+            remaining_cnt = sum(
+                1
+                for c in plan.candidates
+                if c.name not in active_all and not c.is_conflict
+            )
             select_only_btn.disabled = False
             select_only_btn.content = get_string("work_squad_select_only_btn", count=len(plan.candidates))
             apply_btn.disabled = remaining_cnt == 0
@@ -1269,12 +1440,13 @@ def open_work_squad_dialog(
             ],
         ),
         content=ft.Container(
-            width=740,
+            width=780,
             content=ft.Column(
                 spacing=10,
                 tight=True,
                 controls=[
                     controls_row,
+                    squad_bar_slot,
                     banner_slot,
                     list_col,
                 ],

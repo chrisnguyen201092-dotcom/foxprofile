@@ -193,6 +193,7 @@ def bulk_launch_profiles(
     log: Callable[[str], None],
     *,
     stagger_seconds: tuple[int, int] = (40, 60),
+    shuffle_order: bool = False,
 ) -> None:
     to_launch = [
         name
@@ -201,6 +202,8 @@ def bulk_launch_profiles(
     ]
     if not to_launch:
         return
+    if shuffle_order and len(to_launch) > 1:
+        random.shuffle(to_launch)
 
     # Launch the first profile immediately so the user sees instant response
     first = to_launch[0]

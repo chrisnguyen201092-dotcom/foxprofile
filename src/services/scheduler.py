@@ -1069,14 +1069,287 @@ class SquadCandidate:
     total_minutes: int
     hatch_gw: bool
     is_rising_star: bool = False
+    is_conflict: bool = False
 
 
 @dataclass
 class WorkSquadPlan:
-    mode: str  # "rotation" | "prime"
+    mode: str  # "rotation" | "prime" | "fixed"
     target_size: int
     candidates: list[SquadCandidate] = field(default_factory=list)
     busy_clusters: dict[str, list[str]] = field(default_factory=dict)
+    squad_index: int = 0
+    total_squads: int = 1
+    is_pinned: bool = False
+    pinned_indices: set[int] = field(default_factory=set)
+    all_squads: list[list[SquadCandidate]] = field(default_factory=list)
+
+
+def _build_fixed_work_squad_plan(
+    profiles: list[Profile],
+    snap: MonitorSnapshot,
+    active_set: set[str],
+    busy_clusters: dict[str, list[str]],
+    *,
+    target_n: int,
+    shuffle_seed: int,
+    squad_index: int,
+    pinned_squads: dict[str, list[str]] | None,
+    now_dt: dt.datetime,
+) -> WorkSquadPlan:
+    """Partition eligible accounts into deterministic, time-invariant conflict-free /64 squads."""
+    cand_by_name: dict[str, SquadCandidate] = {}
+    rank_by_name: dict[str, tuple[int, int, float, str]] = {}
+
+    for p in profiles:
+        grp = (p.group or "").strip().lower()
+        pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
+        if grp == "disconnected" or "disconnected" in pgs_lower:
+            continue
+        if not (p.proxy or "").strip():
+            continue
+        info = snap.profiles.get(p.name)
+        if info is None or info.is_banned:
+            continue
+        if any(
+            c in info.audit_codes
+            for c in ("burned_proxy", "burned_ip", "duplicate_fingerprint")
+        ):
+            continue
+        has_disk_activity = bool(
+            info.hatch_gw
+            or info.hatch_sess
+            or info.cookie_count > 0
+            or info.session_count > 0
+            or info.history_pages > 0
+        )
+        has_account = (
+            bool((p.email or "").strip())
+            or has_disk_activity
+            or (not p.name.strip().isdigit())
+        )
+        if not has_account:
+            continue
+
+        cl = extract_proxy_cluster(p.proxy)
+        if not cl:
+            continue
+
+        lc = info.last_closed
+        rest_h = (
+            max(0.0, (now_dt - lc).total_seconds() / 3600.0)
+            if lc is not None
+            else 72.0
+        )
+        is_rising = bool(info.hatch_gw and 48 <= info.trust_score < 80)
+        is_conflict = (p.name not in active_set) and (
+            bool(info.has_warning)
+            or bool(info.cluster_busy_by)
+            or (not is_gateway_ipv6_cluster(cl) and cl in busy_clusters)
+        )
+        cand = SquadCandidate(
+            name=p.name,
+            email=(p.email or p.name).strip(),
+            cluster=cl,
+            port=extract_proxy_port(p.proxy),
+            endpoint=extract_proxy_endpoint(p.proxy),
+            trust_score=info.trust_score,
+            trust_tier=info.trust_tier,
+            rest_hours=rest_h,
+            today_minutes=info.today_minutes,
+            active_days=info.active_days,
+            total_minutes=info.total_minutes,
+            hatch_gw=info.hatch_gw,
+            is_rising_star=is_rising,
+            is_conflict=is_conflict,
+        )
+        cand_by_name[p.name] = cand
+
+        gw_rank = 0 if info.hatch_gw else (1 if info.hatch_sess else 2)
+        tier_rank = (
+            0
+            if info.trust_tier == "diamond"
+            else (1 if info.trust_tier == "trusted" else 2)
+        )
+        jitter = _jitter_hash(p.name, shuffle_seed + 19) if shuffle_seed > 0 else 0.0
+        rank_by_name[p.name] = (gw_rank, tier_rank, jitter, p.name.casefold())
+
+    pinned_by_idx: dict[int, list[SquadCandidate]] = {}
+    used_names: set[str] = set()
+    prefix = f"{target_n}:"
+    for raw_k, member_names in sorted((pinned_squads or {}).items()):
+        if not isinstance(raw_k, str) or not raw_k.startswith(prefix):
+            continue
+        with contextlib.suppress(ValueError):
+            s_idx = int(raw_k.split(":", 1)[1])
+            if s_idx < 0:
+                continue
+            sq_cands: list[SquadCandidate] = []
+            seen_cls: set[str] = set()
+            seen_eps: set[str] = set()
+            for m_name in member_names:
+                c = cand_by_name.get(m_name)
+                if c is None or m_name in used_names:
+                    continue
+                if not is_gateway_ipv6_cluster(c.cluster) and c.cluster in seen_cls:
+                    continue
+                if c.endpoint and c.endpoint in seen_eps:
+                    continue
+                seen_cls.add(c.cluster)
+                if c.endpoint:
+                    seen_eps.add(c.endpoint)
+                sq_cands.append(c)
+                used_names.add(m_name)
+            if sq_cands:
+                pinned_by_idx[s_idx] = sq_cands[:target_n]
+
+    # Group remaining profiles by cluster; place primary unique endpoints ahead of shared-port siblings
+    raw_by_cluster: dict[str, list[SquadCandidate]] = {}
+    for name, cand in cand_by_name.items():
+        if name not in used_names:
+            raw_by_cluster.setdefault(cand.cluster, []).append(cand)
+
+    by_cluster: dict[str, list[SquadCandidate]] = {}
+    for cl, items in raw_by_cluster.items():
+        items.sort(key=lambda c: rank_by_name[c.name])
+        primary_ep: list[SquadCandidate] = []
+        secondary_ep: list[SquadCandidate] = []
+        seen_ep: set[str] = set()
+        for c in items:
+            if c.endpoint and c.endpoint in seen_ep:
+                secondary_ep.append(c)
+            else:
+                if c.endpoint:
+                    seen_ep.add(c.endpoint)
+                primary_ep.append(c)
+        by_cluster[cl] = primary_ep + secondary_ep
+
+    def _fill_squad_slots(existing: list[SquadCandidate]) -> list[SquadCandidate]:
+        sq = list(existing)
+        used_cls = {c.cluster for c in sq}
+        used_eps = {c.endpoint for c in sq if c.endpoint}
+        rem_gw = sum(len(v) for k, v in by_cluster.items() if is_gateway_ipv6_cluster(k))
+        rem_usa = sum(len(v) for k, v in by_cluster.items() if not is_gateway_ipv6_cluster(k))
+        avail_usa_cls = sum(
+            1 for k, v in by_cluster.items() if v and not is_gateway_ipv6_cluster(k)
+        )
+        need_second_gw = (target_n > 2) and (
+            rem_gw >= rem_usa or avail_usa_cls < target_n - 1
+        )
+        max_gw = (
+            min(3, max(2, (target_n + 1) // 2))
+            if need_second_gw
+            else (1 if target_n <= 6 else min(3, max(1, (target_n + 2) // 3)))
+        )
+        gw_counts: dict[str, int] = {}
+        for c in sq:
+            if is_gateway_ipv6_cluster(c.cluster):
+                gw_counts[c.cluster] = gw_counts.get(c.cluster, 0) + 1
+
+        while len(sq) < target_n:
+            avail_cls = []
+            for cl, pool in by_cluster.items():
+                if not pool:
+                    continue
+                is_gw = is_gateway_ipv6_cluster(cl)
+                if not is_gw and cl in used_cls:
+                    continue
+                if is_gw and gw_counts.get(cl, 0) >= max_gw:
+                    continue
+                # Find first candidate in pool whose endpoint is not in used_eps
+                valid_idx = next(
+                    (
+                        i
+                        for i, cand in enumerate(pool)
+                        if not cand.endpoint or cand.endpoint not in used_eps
+                    ),
+                    -1,
+                )
+                if valid_idx >= 0:
+                    # Prefer distinct non-gateway clusters unless gateway pool is >= remaining non-gateway pool
+                    gw_slot_pen = (
+                        0
+                        if (is_gw and gw_counts.get(cl, 0) <= 1 and need_second_gw)
+                        else (gw_counts.get(cl, 0) * 100)
+                    )
+                    avail_cls.append(
+                        (
+                            gw_slot_pen,
+                            -len(pool),
+                            rank_by_name[pool[valid_idx].name],
+                            cl,
+                            valid_idx,
+                        )
+                    )
+            if not avail_cls:
+                break
+            avail_cls.sort()
+            _, _, _, best_cl, pick_idx = avail_cls[0]
+            chosen = by_cluster[best_cl].pop(pick_idx)
+            sq.append(chosen)
+            used_cls.add(best_cl)
+            if chosen.endpoint:
+                used_eps.add(chosen.endpoint)
+            if is_gateway_ipv6_cluster(best_cl):
+                gw_counts[best_cl] = gw_counts.get(best_cl, 0) + 1
+        return sq
+
+    # Top up any partial pinned squads first
+    for s_idx in sorted(pinned_by_idx):
+        if len(pinned_by_idx[s_idx]) < target_n:
+            pinned_by_idx[s_idx] = _fill_squad_slots(pinned_by_idx[s_idx])
+
+    # Build remaining squads deterministically until all eligible accounts are placed
+    auto_squads: list[list[SquadCandidate]] = []
+    while True:
+        sq = _fill_squad_slots([])
+        if not sq:
+            break
+        auto_squads.append(sq)
+
+    total_slots = max(
+        len(auto_squads) + len(pinned_by_idx),
+        (max(pinned_by_idx) + 1) if pinned_by_idx else 0,
+    )
+    all_squads: list[list[SquadCandidate]] = []
+    pinned_final_indices: set[int] = set()
+    auto_iter = iter(auto_squads)
+    for slot_idx in range(total_slots):
+        if slot_idx in pinned_by_idx:
+            pinned_final_indices.add(len(all_squads))
+            all_squads.append(pinned_by_idx[slot_idx])
+        else:
+            nxt = next(auto_iter, None)
+            if nxt is not None:
+                all_squads.append(nxt)
+    for rem in auto_iter:
+        all_squads.append(rem)
+
+    if not all_squads:
+        return WorkSquadPlan(
+            mode="fixed",
+            target_size=target_n,
+            candidates=[],
+            busy_clusters=busy_clusters,
+            squad_index=0,
+            total_squads=0,
+            is_pinned=False,
+            pinned_indices=set(),
+            all_squads=[],
+        )
+
+    eff_idx = max(0, min(len(all_squads) - 1, int(squad_index)))
+    return WorkSquadPlan(
+        mode="fixed",
+        target_size=target_n,
+        candidates=all_squads[eff_idx],
+        busy_clusters=busy_clusters,
+        squad_index=eff_idx,
+        total_squads=len(all_squads),
+        is_pinned=(eff_idx in pinned_final_indices),
+        pinned_indices=pinned_final_indices,
+        all_squads=all_squads,
+    )
 
 
 def select_parallel_work_squad(
@@ -1087,6 +1360,8 @@ def select_parallel_work_squad(
     count: int = 4,
     mode: str = "rotation",
     shuffle_seed: int = 0,
+    squad_index: int = 0,
+    pinned_squads: dict[str, list[str]] | None = None,
     now: dt.datetime | None = None,
 ) -> WorkSquadPlan:
     """Select `count` conflict-free profiles across distinct IPv6 /64 clusters for parallel work."""
@@ -1101,6 +1376,19 @@ def select_parallel_work_squad(
         cl = extract_proxy_cluster(p.proxy)
         if cl:
             busy_clusters.setdefault(cl, []).append(p.name)
+
+    if mode == "fixed":
+        return _build_fixed_work_squad_plan(
+            profiles,
+            snap,
+            active_set,
+            busy_clusters,
+            target_n=target_n,
+            shuffle_seed=shuffle_seed,
+            squad_index=squad_index,
+            pinned_squads=pinned_squads,
+            now_dt=now_dt,
+        )
 
     fresh_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
     rested_fallback_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
