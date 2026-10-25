@@ -1726,6 +1726,18 @@ def open_session_history_dialog(
         ],
     )
 
+    sum_sess_mins = sum(max(0, int(s.get("duration_mins") or 0)) for s in sessions)
+    total_mins = (
+        max(sum_sess_mins, monitor_info.total_minutes)
+        if monitor_info is not None
+        else sum_sess_mins
+    )
+    total_count = (
+        max(len(sessions), monitor_info.session_count)
+        if monitor_info is not None
+        else len(sessions)
+    )
+
     dlg = ft.AlertDialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
@@ -1746,7 +1758,8 @@ def open_session_history_dialog(
                         ft.Text(
                             get_string(
                                 "session_hist_subtitle",
-                                count=len(sessions),
+                                count=total_count,
+                                total=total_mins,
                                 today=today_mins,
                                 port=last_port or "-",
                             ),
