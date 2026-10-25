@@ -1164,10 +1164,16 @@ class AppHandlers:
     def on_open_safe_schedule(self) -> None:
         page = self._get_page()
         assert page is not None
+        running_names = self._bl.running_profile_names() | self._state.loading_names()
         snap = self._monitor.snapshot(
             list(self._pm.profiles.values()),
-            self._bl.running_profile_names() | self._state.loading_names(),
+            running_names,
         )
+
+        def _launch_one(name: str) -> None:
+            if not self._bl.is_running(name) and not self._state.is_loading(name):
+                launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+                self._refresh()
 
         def _apply_plan(plan: SchedulePlan) -> None:
             tag_map = plan.status_tag_map()
@@ -1212,6 +1218,8 @@ class AppHandlers:
             initial_cycle_days=self._monitor.schedule_cycle_days,
             last_pairings=self._monitor.last_pairings,
             last_shifts=self._monitor.last_shifts,
+            running_names=running_names,
+            on_launch_single=_launch_one,
             on_apply_schedule=_apply_plan,
             on_copy_schedule=_copy_md,
             on_clear_schedule=_clear_tags,

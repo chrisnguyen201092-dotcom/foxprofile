@@ -3218,6 +3218,55 @@ def test_sync_credentials_from_disk_prevents_stale_overwrite(isolated_pm):
     assert p.mail_token and p.mail_token.endswith("|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
 
 
+def test_safe_schedule_account_pill_open_button():
+    import flet as ft
+
+    from src.services.scheduler import ScheduledAccount
+    from src.ui.dialogs.safety_guard import _build_account_pill
+
+    acc = ScheduledAccount(
+        name="01. Hannah",
+        email="hannah@outlook.com",
+        port=":10001",
+        cluster="GW-A",
+        endpoint="1.2.3.4:10001",
+        timezone="America/New_York",
+        rest_hours=48.0,
+        age_hours=240.0,
+        is_probation=False,
+        shared_endpoint=False,
+        completed_today=False,
+    )
+    clicked: list[str] = []
+    pill = _build_account_pill(
+        acc,
+        0,
+        is_opened=False,
+        on_open_one=lambda n: clicked.append(n),
+    )
+    assert isinstance(pill.content, ft.Row)
+    assert len(pill.content.controls) == 2
+    open_btn = pill.content.controls[1]
+    assert isinstance(open_btn, ft.Container)
+    assert isinstance(open_btn.content, ft.Icon)
+    assert open_btn.content.icon == ft.Icons.PLAY_ARROW_ROUNDED
+    open_btn.on_click(None)
+    assert clicked == ["01. Hannah"]
+
+    opened_pill = _build_account_pill(
+        acc,
+        0,
+        is_opened=True,
+        on_open_one=lambda n: clicked.append(n),
+    )
+    assert isinstance(opened_pill.content, ft.Row)
+    opened_badge = opened_pill.content.controls[1]
+    assert isinstance(opened_badge, ft.Container)
+    assert isinstance(opened_badge.content, ft.Icon)
+    assert opened_badge.content.icon == ft.Icons.CHECK_ROUNDED
+
+
+
 
 
 

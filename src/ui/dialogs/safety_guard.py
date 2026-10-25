@@ -425,7 +425,54 @@ def open_token_burst_alert_dialog(
     page.show_dialog(dlg)
 
 
-def _build_account_pill(acc: ScheduledAccount, day_idx: int) -> ft.Container:
+def _build_quick_launch_logo(
+    profile_name: str,
+    *,
+    is_opened: bool = False,
+    on_open_one: Callable[[str], None] | None = None,
+) -> ft.Container:
+    """Minimalist flat outlined icon button for quick profile launch."""
+    if is_opened:
+        return ft.Container(
+            width=26,
+            height=26,
+            border_radius=6,
+            bgcolor=ft.Colors.with_opacity(0.10, COLORS["success"]),
+            border=ft.Border.all(1, COLORS["success"]),
+            alignment=ft.Alignment(0, 0),
+            tooltip=get_string("schedule_row_opened_tooltip", name=profile_name),
+            content=ft.Icon(
+                ft.Icons.CHECK_ROUNDED,
+                size=14,
+                color=COLORS["success"],
+            ),
+        )
+
+    return ft.Container(
+        width=26,
+        height=26,
+        border_radius=6,
+        bgcolor=COLORS["card_bg"],
+        border=ft.Border.all(1, COLORS["rule_strong"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip=get_string("schedule_row_open_tooltip", name=profile_name),
+        on_click=lambda _, n=profile_name: on_open_one(n) if on_open_one else None,
+        content=ft.Icon(
+            ft.Icons.PLAY_ARROW_ROUNDED,
+            size=15,
+            color=COLORS["text_sub"],
+        ),
+    )
+
+
+def _build_account_pill(
+    acc: ScheduledAccount,
+    day_idx: int,
+    *,
+    is_opened: bool = False,
+    on_open_one: Callable[[str], None] | None = None,
+) -> ft.Container:
     is_gw = is_gateway_ipv6_cluster(acc.cluster)
     cluster_col = "#0284C7" if is_gw else "#059669"
     eff_rest = int(round(acc.rest_hours + day_idx * 24))
@@ -497,34 +544,68 @@ def _build_account_pill(acc: ScheduledAccount, day_idx: int) -> ft.Container:
             )
         )
 
+    info_col = ft.Column(
+        spacing=4,
+        tight=True,
+        expand=True,
+        controls=[
+            ft.Text(
+                display_name,
+                size=12.5,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_main"],
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+            ft.Row(spacing=5, wrap=True, controls=badges),
+        ],
+    )
+
+    row_controls: list[ft.Control] = [info_col]
+    if is_opened or on_open_one is not None:
+        row_controls.append(
+            _build_quick_launch_logo(
+                acc.name,
+                is_opened=is_opened,
+                on_open_one=on_open_one,
+            )
+        )
+
     return ft.Container(
         expand=True,
         padding=ft.Padding.symmetric(horizontal=10, vertical=7),
         border_radius=7,
         bgcolor=COLORS["input_bg"],
-        border=ft.Border.all(1, COLORS["card_border"]),
-        content=ft.Column(
-            spacing=4,
-            tight=True,
-            controls=[
-                ft.Text(
-                    display_name,
-                    size=12.5,
-                    font_family=FONT_SEMIBOLD,
-                    color=COLORS["text_main"],
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-                ft.Row(spacing=5, wrap=True, controls=badges),
-            ],
+        border=ft.Border.all(
+            1,
+            ft.Colors.with_opacity(0.65, COLORS["success"])
+            if is_opened
+            else COLORS["card_border"],
+        ),
+        content=ft.Row(
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=row_controls,
         ),
     )
 
 
-def _build_pair_row(pr: ScheduledPair, day_idx: int) -> ft.Container:
+def _build_pair_row(
+    pr: ScheduledPair,
+    day_idx: int,
+    *,
+    opened_names: set[str] | None = None,
+    on_open_one: Callable[[str], None] | None = None,
+) -> ft.Container:
+    active_set = opened_names or set()
     second_ctrl: ft.Control
     if pr.second is not None:
-        second_ctrl = _build_account_pill(pr.second, day_idx)
+        second_ctrl = _build_account_pill(
+            pr.second,
+            day_idx,
+            is_opened=(pr.second.name in active_set),
+            on_open_one=on_open_one,
+        )
     else:
         second_ctrl = ft.Container(
             expand=True,
@@ -558,7 +639,12 @@ def _build_pair_row(pr: ScheduledPair, day_idx: int) -> ft.Container:
                         color=COLORS["cover_ink"],
                     ),
                 ),
-                _build_account_pill(pr.first, day_idx),
+                _build_account_pill(
+                    pr.first,
+                    day_idx,
+                    is_opened=(pr.first.name in active_set),
+                    on_open_one=on_open_one,
+                ),
                 ft.Icon(ft.Icons.SYNC_ALT_ROUNDED, size=16, color=COLORS["text_sub"]),
                 second_ctrl,
             ],
@@ -566,7 +652,13 @@ def _build_pair_row(pr: ScheduledPair, day_idx: int) -> ft.Container:
     )
 
 
-def _build_day_card(day: ScheduledDay, lang: str) -> ft.Container:
+def _build_day_card(
+    day: ScheduledDay,
+    lang: str,
+    *,
+    opened_names: set[str] | None = None,
+    on_open_one: Callable[[str], None] | None = None,
+) -> ft.Container:
     day_name = day.weekday_name_vi if lang == "vi" else day.weekday_name_en
     sections: list[ft.Control] = [
         ft.Row(
@@ -612,7 +704,14 @@ def _build_day_card(day: ScheduledDay, lang: str) -> ft.Container:
             )
         )
         for pr in day.morning_pairs:
-            sections.append(_build_pair_row(pr, day.day_index))
+            sections.append(
+                _build_pair_row(
+                    pr,
+                    day.day_index,
+                    opened_names=opened_names,
+                    on_open_one=on_open_one,
+                )
+            )
 
     if day.evening_pairs:
         sections.append(
@@ -624,7 +723,14 @@ def _build_day_card(day: ScheduledDay, lang: str) -> ft.Container:
             )
         )
         for pr in day.evening_pairs:
-            sections.append(_build_pair_row(pr, day.day_index))
+            sections.append(
+                _build_pair_row(
+                    pr,
+                    day.day_index,
+                    opened_names=opened_names,
+                    on_open_one=on_open_one,
+                )
+            )
 
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=14, vertical=12),
@@ -643,12 +749,15 @@ def open_safe_schedule_dialog(
     initial_cycle_days: int = 5,
     last_pairings: list[list[str]] | None = None,
     last_shifts: dict[str, str] | None = None,
+    running_names: set[str] | None = None,
+    on_launch_single: Callable[[str], None] | None = None,
     on_apply_schedule: Callable[[SchedulePlan], None],
     on_copy_schedule: Callable[[str], None] | None = None,
     on_clear_schedule: Callable[[], None] | None = None,
 ) -> None:
     """Modal dialog displaying the multi-day paired safe farming schedule & tag applicator."""
     lang = current_language()
+    launched_in_dialog: set[str] = set(running_names or set())
     state = {
         "cycle_days": max(4, min(6, int(initial_cycle_days or 5))),
         "seed_offset": 0,
@@ -704,6 +813,15 @@ def open_safe_schedule_dialog(
         page.pop_dialog()
         if on_clear_schedule is not None:
             on_clear_schedule()
+
+    def _handle_open_one(name: str) -> None:
+        if name in launched_in_dialog:
+            return
+        launched_in_dialog.add(name)
+        if on_launch_single is not None:
+            on_launch_single(name)
+        _refresh_view(recompute=False)
+        page.update()
 
     def _refresh_view(*, recompute: bool = True) -> None:
         plan: SchedulePlan = _recompute() if (recompute or state["plan"] is None) else state["plan"]
@@ -810,7 +928,15 @@ def open_safe_schedule_dialog(
             if state["selected_day"] == -1
             else [d for d in plan.days if d.day_index == state["selected_day"]]
         )
-        days_list_col.controls = [_build_day_card(d, lang) for d in visible_days]
+        days_list_col.controls = [
+            _build_day_card(
+                d,
+                lang,
+                opened_names=launched_in_dialog,
+                on_open_one=_handle_open_one if on_launch_single is not None else None,
+            )
+            for d in visible_days
+        ]
 
     _refresh_view(recompute=True)
 
