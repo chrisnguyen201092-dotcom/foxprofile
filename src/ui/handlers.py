@@ -1231,11 +1231,7 @@ class AppHandlers:
             self._state.clear_selection()
             for n in selected_names:
                 self._state.toggle_selection(n)
-            self._state.sort_by = "parallel_ready"
             self._state.current_page = 1
-            refs = self._get_refs()
-            if refs is not None and refs.sort_dropdown is not None:
-                refs.sort_dropdown.value = "parallel_ready"
             self._log(
                 get_string(
                     "work_squad_applied_log",
@@ -1267,11 +1263,7 @@ class AppHandlers:
             self._state.clear_selection()
             for n in selected_names:
                 self._state.toggle_selection(n)
-            self._state.sort_by = "parallel_ready"
             self._state.current_page = 1
-            refs = self._get_refs()
-            if refs is not None and refs.sort_dropdown is not None:
-                refs.sort_dropdown.value = "parallel_ready"
             to_open = [
                 n
                 for n in selected_names

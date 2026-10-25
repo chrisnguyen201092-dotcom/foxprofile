@@ -34,29 +34,67 @@ def build_ui_refs(
             text_style=ft.TextStyle(font_family=FONT_MEDIUM, size=13),
         ),
     )
+    opt_style = ft.ButtonStyle(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+        visual_density=ft.VisualDensity.COMPACT,
+        color=COLORS["text_main"],
+        overlay_color=COLORS["input_bg"],
+        text_style=ft.TextStyle(font_family=FONT_MEDIUM, size=12.5),
+    )
+    sort_keys = (
+        ("custom", "sort_custom"),
+        ("schedule", "sort_schedule"),
+        ("cooldown_desc", "sort_cooldown_desc"),
+        ("cooldown_asc", "sort_cooldown_asc"),
+        ("trust_desc", "sort_trust_desc"),
+        ("trust_asc", "sort_trust_asc"),
+        ("age_desc", "sort_age_desc"),
+        ("age_asc", "sort_age_asc"),
+        ("name_asc", "sort_name_asc"),
+        ("name_desc", "sort_name_desc"),
+        ("running", "sort_running"),
+    )
+    valid_sort_keys = {k for k, _ in sort_keys}
     sort_dropdown = ft.Dropdown(
-        value=sort_by,
-        width=215,
+        value=sort_by if sort_by in valid_sort_keys else "custom",
+        width=190,
+        menu_width=200,
         dense=True,
-        text_size=12.5,
+        filled=True,
+        fill_color=COLORS["input_bg"],
         bgcolor=COLORS["input_bg"],
         color=COLORS["text_main"],
+        text_size=12.5,
+        text_style=ft.TextStyle(
+            font_family=FONT_MEDIUM,
+            size=12.5,
+            color=COLORS["text_main"],
+        ),
+        content_padding=ft.Padding.only(left=12, right=6, top=8, bottom=8),
         border_color=COLORS["rule_strong"],
         focused_border_color=COLORS["sidebar"],
         border_radius=8,
+        trailing_icon=ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
+            size=18,
+            color=COLORS["text_sub"],
+        ),
+        selected_trailing_icon=ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_UP_ROUNDED,
+            size=18,
+            color=COLORS["text_main"],
+        ),
+        menu_style=ft.MenuStyle(
+            bgcolor=COLORS["card_bg"],
+            elevation=6,
+            padding=ft.Padding.symmetric(vertical=4),
+            side=ft.BorderSide(1, COLORS["rule_strong"]),
+            shape=ft.RoundedRectangleBorder(radius=8),
+            visual_density=ft.VisualDensity.COMPACT,
+        ),
         options=[
-            ft.dropdown.Option("custom", get_string("sort_custom")),
-            ft.dropdown.Option("schedule", get_string("sort_schedule")),
-            ft.dropdown.Option("parallel_ready", get_string("sort_parallel_ready")),
-            ft.dropdown.Option("cooldown_desc", get_string("sort_cooldown_desc")),
-            ft.dropdown.Option("cooldown_asc", get_string("sort_cooldown_asc")),
-            ft.dropdown.Option("trust_desc", get_string("sort_trust_desc")),
-            ft.dropdown.Option("trust_asc", get_string("sort_trust_asc")),
-            ft.dropdown.Option("age_desc", get_string("sort_age_desc")),
-            ft.dropdown.Option("age_asc", get_string("sort_age_asc")),
-            ft.dropdown.Option("name_asc", get_string("sort_name_asc")),
-            ft.dropdown.Option("name_desc", get_string("sort_name_desc")),
-            ft.dropdown.Option("running", get_string("sort_running")),
+            ft.dropdown.Option(k, get_string(label_key), style=opt_style)
+            for k, label_key in sort_keys
         ],
         on_select=lambda e: on_sort(e.control.value or "custom") if on_sort else None,
     )

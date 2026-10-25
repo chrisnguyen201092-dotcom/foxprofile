@@ -1952,14 +1952,10 @@ class MonitorService:
 
             cluster_busy_by: list[str] = []
             if not is_run and not busy_by:
-                if cluster and not is_gateway_ipv6_cluster(cluster):
+                if cluster:
                     cluster_busy_by = [
                         m for m in running_by_cluster.get(cluster, []) if m != p.name
                     ]
-                elif cluster and is_gateway_ipv6_cluster(cluster):
-                    r_gw = [m for m in running_by_cluster.get(cluster, []) if m != p.name]
-                    if len(r_gw) >= 2:
-                        cluster_busy_by = list(r_gw)
                 my_v6 = _ipv6_prefix_64(last_ip)
                 if my_v6 and my_v6 in running_by_v6_64:
                     for m in running_by_v6_64[my_v6]:
@@ -2278,7 +2274,20 @@ class MonitorService:
                         ),
                     )
                 )
-            # Layer 2b: Proxy port is still within the shift cooldown window
+            # Layer 2b: Shared IPv6 /64 or gateway cluster is currently active on another running profile
+            elif info and info.cluster_busy_by:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="cluster_busy",
+                        level="warning",
+                        message=get_string(
+                            "guard_cluster_busy",
+                            cluster=info.cluster or "/64",
+                            others=", ".join(info.cluster_busy_by),
+                        ),
+                    )
+                )
+            # Layer 2c: Proxy port or /64 branch is still within the shift cooldown window
             elif info and info.port_cooldown_by is not None and self._cooldown_minutes > 0:
                 other_name, left_mins = info.port_cooldown_by
                 warnings.append(
@@ -2291,19 +2300,6 @@ class MonitorService:
                             other=other_name,
                             left=left_mins,
                             cooldown=self._cooldown_minutes,
-                        ),
-                    )
-                )
-            # Layer 2c: Shared IPv6 /64 cluster is currently active on another running profile
-            elif info and info.cluster_busy_by:
-                warnings.append(
-                    PreLaunchWarning(
-                        code="cluster_busy",
-                        level="warning",
-                        message=get_string(
-                            "guard_cluster_busy",
-                            cluster=info.cluster or "/64",
-                            others=", ".join(info.cluster_busy_by),
                         ),
                     )
                 )
@@ -2427,7 +2423,7 @@ class MonitorService:
                     seen_clusters[cluster] = name
             elif not port_collided and cluster and is_gateway_ipv6_cluster(cluster):
                 prev_gw = gw_batch_names.get(cluster, [])
-                if len(prev_gw) >= 2 and not any(w.code == "cluster_busy" for w in wlist):
+                if len(prev_gw) >= 1 and not any(w.code == "cluster_busy" for w in wlist):
                     wlist.insert(
                         0,
                         PreLaunchWarning(

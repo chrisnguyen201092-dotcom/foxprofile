@@ -687,7 +687,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "work_squad_applied_log": "Selected {count} conflict-free profile(s) for parallel work ({mode})",
         "work_squad_stagger_started_log": "🚀 Stagger-launching {count} profile(s) ({mode}) — 40–60s safe interval between browsers",
         "bulk_stagger_wait_log": "⏳ Safe staggered launch ({idx}/{total}): waiting {delay}s before opening [{name}]...",
-        "sort_parallel_ready": "Parallel work ready (/64)",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -1318,11 +1317,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "schedule_copy_md_btn": "Sao chép lịch",
         "schedule_apply_tags_btn": "Áp dụng & Sắp xếp danh sách",
         "schedule_clear_tags_btn": "Xóa nhãn lịch",
-        "sort_schedule": "Lịch vận hành (Ngày · Cặp)",
+        "sort_schedule": "Theo lịch (T2 → CN)",
         "sort_trust_desc": "Điểm Trust (Cao ↓)",
         "sort_trust_asc": "Điểm Trust (Thấp ↑)",
-        "sort_age_desc": "Thời gian tạo (Cũ ↓)",
-        "sort_age_asc": "Thời gian tạo (Mới ↑)",
+        "sort_age_desc": "Ngày tạo (Cũ ↓)",
+        "sort_age_asc": "Ngày tạo (Mới ↑)",
         "schedule_applied_log": "Đã gắn nhãn lịch vận hành (T2..CN) cho {count} profile hoạt động (chu kỳ {days} ngày)",
         "schedule_cleared_log": "Đã gỡ nhãn lịch vận hành (T2..CN) khỏi {count} profile",
         "schedule_copied_log": "Đã sao chép bảng lịch vận hành vào Clipboard",
@@ -1375,7 +1374,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "work_squad_applied_log": "Đã chọn nhóm {count} profile độc lập dải /64 ({mode})",
         "work_squad_stagger_started_log": "🚀 Bắt đầu khởi chạy giãn cách {count} profile ({mode}) — chu kỳ 40–60s/máy",
         "bulk_stagger_wait_log": "⏳ Khởi chạy giãn cách ({idx}/{total}): chờ {delay}s trước khi mở [{name}]...",
-        "sort_parallel_ready": "Sẵn sàng mở song song (Độc lập /64)",
     },
 }
 

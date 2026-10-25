@@ -462,32 +462,6 @@ class App:
         sort_by = self.state.sort_by
         if sort_by == "schedule":
             all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), p.name.casefold()))
-        elif sort_by == "parallel_ready":
-            snap = self._last_monitor_snap or self.monitor.snapshot(
-                self.pm.list_profiles(),
-                self.bl.running_profile_names() | self.state.loading,
-            )
-
-            def _parallel_key(p: object) -> tuple:
-                pname = getattr(p, "name", "")
-                info = snap.profiles.get(pname)
-                is_sel = self.state.is_selected(pname)
-                is_run = self.bl.is_running(pname)
-                can_open = bool(info and info.can_open_parallel)
-                has_conf = bool(
-                    info and (info.cluster_busy_by or info.busy_by or info.port_cooldown_by or info.has_warning)
-                )
-                score = info.trust_score if info is not None else 0
-                return (
-                    0 if is_sel else 1,
-                    0 if is_run else 1,
-                    0 if can_open else 1,
-                    1 if has_conf else 0,
-                    -score,
-                    pname.casefold(),
-                )
-
-            all_profiles.sort(key=_parallel_key)
         elif sort_by == "name_asc":
             all_profiles.sort(key=lambda p: p.name.casefold())
         elif sort_by == "name_desc":
