@@ -68,7 +68,7 @@ def _child_pids_win32(root_pid: int) -> set[int]:
 
 
 def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) -> list[int]:
-    """Return visible top-level HWNDs belonging to `profile_name`."""
+    """Return visible top-level HWNDs belonging to `profile_name`, main window first."""
     if sys.platform != "win32":
         return []
     try:
@@ -78,7 +78,15 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
         pids = _child_pids_win32(root_pid) if root_pid else set()
         prefix = f"[{profile_name}] "
         user32 = ctypes.windll.user32
-        matched: list[int] = []
+        candidates: list[tuple[int, int, int]] = []
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
 
         enum_windows_proc = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
@@ -95,20 +103,81 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value or ""
-            if title.startswith(prefix):
-                matched.append(int(hwnd))
-                return True
-            if pids:
+            is_prefix_match = title.startswith(prefix)
+            is_pid_match = False
+            if not is_prefix_match and pids:
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in pids and title:
-                    matched.append(int(hwnd))
+                is_pid_match = bool(pid.value in pids and title)
+            if not (is_prefix_match or is_pid_match):
+                return True
+
+            is_iconic = bool(user32.IsIconic(hwnd))
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if not is_iconic and (w < 200 or h < 150):
+                return True
+            area = 1_000_000 if is_iconic else (w * h)
+            priority = 2 if is_prefix_match else 1
+            candidates.append((priority, area, int(hwnd)))
             return True
 
         user32.EnumWindows(enum_windows_proc(_callback), 0)
-        return matched
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [hwnd for _, _, hwnd in candidates]
     except Exception:
         return []
+
+
+def _raise_and_move_hwnd_win32(
+    hwnd: int,
+    x: int | None = None,
+    y: int | None = None,
+) -> None:
+    """Bring `hwnd` in front of the Flet GUI window using SWP_NOSIZE (never alters viewport)."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    sw_restore = 9
+    swp_nosize = 0x0001
+    swp_nomove = 0x0002
+    swp_showwindow = 0x0040
+    hwnd_topmost = wintypes.HWND(-1)
+    hwnd_notopmost = wintypes.HWND(-2)
+
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, sw_restore)
+
+    fg_hwnd = user32.GetForegroundWindow()
+    fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+    cur_tid = kernel32.GetCurrentThreadId()
+    attached = False
+    if fg_tid and cur_tid and fg_tid != cur_tid:
+        attached = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
+
+    try:
+        flags = swp_nosize | swp_showwindow
+        if x is None or y is None:
+            flags |= swp_nomove
+            px, py = 0, 0
+        else:
+            px, py = int(x), int(y)
+
+        # Promote to TOPMOST then immediately demote to NOTOPMOST with SWP_NOSIZE
+        # so the browser window rises above the Flet desktop process window without
+        # ever changing window.innerWidth / window.innerHeight.
+        user32.SetWindowPos(wintypes.HWND(hwnd), hwnd_topmost, px, py, 0, 0, flags)
+        user32.SetWindowPos(wintypes.HWND(hwnd), hwnd_notopmost, px, py, 0, 0, flags)
+        user32.BringWindowToTop(wintypes.HWND(hwnd))
+        user32.SetForegroundWindow(wintypes.HWND(hwnd))
+    finally:
+        if attached:
+            user32.AttachThreadInput(cur_tid, fg_tid, False)
 
 
 def focus_browser_window(profile_name: str, root_pid: int | None = None) -> bool:
@@ -119,15 +188,8 @@ def focus_browser_window(profile_name: str, root_pid: int | None = None) -> bool
     if not hwnds:
         return False
     try:
-        import ctypes
-
-        user32 = ctypes.windll.user32
-        sw_restore = 9
-        for hwnd in hwnds:
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, sw_restore)
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
+        for hwnd in reversed(hwnds):
+            _raise_and_move_hwnd_win32(hwnd)
         return True
     except Exception:
         return False
@@ -147,8 +209,6 @@ def arrange_browser_windows(profile_pids: list[tuple[str, int | None]]) -> int:
 
         user32 = ctypes.windll.user32
         spi_getworkarea = 0x0030
-        swp_nosize = 0x0001
-        swp_nozorder = 0x0004
         sw_restore = 9
 
         class RECT(ctypes.Structure):
@@ -194,18 +254,22 @@ def arrange_browser_windows(profile_pids: list[tuple[str, int | None]]) -> int:
 
             col = idx % cols
             row = idx // cols
-            x = int(work.left) + col * slot_w
-            y = int(work.top) + row * slot_h
+            if count == 1:
+                x = int(work.left) + max(0, (work_w - win_w) // 2)
+                y = int(work.top) + max(0, (work_h - win_h) // 2)
+            else:
+                slot_x = int(work.left) + col * slot_w
+                slot_y = int(work.top) + row * slot_h
+                x = slot_x + max(0, (slot_w - win_w) // 2)
+                y = slot_y + max(0, (slot_h - win_h) // 2)
             # Clamp so the window stays inside the visible work area
             max_x = max(int(work.left), int(work.right) - min(win_w, work_w))
             max_y = max(int(work.top), int(work.bottom) - min(win_h, work_h))
             x = max(int(work.left), min(x, max_x))
             y = max(int(work.top), min(y, max_y))
 
-            user32.SetWindowPos(hwnd, 0, x, y, 0, 0, swp_nosize | swp_nozorder)
-            user32.BringWindowToTop(hwnd)
+            _raise_and_move_hwnd_win32(hwnd, x=x, y=y)
 
-        user32.SetForegroundWindow(targets[-1])
         return count
     except Exception:
         return 0
