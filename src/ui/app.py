@@ -700,6 +700,7 @@ class App:
                     on_status_click=self.h.on_set_status,
                     on_session_history=self.h.on_open_session_history,
                     on_ip_history=self.h.on_open_ip_history,
+                    on_trust_detail=self.h.on_open_trust_detail,
                     on_toggle_pin=self.h.on_toggle_pin,
                     on_edit_dates=self.h.on_edit_dates,
                     on_copy_email=self.h.on_copy_email,

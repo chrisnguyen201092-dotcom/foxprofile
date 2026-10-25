@@ -8,7 +8,12 @@ import flet as ft
 
 from ...core.strings import get_string
 from ...models.profile import Profile
-from ...services.monitor import MonitorSnapshot, ProfileMonitorInfo, extract_proxy_port
+from ...services.monitor import (
+    MonitorSnapshot,
+    ProfileMonitorInfo,
+    compute_trust_breakdown,
+    extract_proxy_port,
+)
 from ...services.proxy.geo_check import (
     derive_ip_metadata,
     extract_ip_from_check_detail,
@@ -1222,7 +1227,11 @@ def _build_ip_score_chip(
     )
 
 
-def _build_trust_score_chip(info: ProfileMonitorInfo) -> ft.Container:
+def _build_trust_score_chip(
+    info: ProfileMonitorInfo,
+    *,
+    on_click: Callable[[], None] | None = None,
+) -> ft.Container:
     """Render an Account Warmup & Trust Score badge with tier symbol and breakdown tooltip."""
     tier = info.trust_tier
     score = info.trust_score
@@ -1284,6 +1293,8 @@ def _build_trust_score_chip(info: ProfileMonitorInfo) -> ft.Container:
         border_radius=5,
         bgcolor=ft.Colors.with_opacity(0.09, col),
         border=ft.Border.all(1, ft.Colors.with_opacity(0.45, col)),
+        ink=on_click is not None,
+        on_click=(lambda _: on_click()) if on_click is not None else None,
         tooltip=tip,
         content=ft.Text(
             label,
@@ -1292,6 +1303,461 @@ def _build_trust_score_chip(info: ProfileMonitorInfo) -> ft.Container:
             weight=ft.FontWeight.W_700,
             color=col,
         ),
+    )
+
+
+def _build_trust_breakdown_panel(
+    info: ProfileMonitorInfo,
+    profile: Profile | None = None,
+    *,
+    on_score_ip: Callable[[], None] | None = None,
+) -> ft.Control:
+    """Build a detailed item-by-item Trust Score calculation and Hard Gate checklist panel."""
+    bd = compute_trust_breakdown(info, profile)
+    pos_total = int(bd["positive_total"])
+    pen_total = int(bd["penalty_total"])
+    raw_score = int(bd["raw_score"])
+    final_score = int(bd["final_score"])
+    stage_cap = bd["stage_cap"]
+    capped_by = int(bd["capped_by"])
+    stage_label = str(bd["stage_label"])
+    tier = str(bd["trust_tier"])
+
+    tier_col = (
+        COLORS["error"]
+        if tier == "banned"
+        else (
+            "#15803D"
+            if tier == "diamond"
+            else (
+                "#1D4ED8"
+                if tier == "trusted"
+                else (COLORS["accent"] if tier == "warming" else COLORS["text_sub"])
+            )
+        )
+    )
+
+    def _stat_box(title: str, val_str: str, sub_str: str, col: str) -> ft.Container:
+        return ft.Container(
+            expand=True,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            border_radius=7,
+            bgcolor=COLORS["card_bg"],
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.45, col)),
+            content=ft.Column(
+                spacing=1,
+                tight=True,
+                controls=[
+                    ft.Text(title, size=10.5, font_family=FONT_SEMIBOLD, color=COLORS["text_dim"]),
+                    ft.Text(
+                        val_str,
+                        size=14,
+                        font_family=FONT_DATA,
+                        weight=ft.FontWeight.W_700,
+                        color=col,
+                    ),
+                    ft.Text(
+                        sub_str,
+                        size=10.5,
+                        color=COLORS["text_sub"],
+                        no_wrap=True,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ],
+            ),
+        )
+
+    cap_val_str = f"Tối đa {stage_cap}đ" if stage_cap is not None else "100đ (Mở khóa)"
+    cap_col = (
+        COLORS["warning"]
+        if capped_by > 0
+        else ("#15803D" if stage_cap is None else COLORS["text_main"])
+    )
+    cap_sub_str = f"Giữ lại -{capped_by}đ" if capped_by > 0 else "Không bị chạm trần"
+
+    if capped_by > 0:
+        cap_banner_text = (
+            f"🔒 {stage_label} — Điểm gốc {raw_score}đ đang bị giữ ở mức {final_score}đ "
+            f"(trừ tạm -{capped_by}đ) cho đến khi hoàn thành các điều kiện mở trần bên dưới."
+        )
+        cap_banner_col = COLORS["warning"]
+    elif stage_cap is not None:
+        cap_banner_text = (
+            f"🛡️ {stage_label} · Điểm gốc hiện tại ({raw_score}đ) chưa chạm mức trần ({stage_cap}đ)."
+        )
+        cap_banner_col = COLORS["text_sub"]
+    else:
+        cap_banner_text = f"✦ {stage_label} · Tài khoản đã vượt qua toàn bộ cổng kiểm duyệt."
+        cap_banner_col = "#15803D"
+
+    formula_card = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+        border_radius=8,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["border"]),
+        content=ft.Column(
+            spacing=7,
+            tight=True,
+            controls=[
+                ft.Row(
+                    spacing=8,
+                    controls=[
+                        _stat_box(
+                            "1. TỔNG 6 HẠNG MỤC",
+                            f"+{pos_total} / 100đ",
+                            "Điểm tích lũy thành phần",
+                            "#1D4ED8" if pos_total >= 50 else COLORS["text_main"],
+                        ),
+                        _stat_box(
+                            "2. ĐIỂM PHẠT RỦI RO",
+                            f"{pen_total}đ",
+                            "0 lỗi vi phạm" if pen_total == 0 else f"{len(bd['penalties'])} mục trừ điểm",
+                            "#15803D" if pen_total == 0 else COLORS["error"],
+                        ),
+                        _stat_box(
+                            "3. ĐIỂM GỐC (RAW)",
+                            f"{raw_score} / 100đ",
+                            f"= max(0, {pos_total} {pen_total:+d})",
+                            COLORS["text_main"],
+                        ),
+                        _stat_box(
+                            "4. TRẦN GIAI ĐOẠN",
+                            cap_val_str,
+                            cap_sub_str,
+                            cap_col,
+                        ),
+                        _stat_box(
+                            "5. ĐIỂM CHÍNH THỨC",
+                            f"{final_score} / 100đ",
+                            f"= min({raw_score}đ, Trần {stage_cap}đ)"
+                            if stage_cap is not None
+                            else "= Điểm gốc",
+                            tier_col,
+                        ),
+                    ],
+                ),
+                ft.Text(
+                    cap_banner_text,
+                    size=11.5,
+                    font_family=FONT_MEDIUM,
+                    color=cap_banner_col,
+                ),
+            ],
+        ),
+    )
+
+    # Build 6 Pillar cards in a 2-column grid (3 rows x 2 cols)
+    def _pillar_card(pil: dict[str, Any]) -> ft.Container:
+        earned = int(pil["earned"])
+        max_pts = int(pil["max_pts"])
+        ratio = earned / max(1, max_pts)
+        p_col = (
+            "#15803D"
+            if earned >= max_pts
+            else (
+                "#1D4ED8"
+                if ratio >= 0.6
+                else (COLORS["accent"] if earned > 0 else COLORS["text_dim"])
+            )
+        )
+        body_rows: list[ft.Control] = []
+        sub_items = pil.get("sub_items") or []
+        if sub_items:
+            for sub in sub_items:
+                s_ok = bool(sub["ok"])
+                s_earned = int(sub["earned"])
+                s_max = int(sub["max_pts"])
+                s_col = "#15803D" if s_ok else (COLORS["accent"] if s_earned > 0 else COLORS["text_dim"])
+                s_sym = "✓" if s_ok else ("◐" if s_earned > 0 else "○")
+                body_rows.append(
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                f"{s_sym} {sub['label']}",
+                                size=11,
+                                color=COLORS["text_main"] if s_earned > 0 else COLORS["text_sub"],
+                                expand=True,
+                                no_wrap=True,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                                tooltip=f"{sub['label']}: {sub['detail']}",
+                            ),
+                            ft.Text(
+                                str(sub["detail"]),
+                                size=10.5,
+                                font_family=FONT_DATA,
+                                color=COLORS["text_sub"],
+                            ),
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                                border_radius=4,
+                                bgcolor=ft.Colors.with_opacity(0.10, s_col),
+                                content=ft.Text(
+                                    f"+{s_earned}/{s_max}đ",
+                                    size=10.5,
+                                    font_family=FONT_DATA,
+                                    weight=ft.FontWeight.W_700,
+                                    color=s_col,
+                                ),
+                            ),
+                        ],
+                    )
+                )
+            if (
+                pil.get("key") == "network"
+                and info.ip_fraud_score is None
+                and on_score_ip is not None
+                and (info.last_exit_ip or info.has_proxy or info.port)
+            ):
+                body_rows.append(
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.END,
+                        controls=[
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                border_radius=4,
+                                bgcolor=ft.Colors.with_opacity(0.12, COLORS["accent"]),
+                                border=ft.Border.all(1, COLORS["accent"]),
+                                ink=True,
+                                on_click=lambda _: on_score_ip(),
+                                content=ft.Text(
+                                    "✦ Chấm điểm độ sạch IP ngay để nhận tối đa +11đ",
+                                    size=10.5,
+                                    font_family=FONT_SEMIBOLD,
+                                    color=COLORS["accent"],
+                                ),
+                            )
+                        ],
+                    )
+                )
+        else:
+            body_rows.append(
+                ft.Text(
+                    f"Hiện tại: {pil['current_str']}",
+                    size=11.5,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_600,
+                    color=COLORS["text_main"],
+                )
+            )
+            body_rows.append(
+                ft.Text(
+                    str(pil["next_hint"]),
+                    size=11,
+                    color="#15803D" if earned >= max_pts else COLORS["accent"],
+                )
+            )
+            if pil.get("tiers_str"):
+                body_rows.append(
+                    ft.Text(
+                        str(pil["tiers_str"]),
+                        size=10,
+                        font_family=FONT_DATA,
+                        color=COLORS["text_dim"],
+                    )
+                )
+
+        return ft.Container(
+            expand=True,
+            padding=ft.Padding.symmetric(horizontal=11, vertical=8),
+            border_radius=7,
+            bgcolor=COLORS["card_bg"],
+            border=ft.Border.all(1, COLORS["border"]),
+            content=ft.Column(
+                spacing=4,
+                tight=True,
+                controls=[
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                str(pil["title"]),
+                                size=12,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_main"],
+                            ),
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                                border_radius=4,
+                                bgcolor=ft.Colors.with_opacity(0.12, p_col),
+                                border=ft.Border.all(1, ft.Colors.with_opacity(0.5, p_col)),
+                                content=ft.Text(
+                                    f"+{earned} / {max_pts}đ",
+                                    size=11,
+                                    font_family=FONT_DATA,
+                                    weight=ft.FontWeight.W_700,
+                                    color=p_col,
+                                ),
+                            ),
+                        ],
+                    ),
+                    ft.ProgressBar(
+                        value=min(1.0, max(0.0, ratio)),
+                        height=4,
+                        border_radius=2,
+                        color=p_col,
+                        bgcolor=COLORS["border"],
+                    ),
+                    *body_rows,
+                ],
+            ),
+        )
+
+    pillars = bd["pillars"]
+    pillar_grid_rows: list[ft.Control] = []
+    for i in range(0, len(pillars), 2):
+        pair = pillars[i : i + 2]
+        pillar_grid_rows.append(
+            ft.Row(
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+                controls=[_pillar_card(p_item) for p_item in pair],
+            )
+        )
+
+    # Risk Penalties section
+    penalties = bd["penalties"]
+    if penalties:
+        pen_rows: list[ft.Control] = [
+            ft.Text(
+                f"⚠ CÁC KHOẢN BỊ TRỪ ĐIỂM RỦI RO ({pen_total}đ):",
+                size=11.5,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["error"],
+            )
+        ]
+        for pen in penalties:
+            pen_rows.append(
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Text(f"• {pen['label']}", size=11.5, color=COLORS["text_main"]),
+                        ft.Text(
+                            f"{pen['points']}đ",
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_700,
+                            color=COLORS["error"],
+                        ),
+                    ],
+                )
+            )
+        penalties_ctrl: ft.Control = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border_radius=7,
+            bgcolor=ft.Colors.with_opacity(0.07, COLORS["error"]),
+            border=ft.Border.all(1, COLORS["error"]),
+            content=ft.Column(spacing=3, tight=True, controls=pen_rows),
+        )
+    else:
+        penalties_ctrl = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            border_radius=7,
+            bgcolor=ft.Colors.with_opacity(0.07, "#15803D"),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.4, "#15803D")),
+            content=ft.Text(
+                "✓ Không có điểm phạt rủi ro nào (0đ) — Môi trường Cookie, Proxy & Nhịp mở phiên an toàn.",
+                size=11.5,
+                font_family=FONT_MEDIUM,
+                color="#15803D",
+            ),
+        )
+
+    # Hard Gates Checklist section
+    gates = bd["gates"]
+    passed_cnt = sum(1 for g in gates if g["passed"])
+    gate_items_ui: list[ft.Control] = []
+    for g in gates:
+        g_ok = bool(g["passed"])
+        g_col = "#15803D" if g_ok else COLORS["warning"]
+        g_sym = "✓" if g_ok else "⚠"
+        gate_items_ui.append(
+            ft.Container(
+                expand=True,
+                padding=ft.Padding.symmetric(horizontal=9, vertical=5),
+                border_radius=6,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(
+                    1,
+                    ft.Colors.with_opacity(0.45, g_col),
+                ),
+                content=ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(
+                            f"{g_sym} {g['label']}",
+                            size=11,
+                            font_family=FONT_MEDIUM if g_ok else FONT_SEMIBOLD,
+                            color=COLORS["text_main"],
+                            expand=True,
+                            no_wrap=True,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Text(
+                            str(g["current"]),
+                            size=10.5,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_600,
+                            color=g_col,
+                        ),
+                    ],
+                ),
+            )
+        )
+
+    gate_rows: list[ft.Control] = []
+    for i in range(0, len(gate_items_ui), 2):
+        pair_g = gate_items_ui[i : i + 2]
+        if len(pair_g) == 1:
+            pair_g.append(ft.Container(expand=True))
+        gate_rows.append(ft.Row(spacing=6, controls=pair_g))
+
+    gates_ctrl = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        border_radius=8,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["border"]),
+        content=ft.Column(
+            spacing=6,
+            tight=True,
+            controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(
+                            f"🎯 {bd['next_tier_title']}",
+                            size=12,
+                            font_family=FONT_SEMIBOLD,
+                            color=COLORS["text_main"],
+                        ),
+                        ft.Text(
+                            f"Đã đạt {passed_cnt}/{len(gates)} điều kiện",
+                            size=11,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_700,
+                            color="#15803D" if passed_cnt == len(gates) else COLORS["warning"],
+                        ),
+                    ],
+                ),
+                *gate_rows,
+            ],
+        ),
+    )
+
+    return ft.Column(
+        spacing=8,
+        tight=True,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            formula_card,
+            *pillar_grid_rows,
+            penalties_ctrl,
+            gates_ctrl,
+        ],
     )
 
 
@@ -1317,15 +1783,21 @@ def open_session_history_dialog(
     on_check_ip_now: Callable[[], None] | None = None,
     on_clear_ip_history: Callable[[], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
+    profile: Profile | None = None,
     on_score_ip: Callable[[str, dict[str, Any]], None] | None = None,
     on_open_trust_monitor: Callable[[], None] | None = None,
 ) -> None:
-    """Modal dialog showing browser session history, exit IP log, and IP fraud score for a profile."""
+    """Modal dialog showing browser session history, exit IP log, IP fraud score, and Trust Breakdown."""
     ip_items: list[dict[str, Any]] = list(ip_history or [])
-    active_tab: list[str] = ["ips" if initial_tab == "ips" else "sessions"]
+    init_key = (
+        "trust"
+        if (initial_tab == "trust" and monitor_info is not None)
+        else ("ips" if initial_tab == "ips" else "sessions")
+    )
+    active_tab: list[str] = [init_key]
     tab_bar = ft.Row(spacing=8)
     summary_badges_row = ft.Row(spacing=6, wrap=True)
-    list_col = ft.Column(spacing=6, height=500, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, height=520, scroll=ft.ScrollMode.AUTO)
     clear_ip_btn = ft.TextButton(
         get_string("ip_hist_clear_btn"),
         icon=ft.Icons.DELETE_SWEEP_OUTLINED,
@@ -1642,7 +2114,12 @@ def open_session_history_dialog(
     def _rebuild_view() -> None:
         summary_badges: list[ft.Control] = []
         if monitor_info is not None:
-            summary_badges.append(_build_trust_score_chip(monitor_info))
+            summary_badges.append(
+                _build_trust_score_chip(
+                    monitor_info,
+                    on_click=lambda: _switch_tab("trust"),
+                )
+            )
             if monitor_info.last_exit_ip:
                 summary_badges.append(
                     _build_ip_score_chip(
@@ -1658,7 +2135,7 @@ def open_session_history_dialog(
         summary_badges_row.controls = summary_badges
         summary_badges_row.visible = bool(summary_badges)
 
-        tab_bar.controls = [
+        tabs_list: list[ft.Control] = [
             _seg_btn(
                 "sessions",
                 get_string("session_hist_tab", count=len(sessions)),
@@ -1670,10 +2147,34 @@ def open_session_history_dialog(
                 ft.Icons.PUBLIC,
             ),
         ]
+        if monitor_info is not None:
+            tabs_list.append(
+                _seg_btn(
+                    "trust",
+                    get_string("trust_hist_tab", score=monitor_info.trust_score),
+                    ft.Icons.VERIFIED_USER_OUTLINED,
+                )
+            )
+        tab_bar.controls = tabs_list
         clear_ip_btn.visible = (
             active_tab[0] == "ips" and bool(ip_items) and on_clear_ip_history is not None
         )
-        list_col.controls = _build_ip_rows() if active_tab[0] == "ips" else _build_session_rows()
+        if active_tab[0] == "trust" and monitor_info is not None:
+            list_col.controls = [
+                _build_trust_breakdown_panel(
+                    monitor_info,
+                    profile,
+                    on_score_ip=(
+                        (lambda: _score_single_ip(monitor_info.last_exit_ip))
+                        if monitor_info.last_exit_ip
+                        else on_check_ip_now
+                    ),
+                )
+            ]
+        elif active_tab[0] == "ips":
+            list_col.controls = _build_ip_rows()
+        else:
+            list_col.controls = _build_session_rows()
 
     def _handle_clear_ip(_: ft.ControlEvent) -> None:
         if on_clear_ip_history is not None:
@@ -1821,6 +2322,7 @@ def open_trust_monitor_dialog(
     active_tab: list[str] = ["audit" if initial_tab == "audit" else "scores"]
     active_filter: list[str] = ["all"]
     scoring_busy: list[bool] = [False]
+    expanded_profile: list[str | None] = [None]
 
     tab_bar = ft.Row(
         spacing=6,
@@ -1971,6 +2473,12 @@ def open_trust_monitor_dialog(
 
     def _switch_filter(fid: str) -> None:
         active_filter[0] = fid
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+    def _toggle_expand(pname: str) -> None:
+        expanded_profile[0] = None if expanded_profile[0] == pname else pname
         _rebuild()
         with contextlib.suppress(Exception):
             page.update()
@@ -2154,45 +2662,56 @@ def open_trust_monitor_dialog(
             return
 
         table_header_slot.visible = True
-        table_header_slot.content = ft.Container(
-            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-            border_radius=6,
-            bgcolor=COLORS["bg"],
-            border=ft.Border.all(1, COLORS["border"]),
-            content=ft.Row(
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[
-                    ft.Text(
-                        "PROFILE",
-                        width=200,
-                        size=11,
-                        font_family=FONT_SEMIBOLD,
-                        color=COLORS["text_dim"],
+        table_header_slot.content = ft.Column(
+            spacing=5,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("trust_expand_hint"),
+                    size=11.5,
+                    color=COLORS["text_sub"],
+                ),
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                    border_radius=6,
+                    bgcolor=COLORS["bg"],
+                    border=ft.Border.all(1, COLORS["border"]),
+                    content=ft.Row(
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                "PROFILE",
+                                width=212,
+                                size=11,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_dim"],
+                            ),
+                            ft.Text(
+                                "ĐỘ CHÍN TRUST",
+                                width=142,
+                                size=11,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_dim"],
+                            ),
+                            ft.Text(
+                                "GỢI Ý TĂNG ĐIỂM",
+                                expand=True,
+                                size=11,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_dim"],
+                            ),
+                            ft.Text(
+                                "ĐỊA CHỈ IP & ĐỘ SẠCH",
+                                width=215,
+                                size=11,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_dim"],
+                                text_align=ft.TextAlign.RIGHT,
+                            ),
+                        ],
                     ),
-                    ft.Text(
-                        "ĐỘ CHÍN TRUST",
-                        width=142,
-                        size=11,
-                        font_family=FONT_SEMIBOLD,
-                        color=COLORS["text_dim"],
-                    ),
-                    ft.Text(
-                        "GỢI Ý TĂNG ĐIỂM",
-                        expand=True,
-                        size=11,
-                        font_family=FONT_SEMIBOLD,
-                        color=COLORS["text_dim"],
-                    ),
-                    ft.Text(
-                        "ĐỊA CHỈ IP & ĐỘ SẠCH",
-                        width=215,
-                        size=11,
-                        font_family=FONT_SEMIBOLD,
-                        color=COLORS["text_dim"],
-                        text_align=ft.TextAlign.RIGHT,
-                    ),
-                ],
-            ),
+                ),
+            ],
         )
 
         flt = active_filter[0]
@@ -2361,74 +2880,115 @@ def open_trust_monitor_dialog(
                 if (getattr(p, "email", None) and p.email not in p.name)
                 else (info.port or "")
             )
+            is_exp = expanded_profile[0] == p.name
+            row_children: list[ft.Control] = [
+                ft.Row(
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            expand=True,
+                            ink=True,
+                            border_radius=5,
+                            tooltip=get_string("tooltip_trust_breakdown"),
+                            on_click=lambda _, n=p.name: _toggle_expand(n),
+                            content=ft.Row(
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Container(
+                                        width=212,
+                                        content=ft.Row(
+                                            spacing=4,
+                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                            controls=[
+                                                ft.Icon(
+                                                    ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED
+                                                    if is_exp
+                                                    else ft.Icons.KEYBOARD_ARROW_RIGHT_ROUNDED,
+                                                    size=16,
+                                                    color=COLORS["accent"]
+                                                    if is_exp
+                                                    else COLORS["text_dim"],
+                                                ),
+                                                ft.Text(
+                                                    p.name,
+                                                    size=12.5,
+                                                    font_family=FONT_SEMIBOLD,
+                                                    color=COLORS["text_main"],
+                                                    no_wrap=True,
+                                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                                ),
+                                                *(
+                                                    [
+                                                        ft.Text(
+                                                            sub_email,
+                                                            size=10.5,
+                                                            font_family=FONT_DATA,
+                                                            color=COLORS["text_dim"],
+                                                            no_wrap=True,
+                                                            overflow=ft.TextOverflow.ELLIPSIS,
+                                                            expand=True,
+                                                        )
+                                                    ]
+                                                    if sub_email
+                                                    else []
+                                                ),
+                                            ],
+                                        ),
+                                    ),
+                                    ft.Container(
+                                        width=142,
+                                        alignment=ft.Alignment(-1, 0),
+                                        content=_build_trust_score_chip(info),
+                                    ),
+                                    ft.Text(
+                                        summary_str,
+                                        expand=True,
+                                        size=11.5,
+                                        color=action_color,
+                                        no_wrap=True,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                        tooltip=detail_tip,
+                                    ),
+                                ],
+                            ),
+                        ),
+                        ft.Container(
+                            width=215,
+                            alignment=ft.Alignment(1, 0),
+                            content=ft.Row(
+                                spacing=5,
+                                tight=True,
+                                alignment=ft.MainAxisAlignment.END,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=right_controls,
+                            ),
+                        ),
+                    ],
+                )
+            ]
+            if is_exp:
+                row_children.append(
+                    ft.Container(
+                        padding=ft.Padding.only(top=6, bottom=4),
+                        content=_build_trust_breakdown_panel(
+                            info,
+                            p,
+                            on_score_ip=lambda target=info.last_exit_ip, px=p.proxy or "": _score_ip_async(
+                                target, px
+                            ),
+                        ),
+                    )
+                )
             score_rows.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=7),
                     border_radius=7,
-                    bgcolor=COLORS["input_bg"],
-                    border=ft.Border.all(1, COLORS["border"]),
-                    content=ft.Row(
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            ft.Container(
-                                width=200,
-                                content=ft.Row(
-                                    spacing=5,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    controls=[
-                                        ft.Text(
-                                            p.name,
-                                            size=12.5,
-                                            font_family=FONT_SEMIBOLD,
-                                            color=COLORS["text_main"],
-                                            no_wrap=True,
-                                            overflow=ft.TextOverflow.ELLIPSIS,
-                                        ),
-                                        *(
-                                            [
-                                                ft.Text(
-                                                    sub_email,
-                                                    size=10.5,
-                                                    font_family=FONT_DATA,
-                                                    color=COLORS["text_dim"],
-                                                    no_wrap=True,
-                                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                                    expand=True,
-                                                )
-                                            ]
-                                            if sub_email
-                                            else []
-                                        ),
-                                    ],
-                                ),
-                            ),
-                            ft.Container(
-                                width=142,
-                                alignment=ft.Alignment(-1, 0),
-                                content=_build_trust_score_chip(info),
-                            ),
-                            ft.Text(
-                                summary_str,
-                                expand=True,
-                                size=11.5,
-                                color=action_color,
-                                no_wrap=True,
-                                overflow=ft.TextOverflow.ELLIPSIS,
-                                tooltip=detail_tip,
-                            ),
-                            ft.Container(
-                                width=215,
-                                alignment=ft.Alignment(1, 0),
-                                content=ft.Row(
-                                    spacing=5,
-                                    tight=True,
-                                    alignment=ft.MainAxisAlignment.END,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    controls=right_controls,
-                                ),
-                            ),
-                        ],
+                    bgcolor=COLORS["card_bg"] if is_exp else COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1.5 if is_exp else 1,
+                        COLORS["accent"] if is_exp else COLORS["border"],
                     ),
+                    content=ft.Column(spacing=4, tight=True, controls=row_children),
                 )
             )
         list_col.controls = score_rows

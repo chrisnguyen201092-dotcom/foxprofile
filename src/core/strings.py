@@ -577,15 +577,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_cold": "○ {score}pt · New",
         "trust_tier_banned": "✕ Banned / Hold",
         "trust_breakdown_tooltip": (
-            "Meta Sigma & Hatch OIDC Trust Score (Strict Safety Buffer): {score}/100\n"
+            "Meta Sigma & Hatch OIDC Trust Score (Strict Safety Buffer): {score}/100 (Click for full breakdown)\n"
             "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} Meta/Muse domain(s)\n"
             "• Multi-Day Login Rhythm: {act_days} active day(s) · {sess_cnt} session(s) ({mins}m)\n"
             "• Hatch VM Session (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookies)\n"
             "• First-Party Storage (`ps_l`/`ps_n`): {ps_l} · History: {hpages} page(s)\n"
             "• Prior Meta Checkpoint Scar: {chk_scar}\n"
             "• HTTP Cache2 ETag Sync: {cache2}\n"
-            "── Strict Safety Gates: ◈ Trusted requires hatch_gw + datr ≥6d (≥3 Meta/Muse domains) + ps_l + ≥4d/5sess/90m; ✦ Diamond requires datr ≥10d + ≥6d/10sess/300m (5h) + /thread/"
+            "── Strict Safety Gates: ◈ Trusted requires hatch_gw + datr ≥12d (≥3 Meta/Muse domains) + ps_l + ≥7d/12sess/480m (8h); ✦ Diamond requires datr ≥21d + ≥14d/25sess/1200m (20h) + /thread/"
         ),
+        "trust_hist_tab": "Trust Breakdown ({score}/100)",
+        "tooltip_trust_breakdown": "Click to view detailed Trust Score calculation",
+        "trust_expand_hint": "💡 Click any account row below (or its Trust badge) to expand its item-by-item Trust Score calculation & stage cap checklist.",
         "trust_yes": "✦ Ready",
         "trust_no": "○ None",
         "trust_chk_clean": "✦ Clean (0 Checkpoint)",
@@ -1264,15 +1267,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_tier_cold": "○ {score}đ · Khởi tạo",
         "trust_tier_banned": "✕ Tạm ngưng / Khóa",
         "trust_breakdown_tooltip": (
-            "Điểm Tín Nhiệm Meta Sigma & Hatch OIDC: {score}/100\n"
+            "Điểm Tín Nhiệm Meta Sigma & Hatch OIDC: {score}/100 (Bấm để xem chi tiết cách tính)\n"
             "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày · đồng bộ {datr_doms} miền Meta/Muse\n"
             "• Lịch sử hoạt động nhiều ngày: {act_days} ngày mở · {sess_cnt} phiên ({mins}p)\n"
             "• Phiên Hatch VM (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookie)\n"
             "• Cookie phiên chính thức (`ps_l`/`ps_n`): {ps_l} · Lịch sử duyệt web: {hpages} trang\n"
             "• Lịch sử Checkpoint Meta: {chk_scar}\n"
             "• Đồng bộ ETag HTTP Cache2: {cache2}\n"
-            "── Tiêu chuẩn phân hạng: ◈ Tin cậy yêu cầu hatch_gw + datr ≥6 ngày (≥3 miền Meta/Muse) + ps_l + ≥4 ngày mở (≥5 phiên, ≥90p); ✦ Kim Cương yêu cầu datr ≥10 ngày + ≥6 ngày mở (≥10 phiên, ≥300p / 5h) + đã truy cập /thread/"
+            "── Tiêu chuẩn phân hạng: ◈ Tin cậy yêu cầu hatch_gw + datr ≥12 ngày (≥3 miền Meta/Muse) + ps_l + ≥7 ngày mở (≥12 phiên, ≥480p / 8h); ✦ Kim Cương yêu cầu datr ≥21 ngày + ≥14 ngày mở (≥25 phiên, ≥1200p / 20h) + đã truy cập /thread/"
         ),
+        "trust_hist_tab": "Chi tiết Trust ({score}/100)",
+        "tooltip_trust_breakdown": "Bấm để xem chi tiết cách tính điểm Trust",
+        "trust_expand_hint": "💡 Bấm vào dòng tài khoản bất kỳ bên dưới (hoặc bấm vào huy hiệu điểm Trust) để mở bảng phân tích chi tiết từng hạng mục điểm & điều kiện mở trần.",
         "trust_yes": "✦ Đã có",
         "trust_no": "○ Chưa có",
         "trust_chk_clean": "✦ Sạch (0 Checkpoint)",

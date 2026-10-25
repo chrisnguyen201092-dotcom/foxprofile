@@ -246,6 +246,7 @@ def build_profile_card(
     on_status_click: Callable[[str], None] | None = None,
     on_session_history: Callable[[str], None] | None = None,
     on_ip_history: Callable[[str], None] | None = None,
+    on_trust_detail: Callable[[str], None] | None = None,
     on_toggle_pin: Callable[[str], None] | None = None,
     on_edit_dates: Callable[[str], None] | None = None,
     on_copy_email: Callable[[str], None] | None = None,
@@ -411,7 +412,6 @@ def build_profile_card(
     recovery_val = (getattr(profile, "recovery_email", None) or "").strip()
     token_val = (getattr(profile, "mail_token", None) or "").strip()
     totp_pair = generate_totp(two_fa_val) if two_fa_val else None
-    has_saved_creds = bool(password_val or two_fa_val or recovery_val or token_val)
     if editing_email and on_save_email is not None:
         email_input = ft.TextField(
             value=email_val,
@@ -715,6 +715,7 @@ def build_profile_card(
                             since=since,
                             on_focus_window=on_focus_window,
                             on_session_history=on_session_history,
+                            on_trust_detail=on_trust_detail,
                         )
                     ),
                 ),
@@ -1011,7 +1012,11 @@ def _proxy(
     return _stack(line1, line2)
 
 
-def _geo_score_badge(monitor_info: ProfileMonitorInfo | None) -> ft.Control | None:
+def _geo_score_badge(
+    monitor_info: ProfileMonitorInfo | None,
+    *,
+    on_click: Callable[[], None] | None = None,
+) -> ft.Control | None:
     if monitor_info is None:
         return None
     t_score = int(getattr(monitor_info, "trust_score", 0) or 0)
@@ -1045,12 +1050,19 @@ def _geo_score_badge(monitor_info: ProfileMonitorInfo | None) -> ft.Control | No
     act_d = int(getattr(monitor_info, "active_days", 0) or 0)
     f_score = getattr(monitor_info, "ip_fraud_score", None)
     ip_part = f" · IP Risk {f_score}/100" if f_score is not None and f_score >= 0 else ""
-    tip = f"Meta Trust: {tier_sym} {t_score}/100 · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
+    base_tip = f"Meta Trust: {tier_sym} {t_score}/100 · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
+    tip = (
+        f"{base_tip} ({get_string('tooltip_trust_breakdown')})"
+        if on_click is not None
+        else base_tip
+    )
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=5, vertical=1),
         border_radius=4,
         bgcolor=ft.Colors.with_opacity(0.11, col),
         border=ft.Border.all(1, ft.Colors.with_opacity(0.55, col)),
+        ink=on_click is not None,
+        on_click=(lambda _: on_click()) if on_click is not None else None,
         tooltip=tip,
         content=ft.Text(
             text_val,
@@ -1071,6 +1083,7 @@ def _geo(
     since: str = "",
     on_focus_window: Callable[[str], None] | None = None,
     on_session_history: Callable[[str], None] | None = None,
+    on_trust_detail: Callable[[str], None] | None = None,
 ) -> ft.Column:
     follow = get_string("follows_ip")
     tz: ft.Control = (
@@ -1078,7 +1091,11 @@ def _geo(
         if profile.timezone
         else ft.Text(follow, size=12.5, color=COLORS["text_dim"])
     )
-    score_chip = _geo_score_badge(monitor_info)
+    trust_cb = on_trust_detail or on_session_history
+    score_chip = _geo_score_badge(
+        monitor_info,
+        on_click=(lambda n=profile.name: trust_cb(n)) if trust_cb is not None else None,
+    )
     if is_running:
         run_mins = monitor_info.running_mins if monitor_info is not None else None
         dur = _format_running(run_mins, since)
@@ -1094,32 +1111,35 @@ def _geo(
             tooltip=get_string("tooltip_focus_window") if on_focus_window else run_label,
         )
         if on_focus_window is not None:
+            focus_ctrl = ft.Container(
+                ink=True,
+                border_radius=4,
+                tooltip=get_string("tooltip_focus_window"),
+                on_click=lambda _, n=profile.name: on_focus_window(n),
+                content=ft.Row(
+                    spacing=4,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        run_text,
+                        ft.Icon(
+                            ft.Icons.OPEN_IN_NEW,
+                            size=11.5,
+                            color=COLORS["success"],
+                        ),
+                    ],
+                ),
+            )
             return _stack(
                 tz,
-                ft.Container(
-                    ink=True,
-                    border_radius=4,
-                    tooltip=get_string("tooltip_focus_window"),
-                    on_click=lambda _, n=profile.name: on_focus_window(n),
-                    content=ft.Row(
-                        spacing=4,
-                        tight=True,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            *(
-                                [score_chip]
-                                if score_chip is not None
-                                else []
-                            ),
-                            run_text,
-                            ft.Icon(
-                                ft.Icons.OPEN_IN_NEW,
-                                size=11.5,
-                                color=COLORS["success"],
-                            ),
-                        ],
-                    ),
-                ),
+                ft.Row(
+                    spacing=5,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[score_chip, focus_ctrl],
+                )
+                if score_chip is not None
+                else focus_ctrl,
             )
         return _stack(tz, run_text)
     if monitor_info is not None and monitor_info.last_closed is not None:
@@ -1146,49 +1166,49 @@ def _geo(
                 else tooltip_str
             ),
         )
+        cd_ctrl: ft.Control = (
+            ft.Container(
+                ink=True,
+                border_radius=4,
+                on_click=lambda _, n=profile.name: on_session_history(n),
+                content=cd_text,
+            )
+            if on_session_history is not None
+            else cd_text
+        )
         line2_ctrl: ft.Control = (
             ft.Row(
                 spacing=5,
                 tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[score_chip, cd_text],
+                controls=[score_chip, cd_ctrl],
             )
             if score_chip is not None
-            else cd_text
+            else cd_ctrl
         )
-        if on_session_history is not None:
-            return _stack(
-                tz,
-                ft.Container(
-                    ink=True,
-                    border_radius=4,
-                    on_click=lambda _, n=profile.name: on_session_history(n),
-                    content=line2_ctrl,
-                ),
-            )
         return _stack(tz, line2_ctrl)
     locale = _minor(profile.locale, data=True) if profile.locale else _minor(follow)
+    loc_ctrl: ft.Control = (
+        ft.Container(
+            ink=True,
+            border_radius=4,
+            tooltip=get_string("session_hist_btn"),
+            on_click=lambda _, n=profile.name: on_session_history(n),
+            content=locale,
+        )
+        if on_session_history is not None
+        else locale
+    )
     idle_line2: ft.Control = (
         ft.Row(
             spacing=5,
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[score_chip, locale],
+            controls=[score_chip, loc_ctrl],
         )
         if score_chip is not None
-        else locale
+        else loc_ctrl
     )
-    if on_session_history is not None:
-        return _stack(
-            tz,
-            ft.Container(
-                ink=True,
-                border_radius=4,
-                tooltip=get_string("session_hist_btn"),
-                on_click=lambda _, n=profile.name: on_session_history(n),
-                content=idle_line2,
-            ),
-        )
     return _stack(tz, idle_line2)
 
 
