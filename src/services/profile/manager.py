@@ -1127,13 +1127,20 @@ class ProfileManager:
                         if c_mail and c_mail == low_email:
                             target_prof = cand
                             break
+                    if target_prof is None:
+                        for cand in self.profiles.values():
+                            c_name = cand.name.strip().casefold()
+                            if c_name == low_email or low_email in c_name:
+                                target_prof = cand
+                                break
                     if target_prof is None and local_part:
                         for cand in self.profiles.values():
                             c_mail = (cand.email or "").strip().casefold()
                             if c_mail and c_mail.split("@", 1)[0] == local_part:
                                 target_prof = cand
                                 break
-                            if cand.name.casefold() == local_part:
+                            c_name = cand.name.casefold()
+                            if c_name == local_part or f"{local_part}@" in c_name:
                                 target_prof = cand
                                 break
 

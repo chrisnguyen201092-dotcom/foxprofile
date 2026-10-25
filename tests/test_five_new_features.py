@@ -3082,6 +3082,120 @@ def test_fixed_work_squads_and_pinning_persistence(isolated_pm, tmp_path):
     assert len(dp.dialogs) == 1
 
 
+def test_trust_score_breakdown_and_ui_dialogs():
+    """Verify compute_trust_breakdown math, stage caps, and UI breakdown panels."""
+    from src.services.monitor import ProfileMonitorInfo, compute_trust_breakdown
+    from src.ui.dialogs.batch_and_backup import (
+        _build_trust_breakdown_panel,
+        open_session_history_dialog,
+        open_trust_monitor_dialog,
+    )
+
+    p = Profile(
+        name="CappedWarmAcc",
+        proxy="http://u:p@209.141.40.174:5295",
+        timezone="America/Los_Angeles",
+        locale="en-US",
+    )
+    # Raw score > 48, but datr_age_days=5.2 (<7d) caps final score at Stage 0b (48)
+    info_warm = ProfileMonitorInfo(
+        name="CappedWarmAcc",
+        port=":5295",
+        hatch_gw=True,
+        hatch_vml=True,
+        hatch_sess=True,
+        has_thread_url=True,
+        tab_count=2,
+        has_ps_l=True,
+        has_meta=True,
+        has_cache2=True,
+        datr_age_days=5.2,
+        datr_domains=4,
+        cookie_count=32,
+        history_pages=18,
+        active_days=5,
+        session_count=8,
+        total_minutes=300,
+        ip_fraud_score=26,
+        ip_proxy_flag=False,
+        trust_score=48,
+        trust_tier="warming",
+        has_proxy=True,
+        has_geo_pin=True,
+    )
+    bd = compute_trust_breakdown(info_warm, p)
+    assert len(bd["pillars"]) == 6
+    assert sum(pil["max_pts"] for pil in bd["pillars"]) == 100
+    assert bd["positive_total"] == (3 + 5 + 5 + 15 + 10 + 13)  # 51
+    assert bd["penalty_total"] == 0
+    assert bd["raw_score"] == 51
+    assert bd["stage_cap"] == 48
+    assert bd["capped_by"] == 3
+    assert bd["final_score"] == 48
+    assert any(not g["passed"] for g in bd["gates"])
+
+    panel = _build_trust_breakdown_panel(info_warm, p)
+    assert panel is not None
+
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, d):
+            self.dialogs.append(d)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    dp = DummyPage()
+    open_session_history_dialog(
+        dp,  # type: ignore[arg-type]
+        "CappedWarmAcc",
+        [],
+        initial_tab="trust",
+        monitor_info=info_warm,
+        profile=p,
+    )
+    assert len(dp.dialogs) == 1
+    sh_dlg = dp.dialogs[0]
+    # Verify 3 tabs (sessions, ips, trust) are rendered
+    tab_row = sh_dlg.content.content.controls[0]
+    assert len(tab_row.controls) == 3
+
+    dp2 = DummyPage()
+    from src.services.monitor import MonitorSnapshot
+
+    snap = MonitorSnapshot(profiles={"CappedWarmAcc": info_warm})
+    open_trust_monitor_dialog(
+        dp2,  # type: ignore[arg-type]
+        lambda: [p],
+        lambda: snap,
+        lambda ip, risk: None,
+    )
+    assert len(dp2.dialogs) == 1
+
+
+def test_parse_mail_credentials_with_numbered_list_prefix():
+    from src.utils.totp import parse_mail_credentials_line
+
+    raw = (
+        "1.ktbdebc@hotmail.com|Philif8%|"
+        "M.C518_BAY.0.U.MsaArtifacts.-Cg9NMR13NfP2EKKM3vq0t8n1dbLxbm87XDFDhnMLFYBh6mOWdMIos7J6kT|"
+        "9e5f94bc-e8a4-4e73-b8be-63364c29d753|dag211@smvmail.com"
+    )
+    parsed = parse_mail_credentials_line(raw)
+    assert parsed["email"] == "ktbdebc@hotmail.com"
+    assert parsed["password"] == "Philif8%"
+    assert parsed["recovery_email"] == "dag211@smvmail.com"
+    assert parsed["client_id"] == "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+    assert parsed["mail_token"].endswith("|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+
+
 
 
 

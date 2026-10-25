@@ -181,7 +181,7 @@ def parse_mail_credentials_line(raw: str | None) -> dict[str, str]:
         parts = [p.strip() for p in line.split(":")]
     else:
         if "@" in line:
-            out["email"] = line
+            out["email"] = re.sub(r"^\d+\.\s*(?=[a-zA-Z])", "", line)
         elif _looks_like_oauth_refresh_token(line):
             out["refresh_token"] = line
             out["mail_token"] = line
@@ -214,6 +214,9 @@ def parse_mail_credentials_line(raw: str | None) -> dict[str, str]:
         else:
             out["email"] = parts[0]
             idx = 1
+
+    if out["email"]:
+        out["email"] = re.sub(r"^\d+\.\s*(?=[a-zA-Z])", "", out["email"].strip())
 
     tail = [p for p in parts[idx:] if p != ""]
     if not tail:
