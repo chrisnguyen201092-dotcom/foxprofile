@@ -3195,6 +3195,30 @@ def test_parse_mail_credentials_with_numbered_list_prefix():
     assert parsed["mail_token"].endswith("|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
 
 
+def test_sync_credentials_from_disk_prevents_stale_overwrite(isolated_pm):
+    from src.services.profile.manager import ProfileManager
+
+    isolated_pm.add_profile("AccSync", "http://127.0.0.1:8080", "windows", email="sync@hotmail.com")
+    # Simulate an external process importing credentials while `isolated_pm` stays in memory
+    ext_pm = ProfileManager()
+    up, sk = ext_pm.bulk_import_credentials(
+        [
+            "1.sync@hotmail.com|Pass123%|"
+            "M.C512_BAY.0.U.MsaArtifacts.-CvZeZQTNU7HDuMh1ikTJjROweVfeKN1x1aakFOeA6ywQsA8CbGd93ci|"
+            "9e5f94bc-e8a4-4e73-b8be-63364c29d753|rec@smvmail.com"
+        ]
+    )
+    assert up == 1 and sk == 0
+
+    # When isolated_pm saves profiles (or syncs), it must merge the external credentials instead of wiping them
+    isolated_pm.save_profiles()
+    p = isolated_pm.profiles["AccSync"]
+    assert p.password == "Pass123%"
+    assert p.recovery_email == "rec@smvmail.com"
+    assert p.mail_token and p.mail_token.endswith("|9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+
+
 
 
 

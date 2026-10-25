@@ -215,12 +215,16 @@ class AppHandlers:
             ),
             on_clear_ip_history=_clear_ips,
             monitor_info=info,
+            profile=p,
             on_score_ip=_score_ip,
             on_open_trust_monitor=lambda: self.on_open_trust_monitor(),
         )
 
     def on_open_ip_history(self, name: str) -> None:
         self.on_open_session_history(name, initial_tab="ips")
+
+    def on_open_trust_detail(self, name: str) -> None:
+        self.on_open_session_history(name, initial_tab="trust")
 
     def on_open_trust_monitor(self, initial_tab: str = "scores") -> None:
         page = self._get_page()
@@ -642,6 +646,8 @@ class AppHandlers:
         self.on_open_mail_credentials(name, initial_tab="inbox")
 
     def on_open_mail_credentials(self, name: str, initial_tab: str = "single") -> None:
+        if hasattr(self._pm, "sync_credentials_from_disk"):
+            self._pm.sync_credentials_from_disk()
         page = self._get_page()
         p = self._pm.profiles.get(name)
         if page is None or p is None:

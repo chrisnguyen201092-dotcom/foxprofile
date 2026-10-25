@@ -84,6 +84,7 @@ class ProfileManager:
         self.all_page_index: int = 0
         self.proxy_pool: list[str] = []
         self.status_tags: list[dict[str, str]] = default_status_tags()
+        self._disk_mtime: float = 0.0
         set_active_status_tags(self.status_tags)
         self._load_profiles()
         pathlib.Path(DATA_DIR).mkdir(exist_ok=True, parents=True)
@@ -356,13 +357,71 @@ class ProfileManager:
                             ),
                         }
                         self.profiles[name] = Profile(**clean_data)
+                with contextlib.suppress(OSError):
+                    self._disk_mtime = pathlib.Path(PROFILES_FILE).stat().st_mtime
                 logger.info("Loaded %d profiles", len(self.profiles))
             except Exception as e:
                 logger.exception("Error loading profiles: %s", e)
 
+    def sync_credentials_from_disk(self) -> int:
+        """Merge externally-updated mail/2FA credentials from PROFILES_FILE on disk into memory."""
+        path = pathlib.Path(PROFILES_FILE)
+        if not path.exists():
+            return 0
+        try:
+            disk_mtime = path.stat().st_mtime
+        except OSError:
+            return 0
+        if disk_mtime <= self._disk_mtime + 1e-6:
+            return 0
+        merged = 0
+        with self._lock:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return 0
+            if not isinstance(data, dict):
+                return 0
+            for name, p_data in data.items():
+                if not isinstance(p_data, dict):
+                    continue
+                prof = self.profiles.get(name)
+                if prof is None:
+                    continue
+                d_email = valid_or_none(p_data.get("email"), validate_email)
+                d_pass = valid_or_none(p_data.get("password"), validate_password)
+                d_2fa = (
+                    normalize_totp_secret(valid_or_none(p_data.get("two_fa"), validate_two_fa))
+                    or None
+                )
+                d_rec = valid_or_none(p_data.get("recovery_email"), validate_email)
+                d_tok = valid_or_none(p_data.get("mail_token"), validate_mail_token)
+                changed = False
+                if d_email and prof.email != d_email:
+                    prof.email = d_email
+                    changed = True
+                if d_pass and prof.password != d_pass:
+                    prof.password = d_pass
+                    changed = True
+                if d_2fa and prof.two_fa != d_2fa:
+                    prof.two_fa = d_2fa
+                    changed = True
+                if d_rec and prof.recovery_email != d_rec:
+                    prof.recovery_email = d_rec
+                    changed = True
+                if d_tok and prof.mail_token != d_tok:
+                    prof.mail_token = d_tok
+                    changed = True
+                if changed:
+                    merged += 1
+            self._disk_mtime = disk_mtime
+        return merged
+
     def save_profiles(self) -> None:
         """Atomic write: write to a temp file then os.replace."""
         path = pathlib.Path(PROFILES_FILE)
+        with contextlib.suppress(Exception):
+            self.sync_credentials_from_disk()
         tmp = path.with_suffix(".json.tmp")
         try:
             tmp.write_text(
@@ -373,6 +432,8 @@ class ProfileManager:
                 encoding="utf-8",
             )
             _replace(tmp, path)
+            with contextlib.suppress(OSError):
+                self._disk_mtime = path.stat().st_mtime
             pages_path = self._pages_file()
             if self.custom_pages or self.all_page_index > 0 or pages_path.exists():
                 idx = max(0, min(self.all_page_index, len(self.custom_pages)))
