@@ -1239,16 +1239,22 @@ def _build_trust_score_chip(
         col = COLORS["error"]
         label = get_string("trust_tier_banned")
     elif tier == "diamond":
-        col = "#15803D"
-        label = get_string("trust_tier_diamond", score=score)
-    elif tier == "trusted":
         col = "#1D4ED8"
+        label = get_string("trust_tier_diamond", score=score)
+    elif tier == "elite":
+        col = "#15803D"
+        label = get_string("trust_tier_elite", score=score)
+    elif tier == "platinum":
+        col = "#7C3AED"
+        label = get_string("trust_tier_platinum", score=score)
+    elif tier == "trusted":
+        col = "#B45309"
         label = get_string("trust_tier_trusted", score=score)
     elif tier == "warming":
-        col = COLORS["accent"]
+        col = COLORS["text_dim"]
         label = get_string("trust_tier_warming", score=score)
     else:
-        col = COLORS["text_dim"]
+        col = "#F472B6"
         label = get_string("trust_tier_cold", score=score)
 
     sess_status = (
@@ -1327,12 +1333,20 @@ def _build_trust_breakdown_panel(
         COLORS["error"]
         if tier == "banned"
         else (
-            "#15803D"
+            "#1D4ED8"
             if tier == "diamond"
             else (
-                "#1D4ED8"
-                if tier == "trusted"
-                else (COLORS["accent"] if tier == "warming" else COLORS["text_sub"])
+                "#15803D"
+                if tier == "elite"
+                else (
+                    "#7C3AED"
+                    if tier == "platinum"
+                    else (
+                        "#B45309"
+                        if tier == "trusted"
+                        else (COLORS["text_dim"] if tier == "warming" else "#F472B6")
+                    )
+                )
             )
         )
     )
@@ -1367,7 +1381,7 @@ def _build_trust_breakdown_panel(
             ),
         )
 
-    cap_val_str = f"Tối đa {stage_cap}đ" if stage_cap is not None else "100đ (Mở khóa)"
+    cap_val_str = f"Tối đa {stage_cap}đ" if stage_cap is not None else "150đ (Mở khóa)"
     cap_col = (
         COLORS["warning"]
         if capped_by > 0
@@ -1404,9 +1418,9 @@ def _build_trust_breakdown_panel(
                     controls=[
                         _stat_box(
                             "1. TỔNG 6 HẠNG MỤC",
-                            f"+{pos_total} / 100đ",
+                            f"+{pos_total} / 150đ",
                             "Điểm tích lũy thành phần",
-                            "#1D4ED8" if pos_total >= 50 else COLORS["text_main"],
+                            "#1D4ED8" if pos_total >= 56 else COLORS["text_main"],
                         ),
                         _stat_box(
                             "2. ĐIỂM PHẠT RỦI RO",
@@ -1416,7 +1430,7 @@ def _build_trust_breakdown_panel(
                         ),
                         _stat_box(
                             "3. ĐIỂM GỐC (RAW)",
-                            f"{raw_score} / 100đ",
+                            f"{raw_score} / 150đ",
                             f"= max(0, {pos_total} {pen_total:+d})",
                             COLORS["text_main"],
                         ),
@@ -1428,7 +1442,7 @@ def _build_trust_breakdown_panel(
                         ),
                         _stat_box(
                             "5. ĐIỂM CHÍNH THỨC",
-                            f"{final_score} / 100đ",
+                            f"{final_score} / 150đ",
                             f"= min({raw_score}đ, Trần {stage_cap}đ)"
                             if stage_cap is not None
                             else "= Điểm gốc",
@@ -2544,6 +2558,8 @@ def open_trust_monitor_dialog(
             for p in profiles
         ]
         c_diamond = sum(1 for _, i in infos if i.trust_tier == "diamond")
+        c_elite = sum(1 for _, i in infos if i.trust_tier == "elite")
+        c_platinum = sum(1 for _, i in infos if i.trust_tier == "platinum")
         c_trusted = sum(1 for _, i in infos if i.trust_tier == "trusted")
         c_warming = sum(1 for _, i in infos if i.trust_tier in ("warming", "cold"))
 
@@ -2571,6 +2587,8 @@ def open_trust_monitor_dialog(
                     ),
                     _fchip("all", get_string("trust_filter_all", count=len(infos))),
                     _fchip("diamond", get_string("trust_filter_diamond", count=c_diamond)),
+                    _fchip("elite", get_string("trust_filter_elite", count=c_elite)),
+                    _fchip("platinum", get_string("trust_filter_platinum", count=c_platinum)),
                     _fchip("trusted", get_string("trust_filter_trusted", count=c_trusted)),
                     _fchip("warming", get_string("trust_filter_warming", count=c_warming)),
                 ]
@@ -2717,6 +2735,10 @@ def open_trust_monitor_dialog(
         flt = active_filter[0]
         if flt == "diamond":
             infos = [(p, i) for p, i in infos if i.trust_tier == "diamond"]
+        elif flt == "elite":
+            infos = [(p, i) for p, i in infos if i.trust_tier == "elite"]
+        elif flt == "platinum":
+            infos = [(p, i) for p, i in infos if i.trust_tier == "platinum"]
         elif flt == "trusted":
             infos = [(p, i) for p, i in infos if i.trust_tier == "trusted"]
         elif flt == "warming":
@@ -2732,8 +2754,38 @@ def open_trust_monitor_dialog(
                 summary_str = "Đang tạm ngưng / Ban"
                 action_color = COLORS["error"]
             elif info.trust_tier == "diamond":
-                summary_str = "✦ Đạt chuẩn — Sẵn sàng treo cả ngày"
+                summary_str = "✦ Hạng Kim Cương (≥45d) — Đạt đỉnh tín nhiệm an toàn"
+                action_color = "#1D4ED8"
+            elif info.trust_tier == "elite":
+                m_steps: list[str] = []
+                if info.active_days < 28:
+                    m_steps.append(f"Mở thêm {28 - info.active_days} ngày")
+                elif info.session_count < 50:
+                    m_steps.append(f"Thêm {50 - info.session_count} phiên")
+                if info.total_minutes < 2700:
+                    m_steps.append(f"Treo thêm {_format_duration_mins(2700 - info.total_minutes)}")
+                if info.datr_age_days < 45.0 and len(m_steps) < 3:
+                    m_steps.append(f"Đợi cookie +{max(1, int(round(45.0 - info.datr_age_days)))}d")
+                if not info.has_recovery_armor and len(m_steps) < 3:
+                    m_steps.append("Bổ sung 2FA hoặc Pass/Mail phụ")
+                m_tail = " · ".join(m_steps[:2]) if m_steps else "Sẵn sàng lên ✦ Kim Cương"
+                summary_str = f"🛡️ Tin cậy (Đủ tuổi cài 2FA) → {m_tail}"
                 action_color = "#15803D"
+            elif info.trust_tier == "platinum":
+                d_steps: list[str] = []
+                if info.active_days < 20:
+                    d_steps.append(f"Mở thêm {20 - info.active_days} ngày")
+                elif info.session_count < 35:
+                    d_steps.append(f"Thêm {35 - info.session_count} phiên")
+                if info.total_minutes < 1800:
+                    d_steps.append(f"Treo thêm {_format_duration_mins(1800 - info.total_minutes)}")
+                if info.datr_age_days < 30.0 and len(d_steps) < 3:
+                    d_steps.append(f"Đợi cookie +{max(1, int(round(30.0 - info.datr_age_days)))}d")
+                if not info.has_recovery_key and len(d_steps) < 3:
+                    d_steps.append("Lưu mail_token/2FA")
+                d_tail = " · ".join(d_steps[:2]) if d_steps else "Sẵn sàng lên 🛡️ Tin cậy"
+                summary_str = f"❖ Bền vững (Cày việc tốt) → {d_tail}"
+                action_color = "#7C3AED"
             elif info.cookie_count == 0 and info.session_count == 0 and info.history_pages == 0:
                 summary_str = "Mở trình duyệt · Đăng nhập Muse & Meta"
                 action_color = COLORS["text_dim"]

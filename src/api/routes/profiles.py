@@ -213,6 +213,8 @@ def monitor_overview(
         "cooldown_count": cooldown_count,
         "warning_count": warning_count,
         "diamond_count": snap.diamond_count,
+        "elite_count": snap.elite_count,
+        "platinum_count": snap.platinum_count,
         "trusted_count": snap.trusted_count,
         "clean_ip_count": snap.clean_ip_count,
         "scored_ip_count": snap.scored_ip_count,

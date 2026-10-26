@@ -286,6 +286,8 @@ class ProfileMonitorInfo:
     has_muse_auth: bool = False
     has_proxy: bool = False
     has_geo_pin: bool = False
+    has_recovery_key: bool = False
+    has_recovery_armor: bool = False
 
     @property
     def has_warning(self) -> bool:
@@ -306,11 +308,165 @@ def _fmt_mins_compact(mins: int) -> str:
     return f"{h}h" if rem == 0 else f"{h}h {rem}p"
 
 
+MAX_TRUST_SCORE = 150
+
+
+def _compute_stage_cap_and_code(
+    *,
+    is_banned: bool,
+    cookie_count: int,
+    sess_cnt: int,
+    history_pages: int,
+    hatch_gw: bool,
+    eff_datr_age: float,
+    active_days: int,
+    total_mins: int,
+    avg_mins: float,
+    has_meta: bool,
+    datr_domains: int,
+    has_ps_l: bool,
+    has_thread_url: bool,
+    clean_env: bool,
+    ip_fraud_score: int | None,
+    has_recovery_key: bool,
+    has_recovery_armor: bool,
+) -> tuple[int | None, str, str]:
+    """Compute progressive stage ceiling (0-150), stage code, and human-readable stage label."""
+    trusted_gates_failed = bool(
+        eff_datr_age < 12.0
+        or active_days < 7
+        or sess_cnt < 12
+        or total_mins < 480
+        or (avg_mins < 15.0 and total_mins < 900)
+        or (has_meta and (datr_domains < 3 or not has_ps_l))
+        or (has_meta and not has_thread_url)
+        or not clean_env
+    )
+    platinum_gates_failed = bool(
+        eff_datr_age < 21.0
+        or active_days < 14
+        or sess_cnt < 25
+        or total_mins < 1200
+        or (avg_mins < 20.0 and total_mins < 1800)
+        or (has_meta and not has_thread_url)
+        or (has_meta and datr_domains < 4)
+        or (ip_fraud_score is not None and ip_fraud_score >= 65)
+        or not clean_env
+    )
+    elite_gates_failed = bool(
+        platinum_gates_failed
+        or eff_datr_age < 30.0
+        or active_days < 20
+        or sess_cnt < 35
+        or total_mins < 1800
+        or not has_recovery_key
+        or (ip_fraud_score is not None and ip_fraud_score >= 60)
+    )
+    diamond_gates_failed = bool(
+        elite_gates_failed
+        or eff_datr_age < 45.0
+        or active_days < 28
+        or sess_cnt < 50
+        or total_mins < 2700
+        or (avg_mins < 25.0 and total_mins < 3300)
+        or not has_recovery_armor
+        or (ip_fraud_score is not None and ip_fraud_score > 55)
+    )
+
+    p0 = (
+        min(1.0, eff_datr_age / 3.0)
+        + min(1.0, active_days / 2.0)
+        + min(1.0, total_mins / 30.0)
+    ) / 3.0
+
+    if is_banned:
+        return 0, "banned", "Tạm ngưng / Khóa (Trần 0đ)"
+    if cookie_count == 0 and sess_cnt == 0 and history_pages == 0:
+        return 0, "empty", "Hồ sơ mới chưa khởi tạo (Trần 0đ)"
+    if not hatch_gw:
+        cap = 6 + int(round(12.0 * p0))
+        return cap, "no_gw", f"Chưa có cổng hatch_gw (Trần tối đa {cap}/18đ — cần đăng nhập Muse)"
+    if eff_datr_age < 3.0 or active_days < 2 or total_mins < 30:
+        cap = 8 + int(round(12.0 * p0))
+        pct = int(round(p0 * 100))
+        return (
+            cap,
+            "stage_0a",
+            f"Giai đoạn 0 — ○ Khởi tạo (Tiến độ lên ◇ Tích lũy: {pct}% → Trần {cap}/20đ)",
+        )
+    if trusted_gates_failed:
+        sync_ratio = (
+            (0.5 if (not has_meta or has_ps_l) else 0.0)
+            + (0.5 if (not has_meta or (has_thread_url and datr_domains >= 3)) else 0.0)
+        )
+        p1 = (
+            0.25 * min(1.0, eff_datr_age / 12.0)
+            + 0.25 * min(1.0, active_days / 7.0)
+            + 0.15 * min(1.0, sess_cnt / 12.0)
+            + 0.25 * min(1.0, total_mins / 480.0)
+            + 0.10 * sync_ratio
+        )
+        cap = 21 + int(round(34.0 * p1))
+        pct = int(round(p1 * 100))
+        return (
+            cap,
+            "stage_1",
+            f"Giai đoạn 1 — ◇ Tích lũy (Tiến độ mở cổng ◈ Ổn định 12d+: {pct}% → Trần {cap}/55đ)",
+        )
+    if platinum_gates_failed:
+        p2 = (
+            min(1.0, eff_datr_age / 21.0)
+            + min(1.0, active_days / 14.0)
+            + min(1.0, sess_cnt / 25.0)
+            + min(1.0, total_mins / 1200.0)
+        ) / 4.0
+        cap = 56 + int(round(24.0 * p2))
+        pct = int(round(p2 * 100))
+        return (
+            cap,
+            "stage_2",
+            f"Giai đoạn 2 — ◈ Ổn định (Tiến độ mở cổng ❖ Bền vững 21d+: {pct}% → Trần {cap}/80đ)",
+        )
+    if elite_gates_failed:
+        p3 = (
+            min(1.0, eff_datr_age / 30.0)
+            + min(1.0, active_days / 20.0)
+            + min(1.0, sess_cnt / 35.0)
+            + min(1.0, total_mins / 1800.0)
+        ) / 4.0
+        cap = 81 + int(round(24.0 * p3))
+        pct = int(round(p3 * 100))
+        return (
+            cap,
+            "stage_3",
+            f"Giai đoạn 3 — ❖ Bền vững (Tiến độ mở cổng 🛡️ Tin cậy 30d+: {pct}% → Trần {cap}/105đ)",
+        )
+    if diamond_gates_failed:
+        p4 = (
+            min(1.0, eff_datr_age / 45.0)
+            + min(1.0, active_days / 28.0)
+            + min(1.0, sess_cnt / 50.0)
+            + min(1.0, total_mins / 2700.0)
+        ) / 4.0
+        cap = 106 + int(round(24.0 * p4))
+        pct = int(round(p4 * 100))
+        return (
+            cap,
+            "stage_4",
+            f"Giai đoạn 4 — 🛡️ Tin cậy (Tiến độ mở cổng ✦ Kim Cương 45d+: {pct}% → Trần {cap}/130đ)",
+        )
+    return (
+        None,
+        "stage_5",
+        "Giai đoạn 5 — ✦ Kim Cương (131–150đ · Mở khóa hoàn toàn 150/150đ)",
+    )
+
+
 def compute_trust_breakdown(
     info: ProfileMonitorInfo,
     profile: Profile | None = None,
 ) -> dict[str, Any]:
-    """Return a full item-by-item breakdown of how a profile's Trust Score is calculated."""
+    """Return a full item-by-item breakdown of how a profile's Trust Score (0-150) is calculated."""
     eff_datr_age = float(info.datr_age_days or 0.0)
     active_days = int(info.active_days or 0)
     sess_cnt = int(info.session_count or 0)
@@ -319,28 +475,40 @@ def compute_trust_breakdown(
     if profile is not None:
         has_proxy = bool(profile.proxy)
         has_geo_pin = bool(profile.proxy and profile.timezone and profile.locale)
+        has_tfa = bool((profile.two_fa or "").strip())
+        has_mtok = bool((profile.mail_token or "").strip())
+        has_pwd_or_rec = bool(
+            (profile.password or "").strip() or (profile.recovery_email or "").strip()
+        )
+        has_recovery_key = bool(has_tfa or has_mtok or info.has_recovery_key)
+        has_recovery_armor = bool(
+            has_tfa or (has_mtok and has_pwd_or_rec) or info.has_recovery_armor
+        )
     else:
         has_proxy = bool(info.has_proxy or info.port or info.last_exit_ip or info.has_geo_pin)
         has_geo_pin = bool(info.has_geo_pin or (has_proxy and info.trust_score > 0))
+        has_recovery_key = bool(info.has_recovery_key)
+        has_recovery_armor = bool(info.has_recovery_armor)
     has_muse_auth = bool(info.has_muse_auth)
 
-    # 1. Cookie `datr` Age (max 25)
+    # 1. Cookie `datr` Age (max 40)
     datr_tiers = [
-        (30.0, 25),
-        (21.0, 20),
-        (14.0, 15),
-        (10.0, 11),
-        (7.0, 7),
-        (3.0, 3),
+        (45.0, 40),
+        (30.0, 32),
+        (21.0, 24),
+        (14.0, 18),
+        (10.0, 13),
+        (7.0, 9),
+        (3.0, 4),
     ]
     p1_pts = 0
-    p1_next = "Mốc kế: Đăng nhập tạo cookie datr (+1đ)"
-    if eff_datr_age >= 30.0:
-        p1_pts = 25
-        p1_next = "✓ Đã đạt điểm tối đa (≥30 ngày)"
+    p1_next = "Mốc kế: Đăng nhập tạo cookie datr (+2đ)"
+    if eff_datr_age >= 45.0:
+        p1_pts = 40
+        p1_next = "✓ Đã đạt điểm tối đa (≥45 ngày)"
     elif eff_datr_age > 0.0:
-        p1_pts = 1
-        next_d, next_p = 3.0, 3
+        p1_pts = 2
+        next_d, next_p = 3.0, 4
         for idx_t, (td, tp) in enumerate(datr_tiers):
             if eff_datr_age >= td:
                 p1_pts = tp
@@ -350,25 +518,26 @@ def compute_trust_breakdown(
         rem_d = max(0.1, next_d - eff_datr_age)
         p1_next = f"Mốc kế (≥{int(next_d)}d → +{next_p}đ): đợi thêm {rem_d:.1f} ngày"
 
-    # 2. Active Days & Session Consistency (max 18)
+    # 2. Active Days & Session Consistency (max 30)
     rhythm_tiers = [
-        (18, 30, 18),
-        (14, 25, 15),
-        (10, 18, 11),
-        (7, 12, 8),
-        (5, 7, 5),
-        (3, 4, 3),
-        (2, 2, 1),
+        (28, 50, 30),
+        (20, 35, 26),
+        (14, 25, 22),
+        (10, 18, 17),
+        (7, 12, 13),
+        (5, 7, 8),
+        (3, 4, 5),
+        (2, 2, 2),
     ]
     p2_pts = 0
-    next_r = (2, 2, 1)
+    next_r = (2, 2, 2)
     for idx_r, (rd, rs, rp) in enumerate(rhythm_tiers):
         if active_days >= rd and sess_cnt >= rs:
             p2_pts = rp
             next_r = rhythm_tiers[idx_r - 1] if idx_r > 0 else (rd, rs, rp)
             break
-    if p2_pts >= 18:
-        p2_next = "✓ Đã đạt điểm tối đa (≥18 ngày & ≥30 phiên)"
+    if p2_pts >= 30:
+        p2_next = "✓ Đã đạt điểm tối đa (≥28 ngày & ≥50 phiên)"
     else:
         nd, ns, np_pts = next_r
         need_parts: list[str] = []
@@ -379,42 +548,43 @@ def compute_trust_breakdown(
         need_str = ", ".join(need_parts) if need_parts else "đủ điều kiện"
         p2_next = f"Mốc kế (≥{nd}d & ≥{ns} phiên → +{np_pts}đ): cần {need_str}"
 
-    # 3. Cumulative Runtime Hours (max 17)
+    # 3. Cumulative Runtime Hours (max 25)
     runtime_tiers = [
-        (2100, "35h", 17),
-        (1200, "20h", 14),
-        (720, "12h", 11),
-        (480, "8h", 8),
-        (240, "4h", 5),
-        (120, "2h", 3),
-        (45, "45p", 1),
+        (2700, "45h", 25),
+        (1800, "30h", 22),
+        (1200, "20h", 18),
+        (720, "12h", 14),
+        (480, "8h", 11),
+        (240, "4h", 7),
+        (120, "2h", 4),
+        (45, "45p", 2),
     ]
     p3_pts = 0
-    next_rt = (45, "45p", 1)
+    next_rt = (45, "45p", 2)
     for idx_m, (rm, rlbl, rp) in enumerate(runtime_tiers):
         if total_mins >= rm:
             p3_pts = rp
             next_rt = runtime_tiers[idx_m - 1] if idx_m > 0 else (rm, rlbl, rp)
             break
-    if p3_pts >= 17:
-        p3_next = "✓ Đã đạt điểm tối đa (≥35h / 2100p)"
+    if p3_pts >= 25:
+        p3_next = "✓ Đã đạt điểm tối đa (≥45h / 2700p)"
     else:
         nm, nlbl, np_rt = next_rt
         rem_m = max(1, nm - total_mins)
         p3_next = f"Mốc kế (≥{nlbl} / {nm}p → +{np_rt}đ): treo thêm {_fmt_mins_compact(rem_m)}"
 
-    # 4. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 15)
+    # 4. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 20)
     gw_ok = bool(info.hatch_gw)
-    gw_pts = 7 if gw_ok else 0
+    gw_pts = 9 if gw_ok else 0
     vml_ok = bool(info.hatch_vml or (info.hatch_gw and not info.has_meta))
-    vml_pts = 3 if vml_ok else 0
+    vml_pts = 4 if vml_ok else 0
     sess_ok = bool(info.hatch_sess)
-    sess_pts = 2 if sess_ok else 0
+    sess_pts = 3 if sess_ok else 0
     thr_ok = bool(info.has_thread_url)
-    thr_pts = 3 if thr_ok else 0
+    thr_pts = 4 if thr_ok else 0
     p4_pts = gw_pts + vml_pts + sess_pts + thr_pts
 
-    # 5. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Cross-Domain Sync & HTTP Cache2 ETag (max 10)
+    # 5. First-Party Storage (`ps_l`/`ps_n`), Cookie/Cache2 Sync & Recovery Armor (max 15)
     ps_ok = bool(info.has_ps_l or (not info.has_meta and info.has_grecaptcha))
     ps_pts = 3 if ps_ok else 0
     if (info.datr_domains >= 4 and info.cookie_count >= 18) or info.cookie_count >= 45:
@@ -427,26 +597,39 @@ def compute_trust_breakdown(
         ck_pts = 0
     cache_ok = bool(info.has_cache2 and info.cookie_count > 0)
     cache_pts = 3 if cache_ok else 0
-    p5_pts = ps_pts + ck_pts + cache_pts
+    rec_pts = 5 if has_recovery_armor else (3 if has_recovery_key else 0)
+    p5_pts = ps_pts + ck_pts + cache_pts + rec_pts
 
-    # 6. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 15)
-    geo_pts = 4 if (has_proxy and has_geo_pin) else (1 if has_proxy else 0)
+    # 6. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 20)
+    geo_pts = 5 if (has_proxy and has_geo_pin) else (2 if has_proxy else 0)
     ip_pts = 0
+    clean_env = not (
+        info.has_meta_checkpoint or info.proxy_port_changed or info.ip_country_changed
+    )
     if has_proxy:
         if info.ip_fraud_score is not None:
             if info.ip_fraud_score <= 15 and not info.ip_proxy_flag:
-                ip_pts = 11
+                ip_pts = 15
             elif info.ip_fraud_score <= 30 and not info.ip_proxy_flag:
-                ip_pts = 9
+                ip_pts = 12
             elif info.ip_fraud_score <= 55:
-                ip_pts = 6
+                ip_pts = 9
             elif info.ip_fraud_score < 65:
-                ip_pts = 3
+                ip_pts = 5
             flag_str = "Cờ Proxy" if info.ip_proxy_flag else "Không cờ Proxy"
-            ip_detail = f"Fraud {info.ip_fraud_score}/100 ({flag_str})"
+            longevity_bonus = 0
+            if info.ip_fraud_score <= 55 and clean_env:
+                if eff_datr_age >= 45.0 and active_days >= 28 and has_recovery_armor:
+                    longevity_bonus = max(0, 15 - ip_pts)
+                    ip_pts = 15
+                elif eff_datr_age >= 30.0 and active_days >= 20 and has_recovery_key:
+                    longevity_bonus = max(0, 12 - ip_pts)
+                    ip_pts = max(ip_pts, 12)
+            bonus_note = f" · +{longevity_bonus}đ Độ bền IP" if longevity_bonus > 0 else ""
+            ip_detail = f"Fraud {info.ip_fraud_score}/100 ({flag_str}{bonus_note})"
         elif info.last_exit_ip:
-            ip_pts = 3
-            ip_detail = "Đã có IP (chưa chấm điểm → tạm tính +3đ)"
+            ip_pts = 5
+            ip_detail = "Đã có IP (chưa chấm điểm → tạm tính +5đ)"
         else:
             ip_detail = "Chưa kiểm tra IP ra"
     else:
@@ -458,37 +641,37 @@ def compute_trust_breakdown(
             "key": "datr_age",
             "title": "1. Tuổi Cookie Định Danh (datr)",
             "earned": p1_pts,
-            "max_pts": 25,
+            "max_pts": 40,
             "current_str": f"{eff_datr_age:.1f} ngày · {info.datr_domains} miền Meta/Muse",
             "next_hint": p1_next,
-            "tiers_str": "Mốc: >0d (+1) · ≥3d (+3) · ≥7d (+7) · ≥10d (+11) · ≥14d (+15) · ≥21d (+20) · ≥30d (+25)",
+            "tiers_str": "Mốc: >0d (+2) · ≥3d (+4) · ≥7d (+9) · ≥10d (+13) · ≥14d (+18) · ≥21d (+24) · ≥30d (+32) · ≥45d (+40)",
             "sub_items": [],
         },
         {
             "key": "rhythm",
             "title": "2. Nhịp Độ Ngày Mở & Số Phiên",
             "earned": p2_pts,
-            "max_pts": 18,
+            "max_pts": 30,
             "current_str": f"{active_days} ngày mở · {sess_cnt} phiên",
             "next_hint": p2_next,
-            "tiers_str": "Mốc: 2d/2p (+1) · 3d/4p (+3) · 5d/7p (+5) · 7d/12p (+8) · 10d/18p (+11) · 14d/25p (+15) · 18d/30p (+18)",
+            "tiers_str": "Mốc: 2d/2p (+2) · 3d/4p (+5) · 5d/7p (+8) · 7d/12p (+13) · 10d/18p (+17) · 14d/25p (+22) · 20d/35p (+26) · 28d/50p (+30)",
             "sub_items": [],
         },
         {
             "key": "runtime",
             "title": "3. Tổng Thời Gian Treo Tích Lũy",
             "earned": p3_pts,
-            "max_pts": 17,
+            "max_pts": 25,
             "current_str": f"{_fmt_mins_compact(total_mins)} ({total_mins}p · TB {avg_mins:.0f}p/phiên)",
             "next_hint": p3_next,
-            "tiers_str": "Mốc: ≥45p (+1) · ≥2h (+3) · ≥4h (+5) · ≥8h (+8) · ≥12h (+11) · ≥20h (+14) · ≥35h (+17)",
+            "tiers_str": "Mốc: ≥45p (+2) · ≥2h (+4) · ≥4h (+7) · ≥8h (+11) · ≥12h (+14) · ≥20h (+18) · ≥30h (+22) · ≥45h (+25)",
             "sub_items": [],
         },
         {
             "key": "hatch_vm",
             "title": "4. Phiên Muse & Máy Ảo Hatch",
             "earned": p4_pts,
-            "max_pts": 15,
+            "max_pts": 20,
             "current_str": "",
             "next_hint": "",
             "tiers_str": "",
@@ -497,37 +680,37 @@ def compute_trust_breakdown(
                     "label": "Cookie cổng máy ảo (hatch_gw)",
                     "detail": "Đã có" if gw_ok else "Chưa có",
                     "earned": gw_pts,
-                    "max_pts": 7,
+                    "max_pts": 9,
                     "ok": gw_ok,
                 },
                 {
                     "label": "Định vị máy ảo (hatch_vml)",
                     "detail": "Đã có" if vml_ok else "Chưa có",
                     "earned": vml_pts,
-                    "max_pts": 3,
+                    "max_pts": 4,
                     "ok": vml_ok,
                 },
                 {
                     "label": "Phiên OIDC (hatch_sess)",
                     "detail": info.sess_exp if sess_ok else "Chưa có",
                     "earned": sess_pts,
-                    "max_pts": 2,
+                    "max_pts": 3,
                     "ok": sess_ok,
                 },
                 {
                     "label": "Tab hội thoại (/thread/)",
                     "detail": f"Đã lưu ({info.tab_count} tab)" if thr_ok else "Chưa mở /thread/",
                     "earned": thr_pts,
-                    "max_pts": 3,
+                    "max_pts": 4,
                     "ok": thr_ok,
                 },
             ],
         },
         {
             "key": "ecosystem",
-            "title": "5. Hệ Sinh Thái Cookie & Cache2",
+            "title": "5. Đồng Bộ Cookie, Cache2 & Khóa Khôi Phục",
             "earned": p5_pts,
-            "max_pts": 10,
+            "max_pts": 15,
             "current_str": "",
             "next_hint": "",
             "tiers_str": "",
@@ -553,13 +736,24 @@ def compute_trust_breakdown(
                     "max_pts": 3,
                     "ok": cache_ok,
                 },
+                {
+                    "label": "Bảo hiểm Khôi phục (2FA / Mail Token + Pass)",
+                    "detail": (
+                        "Đầy đủ (+5đ)"
+                        if has_recovery_armor
+                        else ("Có Token/2FA (+3đ)" if has_recovery_key else "Chưa lưu")
+                    ),
+                    "earned": rec_pts,
+                    "max_pts": 5,
+                    "ok": has_recovery_armor,
+                },
             ],
         },
         {
             "key": "network",
-            "title": "6. Mạng, Geo-Pinning & Độ Sạch IP",
+            "title": "6. Hạ Tầng Mạng, Geo-Pinning & Độ Bền IP",
             "earned": p6_pts,
-            "max_pts": 15,
+            "max_pts": 20,
             "current_str": "",
             "next_hint": "",
             "tiers_str": "",
@@ -568,19 +762,19 @@ def compute_trust_breakdown(
                     "label": "Ghim Proxy + Timezone + Locale",
                     "detail": (
                         "Đã ghim đủ"
-                        if geo_pts == 4
-                        else ("Thiếu Timezone/Locale" if geo_pts == 1 else "Chưa gắn Proxy")
+                        if geo_pts == 5
+                        else ("Thiếu Timezone/Locale" if geo_pts == 2 else "Chưa gắn Proxy")
                     ),
                     "earned": geo_pts,
-                    "max_pts": 4,
-                    "ok": geo_pts == 4,
+                    "max_pts": 5,
+                    "ok": geo_pts == 5,
                 },
                 {
-                    "label": "Độ sạch IP (≤15: +11đ · ≤30: +9đ · ≤55: +6đ)",
+                    "label": "Độ sạch & Độ bền IP (≤15: +15đ · ≤30/Bền 30d: +12đ · ≤55: +9đ)",
                     "detail": ip_detail,
                     "earned": ip_pts,
-                    "max_pts": 11,
-                    "ok": ip_pts >= 9,
+                    "max_pts": 15,
+                    "ok": ip_pts >= 12,
                 },
             ],
         },
@@ -593,7 +787,7 @@ def compute_trust_breakdown(
             {
                 "code": "checkpoint",
                 "label": "Dính dấu vết URL / Cookie Checkpoint Meta",
-                "points": -30,
+                "points": -40,
             }
         )
     if info.hatch_sess and not info.hatch_gw and not has_muse_auth:
@@ -601,7 +795,7 @@ def compute_trust_breakdown(
             {
                 "code": "missing_gw",
                 "label": "Có phiên hatch_sess nhưng mất cổng máy ảo hatch_gw",
-                "points": -15,
+                "points": -20,
             }
         )
     if info.proxy_port_changed or info.ip_country_changed:
@@ -609,7 +803,7 @@ def compute_trust_breakdown(
             {
                 "code": "ip_port_changed",
                 "label": "Đổi cổng Proxy hoặc nhảy quốc gia IP khi đang có phiên",
-                "points": -25,
+                "points": -35,
             }
         )
     if info.burst_10m >= TOKEN_BURST_THRESHOLD:
@@ -617,7 +811,7 @@ def compute_trust_breakdown(
             {
                 "code": "token_burst",
                 "label": f"Lặp token /api/hatch/token bất thường ({info.burst_10m} lần/10p)",
-                "points": -15,
+                "points": -20,
             }
         )
     if sess_cnt >= 3 and avg_mins < 5.0:
@@ -625,7 +819,7 @@ def compute_trust_breakdown(
             {
                 "code": "short_sessions_5m",
                 "label": f"Mở-tắt quá nhanh kiểu bot ping-check (TB {avg_mins:.1f}p/phiên < 5p)",
-                "points": -15,
+                "points": -20,
             }
         )
     elif sess_cnt >= 6 and avg_mins < 8.0 and total_mins < 480:
@@ -633,7 +827,7 @@ def compute_trust_breakdown(
             {
                 "code": "short_sessions_8m",
                 "label": f"Thời lượng phiên trung bình ngắn (TB {avg_mins:.1f}p/phiên < 8p)",
-                "points": -6,
+                "points": -8,
             }
         )
     if info.has_meta and info.datr_domains < 2 and info.cookie_count < 10:
@@ -641,71 +835,33 @@ def compute_trust_breakdown(
             {
                 "code": "incomplete_meta",
                 "label": "Có Meta nhưng thiếu đồng bộ Cookie (<2 miền & <10 cookie)",
-                "points": -10,
+                "points": -12,
             }
         )
 
     positive_total = sum(int(p["earned"]) for p in pillars)
     penalty_total = sum(int(pen["points"]) for pen in penalties)
-    raw_score = max(0, min(100, positive_total + penalty_total))
+    raw_score = max(0, min(MAX_TRUST_SCORE, positive_total + penalty_total))
 
-    # Progressive Hard Gates (Stage Caps)
-    trusted_gates_failed = bool(
-        eff_datr_age < 12.0
-        or active_days < 7
-        or sess_cnt < 12
-        or total_mins < 480
-        or (avg_mins < 15.0 and total_mins < 900)
-        or (info.has_meta and (info.datr_domains < 3 or not info.has_ps_l))
-        or (info.has_meta and not info.has_thread_url)
-        or info.has_meta_checkpoint
-        or info.proxy_port_changed
-        or info.ip_country_changed
+    stage_cap, stage_code, stage_label = _compute_stage_cap_and_code(
+        is_banned=info.is_banned,
+        cookie_count=info.cookie_count,
+        sess_cnt=sess_cnt,
+        history_pages=info.history_pages,
+        hatch_gw=bool(info.hatch_gw),
+        eff_datr_age=eff_datr_age,
+        active_days=active_days,
+        total_mins=total_mins,
+        avg_mins=avg_mins,
+        has_meta=bool(info.has_meta),
+        datr_domains=info.datr_domains,
+        has_ps_l=bool(info.has_ps_l),
+        has_thread_url=bool(info.has_thread_url),
+        clean_env=clean_env,
+        ip_fraud_score=info.ip_fraud_score,
+        has_recovery_key=has_recovery_key,
+        has_recovery_armor=has_recovery_armor,
     )
-    diamond_gates_failed = bool(
-        eff_datr_age < 21.0
-        or active_days < 14
-        or sess_cnt < 25
-        or total_mins < 1200
-        or (avg_mins < 20.0 and total_mins < 1800)
-        or (info.has_meta and not info.has_thread_url)
-        or (info.has_meta and info.datr_domains < 4)
-        or (info.ip_fraud_score is not None and info.ip_fraud_score >= 65)
-    )
-
-    stage_cap: int | None = None
-    if info.is_banned:
-        stage_cap = 0
-        stage_code = "banned"
-        stage_label = "Tạm ngưng / Khóa (Trần 0đ)"
-    elif info.cookie_count == 0 and sess_cnt == 0 and info.history_pages == 0:
-        stage_cap = 0
-        stage_code = "empty"
-        stage_label = "Hồ sơ mới chưa khởi tạo (Trần 0đ)"
-    elif not info.hatch_gw:
-        stage_cap = 42
-        stage_code = "no_gw"
-        stage_label = "Chưa có cổng hatch_gw (Trần tối đa 42đ)"
-    elif eff_datr_age < 3.0 or active_days < 2 or total_mins < 30:
-        stage_cap = 38
-        stage_code = "stage_0a"
-        stage_label = "Giai đoạn 0a — Mới tạo <3d / <2d mở / <30p (Trần 38đ)"
-    elif eff_datr_age < 7.0 or active_days < 4 or total_mins < 120:
-        stage_cap = 48
-        stage_code = "stage_0b"
-        stage_label = "Giai đoạn 0b — Khởi động <7d / <4d mở / <2h (Trần 48đ)"
-    elif trusted_gates_failed:
-        stage_cap = 58
-        stage_code = "stage_1"
-        stage_label = "Giai đoạn 1 — Đang tích lũy (Trần 58đ cho tới khi đạt ◈ Tin cậy)"
-    elif diamond_gates_failed:
-        stage_cap = 78
-        stage_code = "stage_2"
-        stage_label = "Giai đoạn 2 — ◈ Tin cậy (Trần 78đ cho tới khi đạt ✦ Kim Cương)"
-    else:
-        stage_cap = None
-        stage_code = "stage_3"
-        stage_label = "Giai đoạn 3 — ✦ Mở khóa hoàn toàn (Tối đa 100đ)"
 
     if stage_cap == 0:
         computed_final = 0
@@ -718,11 +874,94 @@ def compute_trust_breakdown(
     capped_by = max(0, raw_score - final_score) if stage_cap is not None else 0
 
     # Build checklist of gates for the current / next tier
-    if stage_code in ("stage_2", "stage_3"):
-        next_tier_title = "Điều kiện mở trần 78đ → Lên hạng ✦ Kim Cương (80–100đ)"
+    if stage_code in ("stage_4", "stage_5"):
+        next_tier_title = "Điều kiện mở trần 130đ → Lên hạng ✦ Kim Cương (131–150đ · Chuẩn 45 ngày an toàn tuyệt đối)"
+        ip_imm_ok = info.ip_fraud_score is None or info.ip_fraud_score <= 55
+        gates: list[dict[str, Any]] = [
+            {
+                "label": "Tuổi Cookie datr ≥ 45 ngày (1.5 tháng)",
+                "current": f"{eff_datr_age:.1f}/45 ngày",
+                "passed": eff_datr_age >= 45.0,
+            },
+            {
+                "label": "Số ngày mở ≥ 28 ngày",
+                "current": f"{active_days}/28 ngày",
+                "passed": active_days >= 28,
+            },
+            {
+                "label": "Tổng số phiên ≥ 50 phiên",
+                "current": f"{sess_cnt}/50 phiên",
+                "passed": sess_cnt >= 50,
+            },
+            {
+                "label": "Tổng giờ treo ≥ 45h (2700p)",
+                "current": f"{_fmt_mins_compact(total_mins)} / 45h",
+                "passed": total_mins >= 2700,
+            },
+            {
+                "label": "Thời lượng TB ≥ 25p/phiên (hoặc ≥55h)",
+                "current": f"TB {avg_mins:.0f}p/phiên",
+                "passed": avg_mins >= 25.0 or total_mins >= 3300,
+            },
+            {
+                "label": "Bảo hiểm khôi phục đầy đủ (2FA hoặc Token + Pass/Mail phụ)",
+                "current": "Đã khóa bảo hiểm" if has_recovery_armor else "Thiếu Pass/Mail phụ hoặc 2FA",
+                "passed": has_recovery_armor,
+            },
+            {
+                "label": "Mạng ổn định & IP sạch (Fraud ≤ 55, không đổi Port)",
+                "current": (
+                    f"Fraud {info.ip_fraud_score}/100"
+                    if info.ip_fraud_score is not None
+                    else "An toàn"
+                ),
+                "passed": ip_imm_ok and clean_env,
+            },
+        ]
+    elif stage_code == "stage_3":
+        next_tier_title = "Điều kiện mở trần 105đ → Lên hạng 🛡️ Tin cậy (106–130đ · Chuẩn 30d bật 2FA/Pass)"
+        ip_mst_ok = info.ip_fraud_score is None or info.ip_fraud_score < 60
+        gates = [
+            {
+                "label": "Tuổi Cookie datr ≥ 30 ngày (Đủ tuổi cài 2FA/Pass)",
+                "current": f"{eff_datr_age:.1f}/30 ngày",
+                "passed": eff_datr_age >= 30.0,
+            },
+            {
+                "label": "Số ngày mở ≥ 20 ngày",
+                "current": f"{active_days}/20 ngày",
+                "passed": active_days >= 20,
+            },
+            {
+                "label": "Tổng số phiên ≥ 35 phiên",
+                "current": f"{sess_cnt}/35 phiên",
+                "passed": sess_cnt >= 35,
+            },
+            {
+                "label": "Tổng giờ treo ≥ 30h (1800p)",
+                "current": f"{_fmt_mins_compact(total_mins)} / 30h",
+                "passed": total_mins >= 1800,
+            },
+            {
+                "label": "Đã lưu khóa khôi phục (mail_token hoặc 2FA)",
+                "current": "Đã có" if has_recovery_key else "Chưa lưu Token/2FA",
+                "passed": has_recovery_key,
+            },
+            {
+                "label": "Mạng sạch (Fraud < 60, không đổi Port/Checkpoint)",
+                "current": (
+                    f"Fraud {info.ip_fraud_score}/100"
+                    if info.ip_fraud_score is not None
+                    else "An toàn"
+                ),
+                "passed": ip_mst_ok and clean_env,
+            },
+        ]
+    elif stage_code == "stage_2":
+        next_tier_title = "Điều kiện mở trần 80đ → Lên hạng ❖ Bền vững (81–105đ · Chuẩn 21 ngày)"
         meta_dom_ok = (not info.has_meta) or (info.datr_domains >= 4 and info.has_thread_url)
         ip_gate_ok = info.ip_fraud_score is None or info.ip_fraud_score < 65
-        gates: list[dict[str, Any]] = [
+        gates = [
             {
                 "label": "Tuổi Cookie datr ≥ 21 ngày",
                 "current": f"{eff_datr_age:.1f} ngày",
@@ -764,12 +1003,9 @@ def compute_trust_breakdown(
             },
         ]
     else:
-        next_tier_title = "Điều kiện vượt trần 38đ/48đ/58đ → Lên hạng ◈ Tin cậy (60–78đ)"
+        next_tier_title = "Điều kiện vượt trần 20đ/55đ → Lên hạng ◈ Ổn định (56–80đ · Chuẩn 12 ngày)"
         meta_sync_ok = (not info.has_meta) or (
             info.datr_domains >= 3 and info.has_ps_l and info.has_thread_url
-        )
-        env_clean_ok = not (
-            info.has_meta_checkpoint or info.proxy_port_changed or info.ip_country_changed
         )
         gates = [
             {
@@ -778,12 +1014,12 @@ def compute_trust_breakdown(
                 "passed": bool(info.hatch_gw),
             },
             {
-                "label": "Tuổi Cookie datr ≥ 12d (3d→48đ · 7d→58đ)",
+                "label": "Tuổi Cookie datr ≥ 12d (3d→35đ · 7d→55đ)",
                 "current": f"{eff_datr_age:.1f}/12 ngày",
                 "passed": eff_datr_age >= 12.0,
             },
             {
-                "label": "Số ngày mở ≥ 7d (2d→48đ · 4d→58đ)",
+                "label": "Số ngày mở ≥ 7d (2d→35đ · 4d→55đ)",
                 "current": f"{active_days}/7 ngày",
                 "passed": active_days >= 7,
             },
@@ -793,7 +1029,7 @@ def compute_trust_breakdown(
                 "passed": sess_cnt >= 12,
             },
             {
-                "label": "Tổng giờ treo ≥ 8h/480p (30p→48đ · 2h→58đ)",
+                "label": "Tổng giờ treo ≥ 8h/480p (30p→35đ · 2h→55đ)",
                 "current": f"{_fmt_mins_compact(total_mins)} / 8h",
                 "passed": total_mins >= 480,
             },
@@ -812,14 +1048,15 @@ def compute_trust_breakdown(
             },
             {
                 "label": "Không dính Checkpoint / Không đổi Port IP",
-                "current": "An toàn" if env_clean_ok else "Đang có cảnh báo",
-                "passed": env_clean_ok,
+                "current": "An toàn" if clean_env else "Đang có cảnh báo",
+                "passed": clean_env,
             },
         ]
 
     return {
         "name": info.name,
         "final_score": final_score,
+        "max_score": MAX_TRUST_SCORE,
         "trust_tier": info.trust_tier,
         "raw_score": raw_score,
         "positive_total": positive_total,
@@ -847,6 +1084,8 @@ class MonitorSnapshot:
     token_bursts: list[tuple[str, int]] = field(default_factory=list)
     audit_findings: list[AuditFinding] = field(default_factory=list)
     diamond_count: int = 0
+    elite_count: int = 0
+    platinum_count: int = 0
     trusted_count: int = 0
     clean_ip_count: int = 0
     scored_ip_count: int = 0
@@ -2324,68 +2563,74 @@ class MonitorService:
                 or is_ban_page(p.group)
             )
 
-            # Calculate Strict Meta Sigma (L14/L28) & Hatch OIDC Trust Score with Safety Buffer (0 - 100)
+            # Calculate Strict Meta Sigma (L14/L28/L45) & Hatch OIDC Trust Score (0 - 150)
             score = 0
-            # 1. Meta `datr` Device-Identity Age (L28), Multi-Day Rhythm & Cumulative Runtime (max 60)
-            # 1a. Cookie `datr` Age (max 25)
-            if eff_datr_age >= 30.0:
-                score += 25
+            # 1. Meta `datr` Device-Identity Age, Multi-Day Rhythm & Cumulative Runtime (max 95)
+            # 1a. Cookie `datr` Age (max 40)
+            if eff_datr_age >= 45.0:
+                score += 40
+            elif eff_datr_age >= 30.0:
+                score += 32
             elif eff_datr_age >= 21.0:
-                score += 20
+                score += 24
             elif eff_datr_age >= 14.0:
-                score += 15
-            elif eff_datr_age >= 10.0:
-                score += 11
-            elif eff_datr_age >= 7.0:
-                score += 7
-            elif eff_datr_age >= 3.0:
-                score += 3
-            elif eff_datr_age > 0.0:
-                score += 1
-
-            # 1b. Active Days & Session Consistency (max 18)
-            if active_days >= 18 and sess_cnt >= 30:
                 score += 18
-            elif active_days >= 14 and sess_cnt >= 25:
-                score += 15
-            elif active_days >= 10 and sess_cnt >= 18:
-                score += 11
-            elif active_days >= 7 and sess_cnt >= 12:
-                score += 8
-            elif active_days >= 5 and sess_cnt >= 7:
-                score += 5
-            elif active_days >= 3 and sess_cnt >= 4:
-                score += 3
-            elif active_days >= 2 and sess_cnt >= 2:
-                score += 1
-
-            # 1c. Cumulative Runtime Hours (max 17)
-            if total_mins >= 2100:
-                score += 17
-            elif total_mins >= 1200:
-                score += 14
-            elif total_mins >= 720:
-                score += 11
-            elif total_mins >= 480:
-                score += 8
-            elif total_mins >= 240:
-                score += 5
-            elif total_mins >= 120:
-                score += 3
-            elif total_mins >= 45:
-                score += 1
-
-            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 15)
-            if disk["hatch_gw"]:
-                score += 7
-            if hatch_vml or (disk["hatch_gw"] and not has_meta):
-                score += 3
-            if disk["hatch_sess"]:
+            elif eff_datr_age >= 10.0:
+                score += 13
+            elif eff_datr_age >= 7.0:
+                score += 9
+            elif eff_datr_age >= 3.0:
+                score += 4
+            elif eff_datr_age > 0.0:
                 score += 2
-            if disk["has_thread_url"]:
-                score += 3
 
-            # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Cross-Domain Sync & HTTP Cache2 ETag (max 10)
+            # 1b. Active Days & Session Consistency (max 30)
+            if active_days >= 28 and sess_cnt >= 50:
+                score += 30
+            elif active_days >= 20 and sess_cnt >= 35:
+                score += 26
+            elif active_days >= 14 and sess_cnt >= 25:
+                score += 22
+            elif active_days >= 10 and sess_cnt >= 18:
+                score += 17
+            elif active_days >= 7 and sess_cnt >= 12:
+                score += 13
+            elif active_days >= 5 and sess_cnt >= 7:
+                score += 8
+            elif active_days >= 3 and sess_cnt >= 4:
+                score += 5
+            elif active_days >= 2 and sess_cnt >= 2:
+                score += 2
+
+            # 1c. Cumulative Runtime Hours (max 25)
+            if total_mins >= 2700:
+                score += 25
+            elif total_mins >= 1800:
+                score += 22
+            elif total_mins >= 1200:
+                score += 18
+            elif total_mins >= 720:
+                score += 14
+            elif total_mins >= 480:
+                score += 11
+            elif total_mins >= 240:
+                score += 7
+            elif total_mins >= 120:
+                score += 4
+            elif total_mins >= 45:
+                score += 2
+
+            # 2. Hatch VM Gateway (`hatch_gw`), VM Locator (`hatch_vml`), OIDC Session & `/thread/` (max 20)
+            if disk["hatch_gw"]:
+                score += 9
+            if hatch_vml or (disk["hatch_gw"] and not has_meta):
+                score += 4
+            if disk["hatch_sess"]:
+                score += 3
+            if disk["has_thread_url"]:
+                score += 4
+
+            # 3. First-Party Storage (`ps_l`/`ps_n`), Meta/Muse Cross-Domain Sync, Cache2 ETag & Recovery Armor (max 15)
             if has_ps_l or (not has_meta and has_grecaptcha):
                 score += 3
             if (datr_domains >= 4 and cookie_count >= 18) or cookie_count >= 45:
@@ -2397,95 +2642,115 @@ class MonitorService:
             if has_cache2 and cookie_count > 0:
                 score += 3
 
-            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 15)
+            has_tfa = bool((p.two_fa or "").strip())
+            has_mtok = bool((p.mail_token or "").strip())
+            has_pwd_or_rec = bool(
+                (p.password or "").strip() or (p.recovery_email or "").strip()
+            )
+            has_recovery_key = bool(has_tfa or has_mtok)
+            has_recovery_armor = bool(has_tfa or (has_mtok and has_pwd_or_rec))
+            if has_recovery_armor:
+                score += 5
+            elif has_recovery_key:
+                score += 3
+            elif has_pwd_or_rec:
+                score += 1
+            clean_env = not (
+                has_meta_checkpoint or proxy_port_changed or ip_country_changed
+            )
+
+            # 4. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 20)
             if p.proxy:
                 if p.timezone and p.locale:
-                    score += 4
+                    score += 5
                 else:
                     score += 1
                 if ip_fraud_score is not None:
+                    ip_pts = 0
                     if ip_fraud_score <= 15 and not ip_proxy_flag:
-                        score += 11
+                        ip_pts = 15
                     elif ip_fraud_score <= 30 and not ip_proxy_flag:
-                        score += 9
+                        ip_pts = 12
                     elif ip_fraud_score <= 55:
-                        score += 6
+                        ip_pts = 9
                     elif ip_fraud_score < 65:
-                        score += 3
+                        ip_pts = 5
+                    if ip_fraud_score <= 55 and clean_env:
+                        if eff_datr_age >= 45.0 and active_days >= 28 and has_recovery_armor:
+                            ip_pts = 15
+                        elif eff_datr_age >= 30.0 and active_days >= 20 and has_recovery_key:
+                            ip_pts = max(ip_pts, 12)
+                    score += ip_pts
                 elif last_ip:
-                    score += 3
+                    score += 5
 
             # 5. Strict Meta Sigma Risk Penalties & Progressive Hard Gates (Safety Buffer)
             if has_meta_checkpoint:
-                score -= 30
+                score -= 40
             if disk["hatch_sess"] and not disk["hatch_gw"] and not disk.get("has_muse_auth"):
-                score -= 15
+                score -= 20
             if proxy_port_changed or ip_country_changed:
-                score -= 25
+                score -= 35
             if disk["burst_10m"] >= TOKEN_BURST_THRESHOLD:
-                score -= 15
+                score -= 20
             if sess_cnt >= 3 and (total_mins / max(1, sess_cnt)) < 5.0:
                 # Ping-check bot pattern (opening & closing in < 5m per session)
-                score -= 15
+                score -= 20
             elif sess_cnt >= 6 and (total_mins / max(1, sess_cnt)) < 8.0 and total_mins < 480:
-                score -= 6
+                score -= 8
             if has_meta and datr_domains < 2 and cookie_count < 10:
                 # Incomplete Meta/Muse cookie ecosystem state
-                score -= 10
+                score -= 12
 
-            score = max(0, min(100, score))
+            score = max(0, min(MAX_TRUST_SCORE, score))
 
-            if is_banned or (cookie_count == 0 and sess_cnt == 0 and history_pages == 0):
+            stage_cap, _, _ = _compute_stage_cap_and_code(
+                is_banned=is_banned,
+                cookie_count=cookie_count,
+                sess_cnt=sess_cnt,
+                history_pages=history_pages,
+                hatch_gw=bool(disk["hatch_gw"]),
+                eff_datr_age=eff_datr_age,
+                active_days=active_days,
+                total_mins=total_mins,
+                avg_mins=(total_mins / max(1, sess_cnt)) if sess_cnt > 0 else 0.0,
+                has_meta=has_meta,
+                datr_domains=datr_domains,
+                has_ps_l=has_ps_l,
+                has_thread_url=bool(disk["has_thread_url"]),
+                clean_env=clean_env,
+                ip_fraud_score=ip_fraud_score,
+                has_recovery_key=has_recovery_key,
+                has_recovery_armor=has_recovery_armor,
+            )
+            if stage_cap == 0:
                 trust_score = 0
+            elif stage_cap is not None:
+                trust_score = max(1, min(stage_cap, score))
             else:
-                if not disk["hatch_gw"]:
-                    trust_score = min(42, score)
-                elif eff_datr_age < 3.0 or active_days < 2 or total_mins < 30:
-                    # Stage 0a: Infant account (< 3d cookie or < 2 active days or < 30m total)
-                    trust_score = min(38, score)
-                elif eff_datr_age < 7.0 or active_days < 4 or total_mins < 120:
-                    # Stage 0b: Early warmup (< 7d cookie or < 4 active days or < 2h total)
-                    trust_score = min(48, score)
-                elif (
-                    eff_datr_age < 12.0
-                    or active_days < 7
-                    or sess_cnt < 12
-                    or total_mins < 480
-                    or ((total_mins / max(1, sess_cnt)) < 15.0 and total_mins < 900)
-                    or (has_meta and (datr_domains < 3 or not has_ps_l))
-                    or (has_meta and not disk["has_thread_url"])
-                    or has_meta_checkpoint
-                    or proxy_port_changed
-                    or ip_country_changed
-                ):
-                    # Stage 1: Mid/Late warmup — capped at 58 until passing all Trusted gates
-                    trust_score = min(58, score)
-                elif (
-                    eff_datr_age < 21.0
-                    or active_days < 14
-                    or sess_cnt < 25
-                    or total_mins < 1200
-                    or ((total_mins / max(1, sess_cnt)) < 20.0 and total_mins < 1800)
-                    or (has_meta and not disk["has_thread_url"])
-                    or (has_meta and datr_domains < 4)
-                    or (ip_fraud_score is not None and ip_fraud_score >= 65)
-                ):
-                    # Stage 2: Trusted — capped at 78 until passing all Diamond L21/14d/25sess/20h gates
-                    trust_score = min(78, score)
-                else:
-                    trust_score = score
-                trust_score = max(1, trust_score)
+                trust_score = max(1, score)
 
             if is_banned:
                 trust_tier = "banned"
-            elif trust_score >= 80:
+            elif trust_score >= 131:
                 trust_tier = "diamond"
                 snap.diamond_count += 1
+                snap.elite_count += 1
+                snap.platinum_count += 1
                 snap.trusted_count += 1
-            elif trust_score >= 60:
+            elif trust_score >= 106:
+                trust_tier = "elite"
+                snap.elite_count += 1
+                snap.platinum_count += 1
+                snap.trusted_count += 1
+            elif trust_score >= 81:
+                trust_tier = "platinum"
+                snap.platinum_count += 1
+                snap.trusted_count += 1
+            elif trust_score >= 56:
                 trust_tier = "trusted"
                 snap.trusted_count += 1
-            elif trust_score >= 35:
+            elif trust_score >= 21:
                 trust_tier = "warming"
             else:
                 trust_tier = "cold"
@@ -2573,6 +2838,8 @@ class MonitorService:
                 has_muse_auth=bool(disk.get("has_muse_auth")),
                 has_proxy=bool(p.proxy),
                 has_geo_pin=bool(p.proxy and p.timezone and p.locale),
+                has_recovery_key=has_recovery_key,
+                has_recovery_armor=has_recovery_armor,
             )
 
         self._populate_audit_findings(profiles, disk_map, snap)

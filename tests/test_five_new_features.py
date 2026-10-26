@@ -2431,9 +2431,9 @@ def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
     assert d_info.cookie_count >= 60
     assert d_info.history_pages >= 50
     assert d_info.ip_fraud_score == 0
-    assert d_info.trust_score >= 85
-    assert d_info.trust_tier == "diamond"
-    assert snap.diamond_count == 1
+    assert d_info.trust_score >= 95
+    assert d_info.trust_tier == "platinum"
+    assert snap.platinum_count == 1
     assert snap.clean_ip_count == 1
 
     assert b_info.is_banned is True
@@ -2584,11 +2584,11 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
     assert w_info.active_days == 14
     assert w_info.session_count == 25
     assert w_info.total_minutes == 1250
-    assert w_info.trust_score >= 80
-    assert w_info.trust_tier == "diamond"
+    assert w_info.trust_score >= 81
+    assert w_info.trust_tier == "platinum"
 
     assert cf_info.hatch_gw is False
-    assert cf_info.trust_score <= 45
+    assert cf_info.trust_score <= 25
 
 
 def test_safe_farming_scheduler_and_dialog(isolated_pm, tmp_path):
@@ -3118,20 +3118,20 @@ def test_trust_score_breakdown_and_ui_dialogs():
         total_minutes=300,
         ip_fraud_score=26,
         ip_proxy_flag=False,
-        trust_score=48,
+        trust_score=43,
         trust_tier="warming",
         has_proxy=True,
         has_geo_pin=True,
     )
     bd = compute_trust_breakdown(info_warm, p)
     assert len(bd["pillars"]) == 6
-    assert sum(pil["max_pts"] for pil in bd["pillars"]) == 100
-    assert bd["positive_total"] == (3 + 5 + 5 + 15 + 10 + 13)  # 51
+    assert sum(pil["max_pts"] for pil in bd["pillars"]) == 150
+    assert bd["positive_total"] == (4 + 8 + 7 + 20 + 10 + 17)  # 66
     assert bd["penalty_total"] == 0
-    assert bd["raw_score"] == 51
-    assert bd["stage_cap"] == 48
-    assert bd["capped_by"] == 3
-    assert bd["final_score"] == 48
+    assert bd["raw_score"] == 66
+    assert bd["stage_cap"] == 43
+    assert bd["capped_by"] == 23
+    assert bd["final_score"] == 43
     assert any(not g["passed"] for g in bd["gates"])
 
     panel = _build_trust_breakdown_panel(info_warm, p)
@@ -3346,6 +3346,146 @@ def test_build_safe_schedule_preserves_existing_applied_tags(isolated_pm, tmp_pa
     disp_t = resolve_status_display("T2-C2-T")
     assert disp_s is not None and disp_s[0] == "T2·C1·Sáng"
     assert disp_t is not None and disp_t[0] == "T2·C2·Tối"
+
+
+def test_master_and_immortal_trust_tiers_above_diamond(tmp_path):
+    from src.services.monitor import MonitorService, compute_trust_breakdown
+    from src.ui.components.profile_card import _geo_score_badge
+    from src.ui.dialogs.batch_and_backup import (
+        _build_trust_breakdown_panel,
+        _build_trust_score_chip,
+    )
+
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    now_ts = time.time()
+    now_exp = int(now_ts + 86400 * 30)
+
+    def _seed_profile_dir(name: str, datr_days: float) -> None:
+        pdir = data_dir / name
+        pdir.mkdir()
+        (pdir / "cache2").mkdir()
+        (pdir / "tabs.json").write_text('{"tabs": ["https://muse.ai/thread/abc"]}', encoding="utf-8")
+        ctime = int((now_ts - 86400 * datr_days) * 1_000_000)
+        conn = sqlite3.connect(str(pdir / "cookies.sqlite"))
+        conn.execute(
+            "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
+        )
+        rows = [
+            (".muse.ai", "hatch_gw", ctime, now_exp),
+            (".muse.ai", "hatch_vml", ctime, now_exp),
+            (".muse.ai", "hatch_sess", ctime, now_exp),
+            (".muse.ai", "datr", ctime, now_exp),
+            (".auth.meta.com", "datr", ctime, now_exp),
+            (".accountscenter.meta.com", "datr", ctime, now_exp),
+            (".facebook.com", "datr", ctime, now_exp),
+            (".facebook.com", "ps_l", ctime, now_exp),
+        ]
+        for i in range(15):
+            rows.append((".facebook.com", f"ck_{i}", ctime, now_exp))
+        conn.executemany("INSERT INTO moz_cookies VALUES (?, ?, ?, ?)", rows)
+        conn.commit()
+        conn.close()
+
+    _seed_profile_dir("Platinum22d", 22.0)
+    _seed_profile_dir("Elite32d", 32.0)
+    _seed_profile_dir("Diamond48d", 48.0)
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    # 1. Platinum22d: 15 active days, 26 sessions, 1560m -> passes Platinum (same 21d difficulty), capped at 105
+    mon._live_sessions["Platinum22d"] = [
+        {
+            "start": f"2026-10-{1 + (idx % 15):02d} 10:{idx:02d}:00",
+            "end": f"2026-10-{1 + (idx % 15):02d} 11:{idx:02d}:00",
+            "duration_mins": 60,
+            "port": ":10001",
+            "is_live": False,
+        }
+        for idx in range(26)
+    ]
+    # 2. Elite32d: 21 active days, 36 sessions, 2160m (36h) + mail_token -> passes Elite (30d), capped at 130
+    mon._live_sessions["Elite32d"] = [
+        {
+            "start": f"2026-10-{1 + (idx % 21):02d} 10:{idx % 60:02d}:00",
+            "end": f"2026-10-{1 + (idx % 21):02d} 11:{idx % 60:02d}:00",
+            "duration_mins": 60,
+            "port": ":10002",
+            "is_live": False,
+        }
+        for idx in range(36)
+    ]
+    # 3. Diamond48d: 29 active days, 52 sessions, 3120m (52h) + mail_token + password -> Diamond (131-150)
+    mon._live_sessions["Diamond48d"] = [
+        {
+            "start": f"2026-10-{1 + (idx % 29):02d} 10:{idx % 60:02d}:00",
+            "end": f"2026-10-{1 + (idx % 29):02d} 11:{idx % 60:02d}:00",
+            "duration_mins": 60,
+            "port": ":10003",
+            "is_live": False,
+        }
+        for idx in range(52)
+    ]
+
+    for idx, pname in enumerate(["Platinum22d", "Elite32d", "Diamond48d"], 1):
+        ip = f"2606:65c0:40:2d{idx}::1"
+        mon.record_exit_ip(pname, ip, country="US", proxy=f"http://u:p@1.2.3.4:1000{idx}")
+        mon.record_ip_risk(ip, {"fraud_score": 51, "proxy_flag": True})
+
+    profiles = [
+        Profile(
+            name="Platinum22d",
+            proxy="http://u:p@1.2.3.4:10001",
+            timezone="America/Detroit",
+            locale="en-US",
+            mail_token="M.C501_BAY.0.U.-token1|client1",
+        ),
+        Profile(
+            name="Elite32d",
+            proxy="http://u:p@1.2.3.4:10002",
+            timezone="America/Detroit",
+            locale="en-US",
+            mail_token="M.C501_BAY.0.U.-token2|client2",
+        ),
+        Profile(
+            name="Diamond48d",
+            proxy="http://u:p@1.2.3.4:10003",
+            timezone="America/Detroit",
+            locale="en-US",
+            mail_token="M.C501_BAY.0.U.-token3|client3",
+            password="secret_password",
+            recovery_email="rec@gmail.com",
+        ),
+    ]
+
+    snap = mon.snapshot(profiles, running_names=set())
+    p_info = snap.profiles["Platinum22d"]
+    e_info = snap.profiles["Elite32d"]
+    d_info = snap.profiles["Diamond48d"]
+
+    assert p_info.trust_tier == "platinum"
+    assert 81 <= p_info.trust_score <= 105
+
+    assert e_info.trust_tier == "elite"
+    assert 106 <= e_info.trust_score <= 130
+
+    assert d_info.trust_tier == "diamond"
+    assert 131 <= d_info.trust_score <= 150
+    assert d_info.trust_score == 150
+
+    assert snap.diamond_count == 1
+    assert snap.elite_count == 2
+    assert snap.platinum_count == 3
+
+    for p_obj, info_obj in zip(profiles, [p_info, e_info, d_info], strict=True):
+        bd = compute_trust_breakdown(info_obj, p_obj)
+        assert bd["final_score"] == info_obj.trust_score
+        assert _geo_score_badge(info_obj) is not None
+        assert _build_trust_score_chip(info_obj) is not None
+        assert _build_trust_breakdown_panel(info_obj, p_obj) is not None
+
 
 
 

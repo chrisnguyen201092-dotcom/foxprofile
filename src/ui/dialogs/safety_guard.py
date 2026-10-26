@@ -1019,14 +1019,28 @@ def _build_squad_candidate_row(
     cluster_col = "#0284C7" if is_gw else "#059669"
     tier_sym = {
         "diamond": "✦",
+        "elite": "🛡️",
+        "platinum": "❖",
         "trusted": "◈",
         "warming": "◇",
         "cold": "○",
     }.get(cand.trust_tier, "◈")
     tier_col = (
-        "#15803D"
+        "#1D4ED8"
         if cand.trust_tier == "diamond"
-        else ("#1D4ED8" if cand.trust_tier == "trusted" else COLORS["accent"])
+        else (
+            "#15803D"
+            if cand.trust_tier == "elite"
+            else (
+                "#7C3AED"
+                if cand.trust_tier == "platinum"
+                else (
+                    "#B45309"
+                    if cand.trust_tier == "trusted"
+                    else (COLORS["text_dim"] if cand.trust_tier == "warming" else "#F472B6")
+                )
+            )
+        )
     )
     display_name = (
         cand.name

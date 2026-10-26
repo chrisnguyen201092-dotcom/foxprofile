@@ -964,6 +964,8 @@ def _geo_score_badge(
 
     tier_sym = {
         "diamond": "✦",
+        "elite": "🛡️",
+        "platinum": "❖",
         "trusted": "◈",
         "warming": "◇",
         "cold": "○",
@@ -974,26 +976,38 @@ def _geo_score_badge(
         COLORS["error"]
         if t_tier == "banned"
         else (
-            "#15803D"
+            "#1D4ED8"
             if t_tier == "diamond"
             else (
-                "#1D4ED8"
-                if t_tier == "trusted"
-                else (COLORS["accent"] if t_tier == "warming" else COLORS["text_dim"])
+                "#15803D"
+                if t_tier == "elite"
+                else (
+                    "#7C3AED"
+                    if t_tier == "platinum"
+                    else (
+                        "#B45309"
+                        if t_tier == "trusted"
+                        else (COLORS["text_dim"] if t_tier == "warming" else "#F472B6")
+                    )
+                )
             )
         )
     )
+    tier_name = {
+        "diamond": "Kim Cương",
+        "elite": "Tin cậy",
+        "platinum": "Bền vững",
+        "trusted": "Ổn định",
+        "warming": "Tích lũy",
+        "cold": "Khởi tạo",
+        "banned": "Tạm ngưng / Khóa",
+    }.get(t_tier, "Ổn định")
     text_val = "✕ Ban" if t_tier == "banned" else f"{tier_sym} {t_score}"
     datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
     act_d = int(getattr(monitor_info, "active_days", 0) or 0)
     f_score = getattr(monitor_info, "ip_fraud_score", None)
     ip_part = f" · IP Risk {f_score}/100" if f_score is not None and f_score >= 0 else ""
-    base_tip = f"Meta Trust: {tier_sym} {t_score}/100 · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
-    tip = (
-        f"{base_tip} ({get_string('tooltip_trust_breakdown')})"
-        if on_click is not None
-        else base_tip
-    )
+    tip = f"{tier_sym} {tier_name} ({t_score}/150đ) · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=5, vertical=1),
         border_radius=4,

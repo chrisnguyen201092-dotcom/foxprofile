@@ -23,7 +23,12 @@ import re
 from dataclasses import dataclass, field
 
 from ..models.profile import Profile, parse_schedule_shift, parse_schedule_tag
-from .monitor import MonitorSnapshot, extract_proxy_endpoint, extract_proxy_port
+from .monitor import (
+    MonitorSnapshot,
+    ProfileMonitorInfo,
+    extract_proxy_endpoint,
+    extract_proxy_port,
+)
 
 _RE_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 _RE_USA_CLUSTER = re.compile(r"\b(usa\d+)\b", re.IGNORECASE)
@@ -1266,6 +1271,56 @@ class SquadCandidate:
     hatch_gw: bool
     is_rising_star: bool = False
     is_conflict: bool = False
+    schedule_label: str = ""
+
+
+def _resolve_profile_schedule_priority(
+    p: Profile,
+    info: ProfileMonitorInfo,
+    now_dt: dt.datetime,
+    *,
+    has_active_schedule: bool,
+) -> tuple[int, int, str]:
+    """Return `(sched_tier, pair_order, schedule_label)` to align work squads with Today's schedule.
+
+    When `has_active_schedule` is True:
+    - `sched_tier == 0`: Tagged for Today (`T2` on Monday, etc.) and has NOT run today yet.
+    - `sched_tier == 1`: Part of Today's farming cohort that already ran earlier today (either still
+      tagged for Today, or its Today tag was auto-cleared upon closing its browser today).
+    - `sched_tier == 2 + day_offset`: Tagged for a future day (`T3..CN`, offset 1..6 days ahead).
+    - `sched_tier == 9`: Untagged profile that has not run today (e.g. yesterday's completed cohort resting).
+    """
+    parsed_sched = parse_schedule_tag(p.status)
+    shift_code = parse_schedule_shift(p.status)
+    lc = info.last_closed
+    ran_today = bool(
+        info.today_minutes > 0 or (lc is not None and lc.date() == now_dt.date())
+    )
+    today_wd_idx = now_dt.weekday()
+    today_wd_tag = WEEKDAY_TAGS[today_wd_idx]
+
+    if parsed_sched is not None:
+        day_tag, pair_idx = parsed_sched
+        shift_suffix = (
+            "·Sáng" if shift_code == "S" else ("·Tối" if shift_code == "T" else "")
+        )
+        sched_label = f"{day_tag}·C{pair_idx}{shift_suffix}"
+        pair_order = (0 if shift_code == "S" else 1) * 50 + pair_idx
+        if not has_active_schedule:
+            return (0, pair_order, sched_label)
+        if day_tag == today_wd_tag:
+            return (0 if not ran_today else 1, pair_order, sched_label)
+        day_idx = WEEKDAY_TAGS.index(day_tag) if day_tag in WEEKDAY_TAGS else 6
+        day_offset = (day_idx - today_wd_idx) % 7 or 7
+        return (2 + day_offset, pair_order, sched_label)
+
+    if not has_active_schedule:
+        return (0, 99, "")
+
+    if ran_today:
+        return (1, 90, f"Lịch {today_wd_tag}")
+
+    return (9, 99, "")
 
 
 @dataclass
@@ -1337,7 +1392,7 @@ def _build_fixed_work_squad_plan(
             if lc is not None
             else 72.0
         )
-        is_rising = bool(info.hatch_gw and 48 <= info.trust_score < 80)
+        is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
         is_conflict = (p.name not in active_set) and (
             bool(info.has_warning)
             or bool(info.cluster_busy_by)
@@ -1362,11 +1417,12 @@ def _build_fixed_work_squad_plan(
         cand_by_name[p.name] = cand
 
         gw_rank = 0 if info.hatch_gw else (1 if info.hatch_sess else 2)
-        tier_rank = (
-            0
-            if info.trust_tier == "diamond"
-            else (1 if info.trust_tier == "trusted" else 2)
-        )
+        tier_rank = {
+            "diamond": -2,
+            "elite": -1,
+            "platinum": 0,
+            "trusted": 1,
+        }.get(info.trust_tier, 2)
         jitter = _jitter_hash(p.name, shuffle_seed + 19) if shuffle_seed > 0 else 0.0
         rank_by_name[p.name] = (gw_rank, tier_rank, jitter, p.name.casefold())
 
@@ -1635,7 +1691,7 @@ def select_parallel_work_squad(
             if lc is not None
             else 72.0
         )
-        is_rising = bool(info.hatch_gw and 48 <= info.trust_score < 80)
+        is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
         cand = SquadCandidate(
             name=p.name,
             email=(p.email or p.name).strip(),
