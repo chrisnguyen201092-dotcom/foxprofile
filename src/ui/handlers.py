@@ -7,7 +7,7 @@ import flet as ft
 
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
-from ..services.monitor import MonitorService
+from ..services.monitor import MonitorService, extract_proxy_endpoint
 from ..services.proxy.geo_check import (
     derive_ip_metadata,
     extract_ip_from_check_detail,
@@ -358,6 +358,16 @@ class AppHandlers:
                 return True
             return False
 
+        def _get_exit_ips() -> dict[str, str]:
+            if self._monitor is None:
+                return {}
+            out: dict[str, str] = {}
+            for pname in self._pm.profiles:
+                hist = self._monitor.get_ip_history(pname)
+                if hist and hist[0].get("ip"):
+                    out[pname] = str(hist[0]["ip"])
+            return out
+
         open_proxy_pool_dialog(
             page,
             self._pm.list_profiles,
@@ -370,6 +380,7 @@ class AppHandlers:
             on_add_to_pool=_add_to_pool,
             on_remove_from_pool=_remove_from_pool,
             on_assign_to_profile=_assign_to_profile,
+            get_exit_ips=_get_exit_ips,
         )
 
     def on_open_mail_pool(self) -> None:
@@ -802,7 +813,13 @@ class AppHandlers:
         if page is None or p is None or not p.proxy:
             return
         proxy_str = p.proxy
-        siblings = [prof.name for prof in self._pm.profiles.values() if prof.proxy == proxy_str]
+        ep_key = extract_proxy_endpoint(proxy_str)
+        siblings = [
+            prof.name
+            for prof in self._pm.profiles.values()
+            if prof.proxy == proxy_str
+            or (ep_key and extract_proxy_endpoint(prof.proxy) == ep_key)
+        ]
         for sib in siblings:
             self._state.proxy_status[sib] = ("checking", f"⏳ {get_string('proxy_checking')}")
         self._refresh()

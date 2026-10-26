@@ -880,7 +880,9 @@ def _proxy(
     elif monitor_info is not None and getattr(monitor_info, "cluster_busy_by", None):
         sub_label = get_string(
             "proxy_cluster_busy_by",
-            cluster=getattr(monitor_info, "cluster", "") or "/64",
+            cluster=getattr(monitor_info, "cluster_collision_label", "")
+            or getattr(monitor_info, "cluster", "")
+            or "/64",
             other=monitor_info.cluster_busy_by[0],
         )
         sub_color = COLORS["warning"]

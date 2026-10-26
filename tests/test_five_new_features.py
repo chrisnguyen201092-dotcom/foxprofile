@@ -3695,3 +3695,90 @@ def test_disconnected_shared_port_exclusion_and_reopen_guard(isolated_pm, tmp_pa
     assert any(it.code == "port_reassigned_live" and it.level == "critical" for it in issues_dead)
 
 
+def test_ip_and_subnet_collision_detection_comprehensive(isolated_pm, tmp_path):
+    from src.services.monitor import MonitorService, extract_proxy_endpoint
+    from src.services.scheduler import build_safe_schedule, select_parallel_work_squad
+
+    # 1. Canonical endpoint: aliases on the same usa10X server match, while different servers with same port differ
+    assert (
+        extract_proxy_endpoint("socks5://u:p@sp02-usa101.nguonproxy.com:10849")
+        == extract_proxy_endpoint("socks5://u:p@sp02-usa101.proxy.mkvn.net:10849")
+        == "usa101:10849"
+    )
+    assert extract_proxy_endpoint("socks5://u:p@sp02-usa101.nguonproxy.com:10778") != (
+        extract_proxy_endpoint("socks5://u:p@sp02-usa109.nguonproxy.com:10778")
+    )
+
+    # 2. ProfileManager pool deduplication respects server+port (does not reject same port on different server)
+    added, skipped = isolated_pm.add_proxies_to_pool(
+        [
+            "socks5://u:p@sp02-usa101.nguonproxy.com:10778",
+            "socks5://u:p@sp02-usa109.nguonproxy.com:10778",
+            "socks5://u:p@sp02-usa101.proxy.mkvn.net:10778",  # alias of usa101:10778 -> skipped
+        ]
+    )
+    assert added == 2
+    assert skipped == 1
+
+    # 3. MonitorService: exact exit IP collision & gateway /64 subnet collision vs distinct gateway /64s
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    gw1 = "http://u:p@209.141.40.174:12716"
+    gw2 = "http://u:p@209.141.40.174:12720"
+    gw3 = "http://u:p@209.141.40.174:12730"
+    u101 = "socks5://u:p@sp02-usa101.nguonproxy.com:10849"
+
+    isolated_pm.add_profile(
+        "GW_A", gw1, "windows", timezone="America/Los_Angeles", locale="en-US", email="a@test.com"
+    )
+    isolated_pm.add_profile(
+        "GW_B_Distinct", gw2, "windows", timezone="America/Los_Angeles", locale="en-US", email="b@test.com"
+    )
+    isolated_pm.add_profile(
+        "GW_C_Same64", gw3, "windows", timezone="America/Los_Angeles", locale="en-US", email="c@test.com"
+    )
+    isolated_pm.add_profile(
+        "USA_D_SameIP", u101, "windows", timezone="America/Detroit", locale="en-US", email="d@test.com"
+    )
+
+    # Record distinct /64 for GW_A and GW_B_Distinct, same /64 for GW_C_Same64, and exact same IP for USA_D_SameIP
+    mon.record_exit_ip("GW_A", "2605:6400:48d1:0770::1", country="US", proxy=gw1)
+    mon.record_exit_ip("GW_B_Distinct", "2605:6400:479b:af74::1", country="US", proxy=gw2)
+    mon.record_exit_ip("GW_C_Same64", "2605:6400:48d1:0770::99", country="US", proxy=gw3)
+    mon.record_exit_ip("USA_D_SameIP", "2605:6400:48d1:0770::1", country="US", proxy=u101)
+
+    p_list = list(isolated_pm.profiles.values())
+    snap = mon.snapshot(p_list, running_names={"GW_A"})
+
+    # GW_B_Distinct has a completely different /64 on 209.141.40.174 -> NO collision when GW_A is running!
+    assert snap.profiles["GW_B_Distinct"].cluster_busy_by == []
+    assert snap.profiles["GW_B_Distinct"].can_open_parallel is True
+
+    # GW_C_Same64 shares 2605:6400:48d1:0770::/64 with running GW_A -> blocked with /64 label!
+    assert snap.profiles["GW_C_Same64"].cluster_busy_by == ["GW_A"]
+    assert "2605:6400:48d1:0770::/64" in snap.profiles["GW_C_Same64"].cluster_collision_label
+    assert snap.profiles["GW_C_Same64"].can_open_parallel is False
+
+    # USA_D_SameIP shares exact exit IP with running GW_A -> blocked!
+    assert snap.profiles["USA_D_SameIP"].cluster_busy_by == ["GW_A"]
+    pre_d = mon.check_prelaunch(isolated_pm.profiles["USA_D_SameIP"], p_list, {"GW_A"})
+    assert any(w.code == "cluster_busy" for w in pre_d)
+
+    # Audit findings catch both duplicate_exit_ip and duplicate_gateway_subnet
+    audit_codes = {f.code for f in snap.audit_findings}
+    assert "duplicate_exit_ip" in audit_codes
+    assert "duplicate_gateway_subnet" in audit_codes
+
+    # 4. Scheduler: when GW_C_Same64 and USA_D_SameIP get distinct /64s, pairing two distinct-subnet gateway ports has 0 collisions
+    mon.record_exit_ip("GW_C_Same64", "2605:6400:48d1:8aa9::1", country="US", proxy=gw3)
+    mon.record_exit_ip("USA_D_SameIP", "2606:65c0:0040:02ca::1", country="US", proxy=u101)
+    snap_clean = mon.snapshot(p_list, running_names=set())
+    plan = build_safe_schedule(p_list, snap_clean, cycle_days=2, shuffle_seed=42)
+    assert plan.collision_count == 0
+    sq = select_parallel_work_squad(p_list, snap_clean, set(), count=3, mode="rotation")
+    assert len({c.v6_prefix for c in sq.candidates}) == len(sq.candidates)
+
+
+

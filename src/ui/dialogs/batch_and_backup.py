@@ -13,8 +13,12 @@ from ...models.profile import Profile
 from ...services.monitor import (
     MonitorSnapshot,
     ProfileMonitorInfo,
+    _ipv6_prefix_64,
     compute_trust_breakdown,
+    extract_proxy_cluster,
+    extract_proxy_endpoint,
     extract_proxy_port,
+    is_gateway_ipv6_cluster,
 )
 from ...services.proxy.geo_check import (
     derive_ip_metadata,
@@ -502,11 +506,12 @@ def open_proxy_pool_dialog(
     on_add_to_pool: Callable[[list[str]], tuple[int, int]] | None = None,
     on_remove_from_pool: Callable[[str], bool] | None = None,
     on_assign_to_profile: Callable[[str, str], bool] | None = None,
+    get_exit_ips: Callable[[], dict[str, str]] | None = None,
 ) -> None:
     """Central Proxy Manager dialog: view all unique proxies, spare unassigned proxies, test, assign, or replace."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=6, height=540, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, height=600, scroll=ft.ScrollMode.AUTO)
     editing_target: list[str | None] = [None]
     assigning_target: list[str | None] = [None]
     adding_open: list[bool] = [False]
@@ -634,7 +639,14 @@ def open_proxy_pool_dialog(
         running = get_running()
         status_map = get_proxy_status()
         unassigned_list = get_unassigned() if get_unassigned is not None else []
+        saved_ips = get_exit_ips() if get_exit_ips is not None else {}
 
+        def _is_prof_disconnected(prof_obj: Profile) -> bool:
+            grp = (prof_obj.group or "").strip().lower()
+            pgs = [pg.strip().lower() for pg in (prof_obj.pages or [])]
+            return bool(prof_obj.banned_at or grp == "disconnected" or "disconnected" in pgs)
+
+        prof_by_name = {p.name: p for p in profiles}
         by_proxy: dict[str, list[str]] = {}
         direct_count = 0
         for p in profiles:
@@ -643,6 +655,145 @@ def open_proxy_pool_dialog(
                 direct_count += 1
             else:
                 by_proxy.setdefault(px, []).append(p.name)
+
+        # Resolve known exit IP for every proxy and compute exact-IP & /64 subnet separation
+        resolved_px_ip: dict[str, str] = {}
+        ip_to_eps: dict[str, set[str]] = {}
+        v6_to_eps: dict[str, set[str]] = {}
+        cl_to_eps: dict[str, set[str]] = {}
+
+        for free_px in unassigned_list:
+            ep_key = extract_proxy_endpoint(free_px) or free_px
+            cl_k = extract_proxy_cluster(free_px)
+            if cl_k and not is_gateway_ipv6_cluster(cl_k):
+                cl_to_eps.setdefault(cl_k, set()).add(ep_key)
+            f_st = local_px_status.get(free_px)
+            raw_ip = extract_ip_from_check_detail(f_st[1]) if (f_st and f_st[0] == "ok") else ""
+            if raw_ip:
+                resolved_px_ip[free_px] = raw_ip
+                ip_to_eps.setdefault(raw_ip.lower(), set()).add(ep_key)
+                v6_p = _ipv6_prefix_64(raw_ip)
+                if v6_p:
+                    v6_to_eps.setdefault(v6_p, set()).add(ep_key)
+
+        for px_str, member_names in by_proxy.items():
+            all_disc = all(
+                _is_prof_disconnected(prof_by_name[m])
+                for m in member_names
+                if m in prof_by_name
+            )
+            ep_key = extract_proxy_endpoint(px_str) or px_str
+            cl_k = extract_proxy_cluster(px_str)
+            if not all_disc and cl_k and not is_gateway_ipv6_cluster(cl_k):
+                cl_to_eps.setdefault(cl_k, set()).add(ep_key)
+            first_m = member_names[0]
+            st_p = local_px_status.get(px_str) or status_map.get(first_m)
+            raw_ip = extract_ip_from_check_detail(st_p[1]) if (st_p and st_p[0] == "ok") else ""
+            if not raw_ip:
+                for m_name in member_names:
+                    if saved_ips.get(m_name):
+                        raw_ip = saved_ips[m_name].strip()
+                        break
+            if raw_ip:
+                resolved_px_ip[px_str] = raw_ip
+                if not all_disc:
+                    ip_to_eps.setdefault(raw_ip.lower(), set()).add(ep_key)
+                    v6_p = _ipv6_prefix_64(raw_ip)
+                    if v6_p:
+                        v6_to_eps.setdefault(v6_p, set()).add(ep_key)
+
+        def _build_subnet_badge(px_str: str, *, is_retired: bool = False) -> ft.Control | None:
+            if is_retired:
+                return ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                    border_radius=4,
+                    bgcolor=ft.Colors.with_opacity(0.12, COLORS["text_dim"]),
+                    border=ft.Border.all(1, COLORS["rule_strong"]),
+                    content=ft.Text(
+                        "Ngưng dùng (Disconnected)",
+                        size=10,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_dim"],
+                    ),
+                )
+            ip_val = resolved_px_ip.get(px_str, "")
+            cl_key = extract_proxy_cluster(px_str)
+            is_gw = is_gateway_ipv6_cluster(cl_key)
+            cl_cnt = len(cl_to_eps.get(cl_key, set())) if (cl_key and not is_gw) else 0
+            if not ip_val:
+                if cl_key and not is_gw and cl_cnt > 1:
+                    col = COLORS["warning"]
+                    return ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=ft.Colors.with_opacity(0.13, col),
+                        border=ft.Border.all(1, col),
+                        tooltip=f"Thuộc máy chủ /64 {cl_key} ({cl_cnt} cổng đang gắn) — hệ thống tự động xếp lịch cách ca",
+                        content=ft.Text(
+                            f"🔗 Cụm /64 {cl_key} · {cl_cnt} cổng",
+                            size=10,
+                            font_family=FONT_SEMIBOLD,
+                            color=col,
+                        ),
+                    )
+                if cl_key and not is_gw and cl_cnt == 1:
+                    col = COLORS["success"]
+                    return ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=ft.Colors.with_opacity(0.13, col),
+                        border=ft.Border.all(1, col),
+                        tooltip=f"Máy chủ /64 {cl_key} duy nhất trong kho — mở song song an toàn 100%",
+                        content=ft.Text(
+                            "🛡️ Độc lập /64",
+                            size=10,
+                            font_family=FONT_SEMIBOLD,
+                            color=col,
+                        ),
+                    )
+                return None
+            ip_low = ip_val.lower()
+            v6_p = _ipv6_prefix_64(ip_val)
+            dup_ip_cnt = len(ip_to_eps.get(ip_low, set()))
+            dup_v6_cnt = max(len(v6_to_eps.get(v6_p, set())) if v6_p else 0, cl_cnt)
+
+            if dup_ip_cnt > 1:
+                lbl = f"⛔ TRÙNG IP · {dup_ip_cnt} cổng"
+                col = COLORS["error"]
+                tip = f"Trùng chính xác địa chỉ IP {ip_val} trên {dup_ip_cnt} cổng proxy khác nhau!"
+            elif v6_p and is_gw and dup_v6_cnt > 1:
+                lbl = f"⚠️ TRÙNG /64 GATEWAY · {dup_v6_cnt} cổng"
+                col = COLORS["error"]
+                tip = f"Trùng dải /64 ({v6_p}::/64) trên {dup_v6_cnt} cổng Gateway!"
+            elif v6_p and dup_v6_cnt <= 1:
+                lbl = "🛡️ Độc lập /64"
+                col = COLORS["success"]
+                tip = f"Dải /64 riêng biệt hoàn toàn: {v6_p}::/64 (mở song song an toàn 100%)"
+            elif v6_p and dup_v6_cnt > 1:
+                lbl = f"🔗 Cụm /64 {cl_key or v6_p[-4:]} · {dup_v6_cnt} cổng"
+                col = COLORS["warning"]
+                tip = (
+                    f"Chung máy chủ /64 ({v6_p}::/64) nhưng khác IP /128 ({ip_val}) — "
+                    "FoxProfile tự động chặn mở cùng lúc và chia khác ca/ngày"
+                )
+            else:
+                lbl = "🛡️ IP Độc lập"
+                col = COLORS["success"]
+                tip = f"IP riêng biệt: {ip_val}"
+
+            return ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.13, col),
+                border=ft.Border.all(1, col),
+                tooltip=tip,
+                content=ft.Text(
+                    lbl,
+                    size=10,
+                    font_family=FONT_SEMIBOLD,
+                    color=col,
+                ),
+            )
 
         assigned_count = len(profiles) - direct_count
         stats_text.value = get_string(
@@ -674,7 +825,29 @@ def open_proxy_pool_dialog(
             free_masked = mask_proxy(free_px)
             is_assigning = assigning_target[0] == free_px
             free_st = local_px_status.get(free_px)
-            free_st_controls: list[ft.Control] = []
+            free_top_badges: list[ft.Control] = []
+            free_sub_controls: list[ft.Control] = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                    border_radius=4,
+                    bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
+                    border=ft.Border.all(1, COLORS["success"]),
+                    content=ft.Text(
+                        get_string("proxy_pool_unassigned_badge"),
+                        size=10,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["success"],
+                    ),
+                ),
+                ft.Text(
+                    get_string("proxy_pool_unassigned_sub"),
+                    size=11.5,
+                    color=COLORS["text_sub"],
+                ),
+            ]
+            f_sub_badge = _build_subnet_badge(free_px)
+            if f_sub_badge is not None:
+                free_top_badges.append(f_sub_badge)
             if free_st is not None:
                 f_kind, f_msg = free_st
                 f_col = (
@@ -682,8 +855,18 @@ def open_proxy_pool_dialog(
                     if f_kind == "ok"
                     else (COLORS["accent"] if f_kind == "checking" else COLORS["error"])
                 )
-                free_st_controls.append(
-                    ft.Text(f_msg, size=11.5, font_family=FONT_DATA, color=f_col)
+                free_sub_controls.extend(
+                    [
+                        ft.Text("·", size=11.5, color=COLORS["text_dim"]),
+                        ft.Text(
+                            f_msg,
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            color=f_col,
+                            no_wrap=True,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ]
                 )
 
             def _toggle_assign(target_px: str = free_px) -> Callable[[ft.ControlEvent], None]:
@@ -729,55 +912,47 @@ def open_proxy_pool_dialog(
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=12,
                     controls=[
-                        ft.Column(
-                            spacing=3,
+                        ft.Container(
                             expand=True,
-                            controls=[
-                                ft.Row(
-                                    spacing=8,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    controls=[
-                                        ft.Container(
-                                            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                                            border_radius=5,
-                                            bgcolor=COLORS["accent"],
-                                            content=ft.Text(
-                                                free_port,
-                                                size=11.5,
+                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                            content=ft.Column(
+                                spacing=3,
+                                controls=[
+                                    ft.Row(
+                                        spacing=8,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=[
+                                            ft.Container(
+                                                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                                border_radius=5,
+                                                bgcolor=COLORS["accent"],
+                                                content=ft.Text(
+                                                    free_port,
+                                                    size=11.5,
+                                                    font_family=FONT_DATA,
+                                                    color="#FFFFFF",
+                                                ),
+                                            ),
+                                            ft.Text(
+                                                free_masked,
+                                                size=12.5,
                                                 font_family=FONT_DATA,
-                                                color="#FFFFFF",
+                                                color=COLORS["text_main"],
+                                                no_wrap=True,
+                                                overflow=ft.TextOverflow.ELLIPSIS,
                                             ),
-                                        ),
-                                        ft.Text(
-                                            free_masked,
-                                            size=12.5,
-                                            font_family=FONT_DATA,
-                                            color=COLORS["text_main"],
-                                            no_wrap=True,
-                                            overflow=ft.TextOverflow.ELLIPSIS,
-                                        ),
-                                        ft.Container(
-                                            padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                                            border_radius=4,
-                                            bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
-                                            border=ft.Border.all(1, COLORS["success"]),
-                                            content=ft.Text(
-                                                get_string("proxy_pool_unassigned_badge"),
-                                                size=10,
-                                                font_family=FONT_SEMIBOLD,
-                                                color=COLORS["success"],
-                                            ),
-                                        ),
-                                        *free_st_controls,
-                                    ],
-                                ),
-                                ft.Text(
-                                    get_string("proxy_pool_unassigned_sub"),
-                                    size=11.5,
-                                    color=COLORS["text_sub"],
-                                ),
-                            ],
+                                            *free_top_badges,
+                                        ],
+                                    ),
+                                    ft.Row(
+                                        spacing=6,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=free_sub_controls,
+                                    ),
+                                ],
+                            ),
                         ),
                         ft.Row(
                             spacing=6,
@@ -895,7 +1070,14 @@ def open_proxy_pool_dialog(
 
         sorted_items = sorted(
             by_proxy.items(),
-            key=lambda kv: extract_proxy_port(kv[0]) or kv[0],
+            key=lambda kv: (
+                all(
+                    _is_prof_disconnected(prof_by_name[m])
+                    for m in kv[1]
+                    if m in prof_by_name
+                ),
+                extract_proxy_port(kv[0]) or kv[0],
+            ),
         )
         for px_str, member_names in sorted_items:
             port_badge = extract_proxy_port(px_str) or "PROXY"
@@ -903,17 +1085,37 @@ def open_proxy_pool_dialog(
             live_members = [m for m in member_names if m in running]
             first_member = member_names[0]
             st_pair = local_px_status.get(px_str) or status_map.get(first_member)
+            is_retired_px = all(
+                _is_prof_disconnected(prof_by_name[m])
+                for m in member_names
+                if m in prof_by_name
+            )
 
-            status_controls: list[ft.Control] = []
+            top_badges: list[ft.Control] = []
+            sub_badge = _build_subnet_badge(px_str, is_retired=is_retired_px)
+            if sub_badge is not None:
+                top_badges.append(sub_badge)
+
+            bottom_controls: list[ft.Control] = []
             if live_members:
-                status_controls.append(
+                bottom_controls.append(
                     ft.Text(
-                        f"● {get_string('stamp_live')} ({', '.join(live_members)})",
+                        f"● {get_string('stamp_live')}",
                         size=11.5,
                         font_family=FONT_DATA,
                         color=COLORS["success"],
                     )
                 )
+            bottom_controls.append(
+                ft.Text(
+                    f"{len(member_names)} profile: " + ", ".join(member_names),
+                    size=11.5,
+                    color=COLORS["text_sub"],
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                    tooltip=", ".join(member_names),
+                )
+            )
             if st_pair is not None:
                 st_kind, st_msg = st_pair
                 st_col = (
@@ -921,13 +1123,32 @@ def open_proxy_pool_dialog(
                     if st_kind == "ok"
                     else (COLORS["accent"] if st_kind == "checking" else COLORS["error"])
                 )
-                status_controls.append(
-                    ft.Text(
-                        st_msg,
-                        size=11.5,
-                        font_family=FONT_DATA,
-                        color=st_col,
-                    )
+                bottom_controls.extend(
+                    [
+                        ft.Text("·", size=11.5, color=COLORS["text_dim"]),
+                        ft.Text(
+                            st_msg,
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            color=st_col,
+                            no_wrap=True,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ]
+                )
+            elif resolved_px_ip.get(px_str):
+                bottom_controls.extend(
+                    [
+                        ft.Text("·", size=11.5, color=COLORS["text_dim"]),
+                        ft.Text(
+                            f"✓ {resolved_px_ip[px_str]}",
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            color=COLORS["text_sub"],
+                            no_wrap=True,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ]
                 )
 
             is_editing = editing_target[0] == px_str
@@ -993,45 +1214,45 @@ def open_proxy_pool_dialog(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     controls=[
-                        ft.Column(
-                            spacing=3,
+                        ft.Container(
                             expand=True,
-                            controls=[
-                                ft.Row(
-                                    spacing=8,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    controls=[
-                                        ft.Container(
-                                            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                                            border_radius=5,
-                                            bgcolor=COLORS["sidebar"],
-                                            content=ft.Text(
-                                                port_badge,
-                                                size=11.5,
-                                                font_family=FONT_DATA,
-                                                color=COLORS["cover_ink"],
+                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                            content=ft.Column(
+                                spacing=3,
+                                controls=[
+                                    ft.Row(
+                                        spacing=8,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=[
+                                            ft.Container(
+                                                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                                border_radius=5,
+                                                bgcolor=COLORS["sidebar"],
+                                                content=ft.Text(
+                                                    port_badge,
+                                                    size=11.5,
+                                                    font_family=FONT_DATA,
+                                                    color=COLORS["cover_ink"],
+                                                ),
                                             ),
-                                        ),
-                                        ft.Text(
-                                            masked,
-                                            size=12.5,
-                                            font_family=FONT_DATA,
-                                            color=COLORS["text_main"],
-                                            no_wrap=True,
-                                            overflow=ft.TextOverflow.ELLIPSIS,
-                                        ),
-                                        *status_controls,
-                                    ],
-                                ),
-                                ft.Text(
-                                    f"{len(member_names)} profile: " + ", ".join(member_names),
-                                    size=11.5,
-                                    color=COLORS["text_sub"],
-                                    no_wrap=True,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                    tooltip=", ".join(member_names),
-                                ),
-                            ],
+                                            ft.Text(
+                                                masked,
+                                                size=12.5,
+                                                font_family=FONT_DATA,
+                                                color=COLORS["text_main"],
+                                                no_wrap=True,
+                                                overflow=ft.TextOverflow.ELLIPSIS,
+                                            ),
+                                            *top_badges,
+                                        ],
+                                    ),
+                                    ft.Row(
+                                        spacing=6,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=bottom_controls,
+                                    ),
+                                ],
+                            ),
                         ),
                         ft.Row(
                             spacing=6,
@@ -1144,7 +1365,7 @@ def open_proxy_pool_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
-        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
+        inset_padding=ft.Padding.symmetric(horizontal=18, vertical=14),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -1198,7 +1419,7 @@ def open_proxy_pool_dialog(
             ],
         ),
         content=ft.Container(
-            width=980,
+            width=1180,
             content=ft.Column(
                 spacing=8,
                 tight=True,
@@ -1235,7 +1456,7 @@ def open_mail_pool_dialog(
     """Central Mail Pool Manager dialog: view spare Hotmail/OAuth2 accounts, test Inbox, assign or hot-swap."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=6, height=540, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, height=600, scroll=ft.ScrollMode.AUTO)
     assigning_target: list[str | None] = [None]
     replacing_prof: list[str | None] = [None]
     adding_open: list[bool] = [False]
@@ -1508,64 +1729,94 @@ def open_mail_pool_dialog(
 
                 return _cb
 
-            sub_parts = [get_string("mail_pool_unassigned_sub")]
-            if rec_str:
-                sub_parts.append(f"Khôi phục: {rec_str}")
+            sub_parts = (
+                [f"Khôi phục: {rec_str}"]
+                if rec_str
+                else [get_string("mail_pool_unassigned_sub")]
+            )
+
+            free_top_controls: list[ft.Control] = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                    border_radius=5,
+                    bgcolor=COLORS["accent"],
+                    content=ft.Text(
+                        f"#{idx}",
+                        size=11,
+                        font_family=FONT_DATA,
+                        color="#FFFFFF",
+                    ),
+                ),
+                ft.Text(
+                    em_str,
+                    size=12.5,
+                    font_family=FONT_DATA,
+                    color=COLORS["text_main"],
+                    selectable=True,
+                ),
+            ]
             if has_tok:
-                sub_parts.append("OAuth2 Token ✓")
+                free_top_controls.append(
+                    ft.Text(
+                        "OAuth2 ✓",
+                        size=11,
+                        font_family=FONT_DATA,
+                        color=COLORS["text_sub"],
+                    )
+                )
+
+            free_bottom_controls: list[ft.Control] = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                    border_radius=4,
+                    bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
+                    border=ft.Border.all(1, COLORS["success"]),
+                    content=ft.Text(
+                        get_string("mail_pool_unassigned_badge"),
+                        size=10,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["success"],
+                    ),
+                ),
+                ft.Text(
+                    " · ".join(sub_parts),
+                    size=11.5,
+                    color=COLORS["text_sub"],
+                ),
+            ]
+            if st_controls:
+                free_bottom_controls.extend(
+                    [
+                        ft.Text("·", size=11.5, color=COLORS["text_dim"]),
+                        *st_controls,
+                    ]
+                )
 
             free_children: list[ft.Control] = [
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=12,
                     controls=[
-                        ft.Column(
-                            spacing=3,
+                        ft.Container(
                             expand=True,
-                            controls=[
-                                ft.Row(
-                                    spacing=8,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    controls=[
-                                        ft.Container(
-                                            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                                            border_radius=5,
-                                            bgcolor=COLORS["accent"],
-                                            content=ft.Text(
-                                                f"#{idx}",
-                                                size=11,
-                                                font_family=FONT_DATA,
-                                                color="#FFFFFF",
-                                            ),
-                                        ),
-                                        ft.Text(
-                                            em_str,
-                                            size=12.5,
-                                            font_family=FONT_DATA,
-                                            color=COLORS["text_main"],
-                                            selectable=True,
-                                        ),
-                                        ft.Container(
-                                            padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                                            border_radius=4,
-                                            bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
-                                            border=ft.Border.all(1, COLORS["success"]),
-                                            content=ft.Text(
-                                                get_string("mail_pool_unassigned_badge"),
-                                                size=10,
-                                                font_family=FONT_SEMIBOLD,
-                                                color=COLORS["success"],
-                                            ),
-                                        ),
-                                        *st_controls,
-                                    ],
-                                ),
-                                ft.Text(
-                                    " · ".join(sub_parts),
-                                    size=11.5,
-                                    color=COLORS["text_sub"],
-                                ),
-                            ],
+                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                            content=ft.Column(
+                                spacing=3,
+                                tight=True,
+                                controls=[
+                                    ft.Row(
+                                        spacing=8,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=free_top_controls,
+                                    ),
+                                    ft.Row(
+                                        spacing=6,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        controls=free_bottom_controls,
+                                    ),
+                                ],
+                            ),
                         ),
                         ft.Row(
                             spacing=6,
@@ -1741,31 +1992,36 @@ def open_mail_pool_dialog(
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=10,
                     controls=[
-                        ft.Row(
-                            spacing=8,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            controls=[
-                                ft.Container(
-                                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                                    border_radius=5,
-                                    bgcolor=COLORS["sidebar"],
-                                    content=ft.Text(
-                                        prof.name,
-                                        size=11.5,
-                                        font_family=FONT_SEMIBOLD,
-                                        color=COLORS["cover_ink"],
+                        ft.Container(
+                            expand=True,
+                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                            content=ft.Row(
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Container(
+                                        padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                        border_radius=5,
+                                        bgcolor=COLORS["sidebar"],
+                                        content=ft.Text(
+                                            prof.name,
+                                            size=11.5,
+                                            font_family=FONT_SEMIBOLD,
+                                            color=COLORS["cover_ink"],
+                                        ),
                                     ),
-                                ),
-                                ft.Text(
-                                    em_val,
-                                    size=12.5,
-                                    font_family=FONT_DATA,
-                                    color=COLORS["text_main"],
-                                    selectable=True,
-                                ),
-                                *prof_st_controls,
-                            ],
+                                    ft.Text(
+                                        em_val,
+                                        size=12.5,
+                                        font_family=FONT_DATA,
+                                        color=COLORS["text_main"],
+                                        selectable=True,
+                                    ),
+                                    *prof_st_controls,
+                                ],
+                            ),
                         ),
                         ft.Row(
                             spacing=6,
@@ -1850,7 +2106,7 @@ def open_mail_pool_dialog(
         modal=True,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
-        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
+        inset_padding=ft.Padding.symmetric(horizontal=18, vertical=14),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
         content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
         actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
@@ -1898,7 +2154,7 @@ def open_mail_pool_dialog(
             ],
         ),
         content=ft.Container(
-            width=980,
+            width=1180,
             content=ft.Column(
                 spacing=8,
                 tight=True,

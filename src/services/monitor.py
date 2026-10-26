@@ -177,6 +177,10 @@ def extract_proxy_endpoint(proxy_str: str | None) -> str:
     if not m:
         return ""
     host = s[: m.start()].strip().lower()
+    if host:
+        m_usa = _RE_USA_CLUSTER.search(host)
+        if m_usa:
+            host = m_usa.group(1).lower()
     return f"{host}:{m.group(1)}" if host else f":{m.group(1)}"
 
 
@@ -281,6 +285,7 @@ class ProfileMonitorInfo:
     trust_tier: str = "cold"
     audit_codes: list[str] = field(default_factory=list)
     cluster: str = ""
+    cluster_collision_label: str = ""
     cluster_busy_by: list[str] = field(default_factory=list)
     can_open_parallel: bool = False
     has_muse_auth: bool = False
@@ -2328,6 +2333,7 @@ class MonitorService:
         port_to_profiles: dict[str, list[str]] = {}
         cluster_to_profiles: dict[str, list[str]] = {}
         v6_to_profiles: dict[str, list[str]] = {}
+        ip_to_profiles: dict[str, list[str]] = {}
         for p in profiles:
             ep = extract_proxy_endpoint(p.proxy)
             if ep:
@@ -2336,7 +2342,10 @@ class MonitorService:
             if cl and not is_gateway_ipv6_cluster(cl):
                 cluster_to_profiles.setdefault(cl, []).append(p.name)
             p_entries = self._ip_history.get(p.name, [])
-            p_v6 = _ipv6_prefix_64(p_entries[0].get("ip", "") if p_entries else "")
+            p_ip_raw = (p_entries[0].get("ip", "") if p_entries else "").strip().lower()
+            if p_ip_raw:
+                ip_to_profiles.setdefault(p_ip_raw, []).append(p.name)
+            p_v6 = _ipv6_prefix_64(p_ip_raw)
             if p_v6:
                 v6_to_profiles.setdefault(p_v6, []).append(p.name)
 
@@ -2450,6 +2459,7 @@ class MonitorService:
 
         running_by_cluster: dict[str, list[str]] = {}
         running_by_v6_64: dict[str, list[str]] = {}
+        running_by_exact_ip: dict[str, list[str]] = {}
         for p_run in profiles:
             if p_run.name not in running_names:
                 continue
@@ -2457,7 +2467,9 @@ class MonitorService:
             if r_cl:
                 running_by_cluster.setdefault(r_cl, []).append(p_run.name)
             r_entries = self._ip_history.get(p_run.name, [])
-            r_ip = r_entries[0].get("ip", "") if r_entries else ""
+            r_ip = (r_entries[0].get("ip", "") if r_entries else "").strip().lower()
+            if r_ip:
+                running_by_exact_ip.setdefault(r_ip, []).append(p_run.name)
             r_v6 = _ipv6_prefix_64(r_ip)
             if r_v6:
                 running_by_v6_64.setdefault(r_v6, []).append(p_run.name)
@@ -2488,16 +2500,21 @@ class MonitorService:
                     else 0
                 )
 
-            # Check if a sibling on the same proxy port or same /64 branch closed < cooldown_minutes ago
+            # Check if a sibling on the same proxy port, exact exit IP, or /64 branch closed < cooldown_minutes ago
             port_cooldown_by: tuple[str, int] | None = None
             if cd_target > 0 and not is_run and not busy_by:
                 ip_ent_cd = self._ip_history.get(p.name, [])
-                my_v6_cd = _ipv6_prefix_64(ip_ent_cd[0].get("ip", "") if ip_ent_cd else "")
+                my_ip_cd = (ip_ent_cd[0].get("ip", "") if ip_ent_cd else "").strip().lower()
+                my_v6_cd = _ipv6_prefix_64(my_ip_cd)
                 cd_candidates: list[str] = list(siblings)
                 if cluster and not is_gateway_ipv6_cluster(cluster):
                     for cm in cluster_to_profiles.get(cluster, []):
                         if cm not in cd_candidates:
                             cd_candidates.append(cm)
+                if my_ip_cd:
+                    for im in ip_to_profiles.get(my_ip_cd, []):
+                        if im not in cd_candidates:
+                            cd_candidates.append(im)
                 if my_v6_cd:
                     for vm in v6_to_profiles.get(my_v6_cd, []):
                         if vm not in cd_candidates:
@@ -2826,16 +2843,30 @@ class MonitorService:
                 trust_tier = "cold"
 
             cluster_busy_by: list[str] = []
+            cluster_collision_label = (
+                cluster if (cluster and not is_gateway_ipv6_cluster(cluster)) else ""
+            )
+            my_ip_low = (last_ip or "").strip().lower()
+            my_v6 = _ipv6_prefix_64(my_ip_low)
             if not is_run and not busy_by:
                 if cluster and not is_gateway_ipv6_cluster(cluster):
                     cluster_busy_by = [
                         m for m in running_by_cluster.get(cluster, []) if m != p.name
                     ]
-                my_v6 = _ipv6_prefix_64(last_ip)
+                if my_ip_low and my_ip_low in running_by_exact_ip:
+                    for m in running_by_exact_ip[my_ip_low]:
+                        if m != p.name and m not in cluster_busy_by:
+                            cluster_busy_by.append(m)
+                            if not cluster_collision_label:
+                                cluster_collision_label = last_ip
                 if my_v6 and my_v6 in running_by_v6_64:
                     for m in running_by_v6_64[my_v6]:
                         if m != p.name and m not in cluster_busy_by:
                             cluster_busy_by.append(m)
+                            if not cluster_collision_label:
+                                cluster_collision_label = f"{my_v6}::/64"
+            if not cluster_collision_label:
+                cluster_collision_label = f"{my_v6}::/64" if my_v6 else (cluster or "/64")
 
             can_open_parallel = bool(
                 running_names
@@ -2908,6 +2939,7 @@ class MonitorService:
                 trust_score=trust_score,
                 trust_tier=trust_tier,
                 cluster=cluster,
+                cluster_collision_label=cluster_collision_label,
                 cluster_busy_by=cluster_busy_by,
                 can_open_parallel=can_open_parallel,
                 has_muse_auth=bool(disk.get("has_muse_auth")),
@@ -3094,11 +3126,20 @@ class MonitorService:
                     names,
                 )
 
-        # 4. High IP Fraud Score Warning
+        # 4. High IP Fraud Score & Active Cross-Endpoint IP / Gateway /64 Collision Audit
+        active_ip_eps: dict[str, dict[str, list[str]]] = {}
+        active_gw_v6_eps: dict[str, dict[str, list[str]]] = {}
         for p in profiles:
             info = snap.profiles.get(p.name)
             if not info or info.is_banned:
                 continue
+            ep_p = extract_proxy_endpoint(p.proxy) or p.name
+            ip_low = (info.last_exit_ip or "").strip().lower()
+            if ip_low:
+                active_ip_eps.setdefault(ip_low, {}).setdefault(ep_p, []).append(p.name)
+                v6_p = _ipv6_prefix_64(ip_low)
+                if v6_p and is_gateway_ipv6_cluster(info.cluster):
+                    active_gw_v6_eps.setdefault(v6_p, {}).setdefault(ep_p, []).append(p.name)
             if info.ip_fraud_score is not None and info.ip_fraud_score >= 70:
                 _attach(
                     "high_fraud_ip",
@@ -3115,6 +3156,28 @@ class MonitorService:
                         score=info.ip_fraud_score,
                     ),
                     [p.name],
+                )
+
+        for ip_low, ep_dict in active_ip_eps.items():
+            if len(ep_dict) > 1:
+                names = [n for grp in ep_dict.values() for n in grp]
+                _attach(
+                    "duplicate_exit_ip",
+                    "critical",
+                    f"Trùng IP đầu ra ({ip_low}) giữa nhiều cổng Proxy khác nhau",
+                    f"Các hồ sơ {', '.join(names)} đang gắn các cổng Proxy khác nhau nhưng trả về cùng một địa chỉ IP đầu ra ({ip_low}).",
+                    names,
+                )
+
+        for v6_p, ep_dict in active_gw_v6_eps.items():
+            if len(ep_dict) > 1:
+                names = [n for grp in ep_dict.values() for n in grp]
+                _attach(
+                    "duplicate_gateway_subnet",
+                    "warning",
+                    f"Trùng dải mạng /64 ({v6_p}::/64) giữa các cổng Gateway",
+                    f"Các hồ sơ {', '.join(names)} trên cổng Gateway đang dùng chung một dải mạng IPv6 /64 ({v6_p}::/64).",
+                    names,
                 )
 
         snap.audit_findings = findings
@@ -3167,7 +3230,7 @@ class MonitorService:
                         level="warning",
                         message=get_string(
                             "guard_cluster_busy",
-                            cluster=info.cluster or "/64",
+                            cluster=info.cluster_collision_label or info.cluster or "/64",
                             others=", ".join(info.cluster_busy_by),
                         ),
                     )
@@ -3273,6 +3336,7 @@ class MonitorService:
         seen_ports: dict[str, str] = {}
         seen_clusters: dict[str, str] = {}
         seen_v6_64: dict[str, str] = {}
+        seen_exact_ip: dict[str, str] = {}
         issues: dict[str, list[PreLaunchWarning]] = {}
 
         for name in target_names:
@@ -3292,7 +3356,9 @@ class MonitorService:
             ep = extract_proxy_endpoint(p.proxy)
             cluster = extract_proxy_cluster(p.proxy)
             info = snap.profiles.get(name)
-            my_v6 = _ipv6_prefix_64(info.last_exit_ip if info else "")
+            my_ip = (info.last_exit_ip if info else "").strip()
+            my_ip_low = my_ip.lower()
+            my_v6 = _ipv6_prefix_64(my_ip_low)
             port_collided = False
             if ep:
                 if ep in seen_ports:
@@ -3311,7 +3377,28 @@ class MonitorService:
                     )
                 else:
                     seen_ports[ep] = name
-            if not port_collided and cluster and not is_gateway_ipv6_cluster(cluster):
+            if not port_collided and my_ip_low:
+                if my_ip_low in seen_exact_ip:
+                    wlist.insert(
+                        0,
+                        PreLaunchWarning(
+                            code="batch_cluster_collision",
+                            level="critical",
+                            message=get_string(
+                                "guard_batch_cluster_collision",
+                                cluster=my_ip,
+                                other=seen_exact_ip[my_ip_low],
+                            ),
+                        ),
+                    )
+                else:
+                    seen_exact_ip[my_ip_low] = name
+            if (
+                not port_collided
+                and cluster
+                and not is_gateway_ipv6_cluster(cluster)
+                and not any(w.code == "batch_cluster_collision" for w in wlist)
+            ):
                 if cluster in seen_clusters:
                     wlist.insert(
                         0,
@@ -3340,7 +3427,7 @@ class MonitorService:
                             level="warning",
                             message=get_string(
                                 "guard_batch_cluster_collision",
-                                cluster=my_v6,
+                                cluster=f"{my_v6}::/64",
                                 other=seen_v6_64[my_v6],
                             ),
                         ),

@@ -22,7 +22,7 @@ from ...models.profile import (
     set_active_status_tags,
     today_ymd,
 )
-from ...services.monitor import extract_proxy_port
+from ...services.monitor import extract_proxy_endpoint, extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
 from ...utils.totp import (
     format_mail_credentials_line,
@@ -1432,7 +1432,7 @@ class ProfileManager:
         *,
         skip_names: set[str] | None = None,
     ) -> list[str]:
-        """Replace a proxy (matched by exact string or by port) across all attached profiles."""
+        """Replace a proxy (matched by exact string, canonical endpoint, or bare `:port`) across all attached profiles."""
         target = (old_proxy_or_port or "").strip()
         if not target:
             return []
@@ -1442,7 +1442,9 @@ class ProfileManager:
             if not ok:
                 return []
             clean_new = normalize_proxy(clean_new)
-        target_port = target if target.startswith(":") else extract_proxy_port(target)
+        is_bare_port = target.startswith(":")
+        target_port = target if is_bare_port else ""
+        target_ep = "" if is_bare_port else extract_proxy_endpoint(target)
         skipped = set(skip_names or ())
         updated: list[str] = []
         with self._lock:
@@ -1452,15 +1454,21 @@ class ProfileManager:
                 cur = (p.proxy or "").strip()
                 if not cur:
                     continue
-                cur_port = extract_proxy_port(cur)
-                if cur == target or (target_port and cur_port == target_port):
+                matched = (
+                    cur == target
+                    or (target_ep and extract_proxy_endpoint(cur) == target_ep)
+                    or (target_port and extract_proxy_port(cur) == target_port)
+                )
+                if matched:
                     p.proxy = clean_new or None
                     updated.append(name)
             if updated:
                 self.proxy_pool = [
                     px
                     for px in self.proxy_pool
-                    if px != target and (not target_port or extract_proxy_port(px) != target_port)
+                    if px != target
+                    and (not target_ep or extract_proxy_endpoint(px) != target_ep)
+                    and (not target_port or extract_proxy_port(px) != target_port)
                 ]
                 pool_path = self._proxy_pool_file()
                 if self.proxy_pool or pool_path.exists():
@@ -1476,19 +1484,19 @@ class ProfileManager:
         """Return proxies in the saved pool that are not currently assigned to any profile."""
         with self._lock:
             used_exact: set[str] = set()
-            used_ports: set[str] = set()
+            used_endpoints: set[str] = set()
             for p in self.profiles.values():
                 cur = (p.proxy or "").strip()
                 if cur:
                     used_exact.add(normalize_proxy(cur))
-                    port = extract_proxy_port(cur)
-                    if port:
-                        used_ports.add(port)
+                    ep = extract_proxy_endpoint(cur)
+                    if ep:
+                        used_endpoints.add(ep)
             return [
                 px
                 for px in self.proxy_pool
                 if px not in used_exact
-                and (not extract_proxy_port(px) or extract_proxy_port(px) not in used_ports)
+                and (not extract_proxy_endpoint(px) or extract_proxy_endpoint(px) not in used_endpoints)
             ]
 
     def add_proxies_to_pool(self, raw_lines: list[str]) -> tuple[int, int]:
@@ -1497,16 +1505,16 @@ class ProfileManager:
         skipped = 0
         with self._lock:
             existing: set[str] = set(self.proxy_pool)
-            existing_ports: set[str] = {
-                extract_proxy_port(px) for px in self.proxy_pool if extract_proxy_port(px)
+            existing_endpoints: set[str] = {
+                extract_proxy_endpoint(px) for px in self.proxy_pool if extract_proxy_endpoint(px)
             }
             for p in self.profiles.values():
                 cur = (p.proxy or "").strip()
                 if cur:
                     existing.add(normalize_proxy(cur))
-                    port = extract_proxy_port(cur)
-                    if port:
-                        existing_ports.add(port)
+                    ep = extract_proxy_endpoint(cur)
+                    if ep:
+                        existing_endpoints.add(ep)
             for line in raw_lines:
                 s = (line or "").strip()
                 if not s:
@@ -1515,13 +1523,13 @@ class ProfileManager:
                     skipped += 1
                     continue
                 norm = normalize_proxy(s)
-                port = extract_proxy_port(norm)
-                if norm in existing or (port and port in existing_ports):
+                ep = extract_proxy_endpoint(norm)
+                if norm in existing or (ep and ep in existing_endpoints):
                     skipped += 1
                     continue
                 existing.add(norm)
-                if port:
-                    existing_ports.add(port)
+                if ep:
+                    existing_endpoints.add(ep)
                 self.proxy_pool.append(norm)
                 added += 1
             if added:
@@ -1532,13 +1540,17 @@ class ProfileManager:
         target = (proxy_or_port or "").strip()
         if not target:
             return False
-        target_port = target if target.startswith(":") else extract_proxy_port(target)
+        is_bare_port = target.startswith(":")
+        target_port = target if is_bare_port else ""
+        target_ep = "" if is_bare_port else extract_proxy_endpoint(target)
         with self._lock:
             before = len(self.proxy_pool)
             self.proxy_pool = [
                 px
                 for px in self.proxy_pool
-                if px != target and (not target_port or extract_proxy_port(px) != target_port)
+                if px != target
+                and (not target_ep or extract_proxy_endpoint(px) != target_ep)
+                and (not target_port or extract_proxy_port(px) != target_port)
             ]
             if len(self.proxy_pool) < before:
                 self._save_proxy_pool()

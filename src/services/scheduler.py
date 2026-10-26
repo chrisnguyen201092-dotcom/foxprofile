@@ -26,6 +26,7 @@ from ..models.profile import Profile, parse_schedule_shift, parse_schedule_tag
 from .monitor import (
     MonitorSnapshot,
     ProfileMonitorInfo,
+    _ipv6_prefix_64,
     extract_proxy_endpoint,
     extract_proxy_port,
 )
@@ -91,6 +92,38 @@ class ScheduledAccount:
     is_probation: bool = False
     shared_endpoint: bool = False
     completed_today: bool = False
+    v6_prefix: str = ""
+    exit_ip: str = ""
+
+
+def _accounts_collide(a: ScheduledAccount, b: ScheduledAccount) -> bool:
+    """Return True if accounts `a` and `b` share the same proxy port, exact exit IP, or /64 IPv6 subnet."""
+    if a.endpoint and a.endpoint == b.endpoint:
+        return True
+    if a.exit_ip and a.exit_ip == b.exit_ip:
+        return True
+    if a.v6_prefix and a.v6_prefix == b.v6_prefix:
+        return True
+    return bool(
+        a.cluster
+        and a.cluster == b.cluster
+        and not is_gateway_ipv6_cluster(a.cluster)
+    )
+
+
+def _pair_subnet_keys(a: ScheduledAccount, b: ScheduledAccount | None) -> set[str]:
+    """Return the set of active /64 subnets, non-gateway clusters, and exact IPs occupied by a pair."""
+    keys: set[str] = set()
+    for item in (a, b):
+        if item is None:
+            continue
+        if item.cluster and not is_gateway_ipv6_cluster(item.cluster):
+            keys.add(item.cluster)
+        if item.v6_prefix:
+            keys.add(f"v6:{item.v6_prefix}")
+        elif item.exit_ip:
+            keys.add(f"ip:{item.exit_ip}")
+    return keys
 
 
 @dataclass
@@ -252,8 +285,12 @@ def _pair_day_accounts(
 
     def _pair_cost(a: ScheduledAccount, b: ScheduledAccount) -> float:
         cost = 0.0
-        if a.cluster and a.cluster == b.cluster:
+        if _accounts_collide(a, b):
             cost += 100_000.0
+        elif a.cluster and a.cluster == b.cluster:
+            # Two distinct /64 ports on the same IPv6 gateway (e.g. 209.141.40.174):
+            # zero /64 collision, but prefer pairing 1 gateway + 1 usa10X first whenever available.
+            cost += 800.0
         key = (a.name, b.name) if a.name < b.name else (b.name, a.name)
         if key in prev_pair_set:
             cost += 500.0
@@ -327,11 +364,15 @@ def _order_shift_pairs(
         score = 0.0
         for idx, (a, b) in enumerate(perm):
             c_curr = {a.cluster} | ({b.cluster} if b else set())
+            k_curr = _pair_subnet_keys(a, b)
             if idx > 0:
                 pa, pb = perm[idx - 1]
                 c_prev = {pa.cluster} | ({pb.cluster} if pb else set())
+                k_prev = _pair_subnet_keys(pa, pb)
                 overlap = c_curr & c_prev
+                sub_overlap = k_curr & k_prev
                 score += len(overlap) * 1000.0
+                score += len(sub_overlap) * 3000.0
                 # Heavy penalty for repeating the same /64 node (usa10X) back-to-back
                 score += sum(3000.0 for c in overlap if not is_gateway_ipv6_cluster(c))
                 # Extra penalty if two IPv6 gateway pairs run back-to-back when a pure Detroit pair exists
@@ -362,29 +403,18 @@ def _order_shift_pairs(
     else:
         best_perm = tuple(raw_pairs)
 
-    gw_counts_in_shift: dict[str, int] = {}
-    for a, b in best_perm:
-        for c in ({a.cluster} | ({b.cluster} if b else set())):
-            if is_gateway_ipv6_cluster(c):
-                gw_counts_in_shift[c] = gw_counts_in_shift.get(c, 0) + 1
-    max_non_adj_in_shift = (len(best_perm) + 1) // 2
-
     result: list[ScheduledPair] = []
     for offset, (a, b) in enumerate(best_perm):
         # Put gateway account first in the pair display for visual consistency
         if b is not None and is_gateway_ipv6_cluster(b.cluster) and not is_gateway_ipv6_cluster(a.cluster):
             a, b = b, a
-        collision = bool(b is not None and a.cluster and a.cluster == b.cluster)
+        collision = bool(b is not None and _accounts_collide(a, b))
         adj_overlap = False
         if offset > 0:
-            prev_clusters = result[-1].clusters
-            curr_clusters = {a.cluster} | ({b.cluster} if b else set())
-            ov = prev_clusters & curr_clusters
-            adj_overlap = any(
-                (not is_gateway_ipv6_cluster(c))
-                or gw_counts_in_shift.get(c, 0) <= max_non_adj_in_shift
-                for c in ov
-            )
+            prev_pair = result[-1]
+            prev_keys = _pair_subnet_keys(prev_pair.first, prev_pair.second)
+            curr_keys = _pair_subnet_keys(a, b)
+            adj_overlap = bool(prev_keys & curr_keys)
         result.append(
             ScheduledPair(
                 pair_index=start_index + offset,
@@ -437,11 +467,7 @@ def _split_and_order_day_shifts(
     morning_non_gw: set[str] = set()
 
     for a, b in ordered_candidates:
-        non_gw = {
-            c
-            for c in ({a.cluster} | ({b.cluster} if b is not None else set()))
-            if c and not is_gateway_ipv6_cluster(c)
-        }
+        non_gw = _pair_subnet_keys(a, b)
         has_shared_d0 = day_index == 0 and (
             a.shared_endpoint or (b is not None and b.shared_endpoint)
         )
@@ -574,6 +600,7 @@ def build_safe_schedule(
             and days_old > 1
         )
         ep = extract_proxy_endpoint(p.proxy)
+        raw_exit_ip = (info.last_exit_ip if info else "") or ""
         acc = ScheduledAccount(
             name=p.name,
             email=(p.email or p.name).strip(),
@@ -586,6 +613,8 @@ def build_safe_schedule(
             is_probation=is_probation,
             shared_endpoint=(endpoint_counts.get(ep, 0) > 1),
             completed_today=ran_today,
+            v6_prefix=_ipv6_prefix_64(raw_exit_ip),
+            exit_ip=raw_exit_ip.strip().lower(),
         )
         sched_accounts.append(acc)
         if ran_today:
@@ -725,11 +754,7 @@ def build_safe_schedule(
                         and not is_gateway_ipv6_cluster(a.cluster)
                     ):
                         a, b = b, a
-                    non_gw = {
-                        c
-                        for c in ({a.cluster} | ({b.cluster} if b is not None else set()))
-                        if c and not is_gateway_ipv6_cluster(c)
-                    }
+                    non_gw = _pair_subnet_keys(a, b)
                     explicit_sh = shift_by_name.get(a.name) or (
                         shift_by_name.get(b.name) if b is not None else None
                     )
@@ -742,13 +767,13 @@ def build_safe_schedule(
                     if shift == "morning":
                         morning_non_gw.update(non_gw)
                     target_list = m_pairs if shift == "morning" else e_pairs
-                    collision = bool(b is not None and a.cluster and a.cluster == b.cluster)
+                    collision = bool(b is not None and _accounts_collide(a, b))
                     adj_overlap = False
                     if target_list:
-                        prev_clusters = target_list[-1].clusters
-                        curr_clusters = {a.cluster} | ({b.cluster} if b else set())
-                        ov = prev_clusters & curr_clusters
-                        adj_overlap = any(not is_gateway_ipv6_cluster(c) for c in ov)
+                        prev_pair = target_list[-1]
+                        prev_keys = _pair_subnet_keys(prev_pair.first, prev_pair.second)
+                        curr_keys = _pair_subnet_keys(a, b)
+                        adj_overlap = bool(prev_keys & curr_keys)
                     target_list.append(
                         ScheduledPair(
                             pair_index=p_num,
@@ -839,7 +864,7 @@ def build_safe_schedule(
         return 0
 
     # Pre-compute balanced per-day targets for any gateway / large cluster (e.g. 209.141.40.174)
-    # so it distributes evenly across all days (e.g. [4, 4, 3, 3, 4]) instead of crowding the last day.
+    # so it distributes evenly across all days (e.g. [12, 12, 12, 12, 12]) instead of crowding the last day.
     gateway_day_targets: dict[str, list[int]] = {}
     for c_name, tot_c in total_by_cluster.items():
         if is_gateway_ipv6_cluster(c_name) and tot_c >= cycle_days:
@@ -848,11 +873,11 @@ def build_safe_schedule(
             # Give +1 to days with the largest quotas first (e.g. Day 0 and Day 4), then earliest days
             day_order = sorted(
                 range(cycle_days),
-                key=lambda d: (-max_pairs_per_day[d], d),
+                key=lambda d: (-quotas[d], -max_pairs_per_day[d], d),
             )
             extra_days = set(day_order[:rem_c])
             gateway_day_targets[c_name] = [
-                min(max_pairs_per_day[d], base_c + (1 if d in extra_days else 0))
+                min(quotas[d], base_c + (1 if d in extra_days else 0))
                 for d in range(cycle_days)
             ]
 
@@ -860,8 +885,8 @@ def build_safe_schedule(
         p_cap = max_pairs_per_day[d_idx]
         if not cluster:
             return p_cap
-        if cluster in gateway_day_targets and relax == 0:
-            return gateway_day_targets[cluster][d_idx]
+        if cluster in gateway_day_targets:
+            return min(quotas[d_idx], gateway_day_targets[cluster][d_idx] + relax)
         tot_c = total_by_cluster.get(cluster, 1)
         even_c = (tot_c + cycle_days - 1) // cycle_days
         return min(p_cap, even_c + relax)
@@ -944,6 +969,11 @@ def build_safe_schedule(
     # Fallback placement for any overflow accounts (preserving min_d probation cool-off & shared_endpoint gap)
     min_gap = 2 if cycle_days >= 4 else 1
 
+    def _strict_day_max_for_cluster(cluster: str, d: int) -> int:
+        if cluster in gateway_day_targets:
+            return _cluster_cap_for_day(cluster, d, relax=1)
+        return max_pairs_per_day[d]
+
     def _can_place_in_day(a: ScheduledAccount, d: int, *, strict: bool = True) -> bool:
         if d < _min_day_for_account(a):
             return False
@@ -956,7 +986,10 @@ def build_safe_schedule(
             )
         ):
             return False
-        return not (strict and day_cluster_counts[d].get(a.cluster, 0) >= max_pairs_per_day[d])
+        return not (
+            strict
+            and day_cluster_counts[d].get(a.cluster, 0) >= _strict_day_max_for_cluster(a.cluster, d)
+        )
 
     for acc in unassigned:
         min_d = _min_day_for_account(acc)
@@ -1018,8 +1051,8 @@ def build_safe_schedule(
                     )
                     new_target_c = day_cluster_counts[target_d].get(cand.cluster, 0) + 1
                     if strict_cap and (
-                        new_other_c > max_pairs_per_day[other_d]
-                        or new_target_c > max_pairs_per_day[target_d]
+                        new_other_c > _strict_day_max_for_cluster(acc.cluster, other_d)
+                        or new_target_c > _strict_day_max_for_cluster(cand.cluster, target_d)
                     ):
                         continue
                     day_buckets[other_d][idx_cand] = acc
@@ -1272,6 +1305,8 @@ class SquadCandidate:
     is_rising_star: bool = False
     is_conflict: bool = False
     schedule_label: str = ""
+    v6_prefix: str = ""
+    exit_ip: str = ""
 
 
 def _resolve_profile_schedule_priority(
@@ -1399,7 +1434,7 @@ def _build_fixed_work_squad_plan(
         is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
         is_conflict = (p.name not in active_set) and (
             bool(info.has_warning)
-            or (not is_gateway_ipv6_cluster(cl) and bool(info.cluster_busy_by))
+            or bool(info.cluster_busy_by)
             or (not is_gateway_ipv6_cluster(cl) and cl in busy_clusters)
         )
         _, _, sched_label = _resolve_profile_schedule_priority(
@@ -1408,6 +1443,7 @@ def _build_fixed_work_squad_plan(
             now_dt,
             has_active_schedule=has_active_schedule,
         )
+        raw_exit_ip = (info.last_exit_ip or "").strip()
         cand = SquadCandidate(
             name=p.name,
             email=(p.email or p.name).strip(),
@@ -1424,6 +1460,8 @@ def _build_fixed_work_squad_plan(
             is_rising_star=is_rising,
             is_conflict=is_conflict,
             schedule_label=sched_label,
+            v6_prefix=_ipv6_prefix_64(raw_exit_ip),
+            exit_ip=raw_exit_ip.lower(),
         )
         cand_by_name[p.name] = cand
 
@@ -1455,6 +1493,8 @@ def _build_fixed_work_squad_plan(
             sq_cands: list[SquadCandidate] = []
             seen_cls: set[str] = set()
             seen_eps: set[str] = set()
+            seen_v6: set[str] = set()
+            seen_ips: set[str] = set()
             for m_name in member_names:
                 c = cand_by_name.get(m_name)
                 if c is None or m_name in used_names:
@@ -1463,9 +1503,17 @@ def _build_fixed_work_squad_plan(
                     continue
                 if c.endpoint and c.endpoint in seen_eps:
                     continue
+                if c.v6_prefix and c.v6_prefix in seen_v6:
+                    continue
+                if c.exit_ip and c.exit_ip in seen_ips:
+                    continue
                 seen_cls.add(c.cluster)
                 if c.endpoint:
                     seen_eps.add(c.endpoint)
+                if c.v6_prefix:
+                    seen_v6.add(c.v6_prefix)
+                if c.exit_ip:
+                    seen_ips.add(c.exit_ip)
                 sq_cands.append(c)
                 used_names.add(m_name)
             if sq_cands:
@@ -1496,6 +1544,8 @@ def _build_fixed_work_squad_plan(
         sq = list(existing)
         used_cls = {c.cluster for c in sq}
         used_eps = {c.endpoint for c in sq if c.endpoint}
+        used_v6 = {c.v6_prefix for c in sq if c.v6_prefix}
+        used_ips = {c.exit_ip for c in sq if c.exit_ip}
         rem_gw = sum(len(v) for k, v in by_cluster.items() if is_gateway_ipv6_cluster(k))
         rem_usa = sum(len(v) for k, v in by_cluster.items() if not is_gateway_ipv6_cluster(k))
         avail_usa_cls = sum(
@@ -1524,12 +1574,14 @@ def _build_fixed_work_squad_plan(
                     continue
                 if is_gw and gw_counts.get(cl, 0) >= max_gw:
                     continue
-                # Find first candidate in pool whose endpoint is not in used_eps
+                # Find first candidate in pool whose endpoint, /64 prefix, and exact IP do not collide
                 valid_idx = next(
                     (
                         i
                         for i, cand in enumerate(pool)
-                        if not cand.endpoint or cand.endpoint not in used_eps
+                        if (not cand.endpoint or cand.endpoint not in used_eps)
+                        and (not cand.v6_prefix or cand.v6_prefix not in used_v6)
+                        and (not cand.exit_ip or cand.exit_ip not in used_ips)
                     ),
                     -1,
                 )
@@ -1559,6 +1611,10 @@ def _build_fixed_work_squad_plan(
             used_cls.add(best_cl)
             if chosen.endpoint:
                 used_eps.add(chosen.endpoint)
+            if chosen.v6_prefix:
+                used_v6.add(chosen.v6_prefix)
+            if chosen.exit_ip:
+                used_ips.add(chosen.exit_ip)
             if is_gateway_ipv6_cluster(best_cl):
                 gw_counts[best_cl] = gw_counts.get(best_cl, 0) + 1
         return sq
@@ -1698,7 +1754,7 @@ def select_parallel_work_squad(
         if not cl:
             continue
         is_gw_cl = is_gateway_ipv6_cluster(cl)
-        if info.has_warning or (not is_gw_cl and (info.cluster_busy_by or cl in busy_clusters)):
+        if info.has_warning or info.cluster_busy_by or (not is_gw_cl and cl in busy_clusters):
             continue
 
         lc = info.last_closed
@@ -1714,6 +1770,7 @@ def select_parallel_work_squad(
             now_dt,
             has_active_schedule=has_active_schedule,
         )
+        raw_exit_ip = (info.last_exit_ip or "").strip()
         cand = SquadCandidate(
             name=p.name,
             email=(p.email or p.name).strip(),
@@ -1729,6 +1786,8 @@ def select_parallel_work_squad(
             hatch_gw=info.hatch_gw,
             is_rising_star=is_rising,
             schedule_label=sched_label,
+            v6_prefix=_ipv6_prefix_64(raw_exit_ip),
+            exit_ip=raw_exit_ip.lower(),
         )
 
         # Fatigue check: avoid picking accounts that already worked today or closed recently
@@ -1793,13 +1852,23 @@ def select_parallel_work_squad(
         )
         chosen_for_cl: list[tuple[int, float, SquadCandidate]] = []
         seen_eps: set[str] = set()
+        seen_v6: set[str] = set()
+        seen_ips: set[str] = set()
         for tier_priority, sc, c_item in sorted_cands:
             if len(chosen_for_cl) >= cap:
                 break
             if c_item.endpoint and c_item.endpoint in seen_eps:
                 continue
+            if c_item.v6_prefix and c_item.v6_prefix in seen_v6:
+                continue
+            if c_item.exit_ip and c_item.exit_ip in seen_ips:
+                continue
             if c_item.endpoint:
                 seen_eps.add(c_item.endpoint)
+            if c_item.v6_prefix:
+                seen_v6.add(c_item.v6_prefix)
+            if c_item.exit_ip:
+                seen_ips.add(c_item.exit_ip)
             # Slightly defer extra gateway slots (2nd/3rd on 209.141.40.174) behind primary /64 nodes
             slot_pen = len(chosen_for_cl) * 120.0
             picked_pool.append((tier_priority, -(sc - slot_pen), c_item))
