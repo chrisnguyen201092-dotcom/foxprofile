@@ -141,8 +141,12 @@ def _from_json(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in items:
         if not isinstance(item, dict) or not item.get("name") or not item.get("domain"):
             continue
-        domain = item["domain"]
-        if item.get("hostOnly") is False and not domain.startswith("."):
+        name = str(item["name"])
+        domain = str(item["domain"])
+        is_host_prefix = name.startswith("__Host-")
+        if is_host_prefix:
+            domain = domain.lstrip(".")
+        elif item.get("hostOnly") is False and not domain.startswith("."):
             domain = "." + domain
         # Extension layout uses expirationDate; Playwright layout uses expires.
         expires = item.get("expirationDate", item.get("expires"))
@@ -150,12 +154,12 @@ def _from_json(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if same_site not in ("Strict", "Lax", "None"):
             same_site = _SAMESITE_FROM_EXT.get(str(same_site).lower(), "Lax")
         cookie = {
-            "name": item["name"],
+            "name": name,
             "value": str(item.get("value", "")),
             "domain": domain,
-            "path": item.get("path") or "/",
+            "path": "/" if is_host_prefix else (item.get("path") or "/"),
             "httpOnly": bool(item.get("httpOnly")),
-            "secure": bool(item.get("secure")) or same_site == "None",
+            "secure": True if is_host_prefix else (bool(item.get("secure")) or same_site == "None"),
             "sameSite": same_site,
         }
         expiry = _as_timestamp(expires)
@@ -180,13 +184,14 @@ def _from_netscape(text: str) -> list[dict[str, Any]]:
         if len(parts) != 7:
             continue
         domain, _subdomains, path, secure, expires, name, value = parts
+        is_host_prefix = name.startswith("__Host-")
         cookie = {
             "name": name,
             "value": value,
-            "domain": domain,
-            "path": path or "/",
+            "domain": domain.lstrip(".") if is_host_prefix else domain,
+            "path": "/" if is_host_prefix else (path or "/"),
             "httpOnly": http_only,
-            "secure": secure.upper() == "TRUE",
+            "secure": True if is_host_prefix else (secure.upper() == "TRUE"),
             "sameSite": "Lax",
         }
         if expires.isdigit() and int(expires) > 0:
@@ -202,6 +207,17 @@ def _from_header_string(text: str, default_domain: str = ".hatch.io") -> list[di
     raw = text.strip()
     if raw.lower().startswith("cookie:"):
         raw = raw.split(":", 1)[1].strip()
+    eff_domain = default_domain
+    if default_domain == ".hatch.io" and any(
+        mk in raw
+        for mk in (
+            "hatch_sess=",
+            "hatch_native_auth_device=",
+            "__Host-hatch_one_tap=",
+            "layout_state=",
+        )
+    ):
+        eff_domain = ".muse.ai"
     cookies = []
     for part in raw.split(";"):
         piece = part.strip()
@@ -212,11 +228,12 @@ def _from_header_string(text: str, default_domain: str = ".hatch.io") -> list[di
         val = v.strip()
         if not name or "\n" in name or "\t" in name or " " in name:
             continue
+        is_host_prefix = name.startswith("__Host-")
         cookies.append(
             {
                 "name": name,
                 "value": val,
-                "domain": default_domain,
+                "domain": eff_domain.lstrip(".") if is_host_prefix else eff_domain,
                 "path": "/",
                 "httpOnly": False,
                 "secure": True,
@@ -321,9 +338,16 @@ def inspect_cookie_summary(
         dom = str(c.get("domain") or "").lstrip(".") or "unknown"
         domain_counts[dom] = domain_counts.get(dom, 0) + 1
         cname = str(c.get("name") or "")
-        if "cf_clearance" in cname or "__cf_bm" in cname:
+        if (
+            "cf_clearance" in cname
+            or "__cf_bm" in cname
+            or cname in ("hatch_gw", "__Host-hatch_one_tap", "hatch_native_auth_device")
+        ):
             has_gw = True
-        if any(k in cname.lower() for k in ("session", "token", "auth", "sid", "user")):
+        if any(
+            k in cname.lower()
+            for k in ("session", "token", "auth", "sid", "user", "hatch_sess")
+        ):
             has_session = True
     top_domains = sorted(domain_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     return {

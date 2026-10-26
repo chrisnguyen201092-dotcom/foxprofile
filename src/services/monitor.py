@@ -101,6 +101,7 @@ _NON_WARMUP_ROOT_DOMAINS = frozenset(
     {
         "muse.ai",
         "muse.vn",
+        "metaaivm.com",
         "hatch.io",
         "meta.com",
         "facebook.com",
@@ -138,6 +139,23 @@ _NON_WARMUP_ROOT_DOMAINS = frozenset(
         "amiunique.org",
     }
 )
+
+
+def _is_muse_thread_url(url: str) -> bool:
+    """Return True if `url` points to a real saved conversation thread (`/thread/<id>`) or workspace artifact (`/library/artifacts/<slug>`), excluding empty `/thread/new`."""
+    if "/library/artifacts/" in url:
+        tail_art = (
+            url.split("/library/artifacts/", 1)[1]
+            .split("?", 1)[0]
+            .split("#", 1)[0]
+            .strip("/")
+        )
+        if tail_art:
+            return True
+    if "/thread/" not in url:
+        return False
+    tail = url.split("/thread/", 1)[1].split("?", 1)[0].split("#", 1)[0].strip("/")
+    return bool(tail and tail.lower() != "new")
 
 
 def _extract_root_domain(host: str) -> str:
@@ -477,6 +495,7 @@ def compute_trust_breakdown(
     sess_cnt = int(info.session_count or 0)
     total_mins = int(info.total_minutes or 0)
     avg_mins = (total_mins / max(1, sess_cnt)) if sess_cnt > 0 else 0.0
+    has_pwd_or_rec = False
     if profile is not None:
         has_proxy = bool(profile.proxy)
         has_geo_pin = bool(profile.proxy and profile.timezone and profile.locale)
@@ -602,11 +621,15 @@ def compute_trust_breakdown(
         ck_pts = 0
     cache_ok = bool(info.has_cache2 and info.cookie_count > 0)
     cache_pts = 3 if cache_ok else 0
-    rec_pts = 5 if has_recovery_armor else (3 if has_recovery_key else 0)
+    rec_pts = (
+        5
+        if has_recovery_armor
+        else (3 if has_recovery_key else (1 if has_pwd_or_rec else 0))
+    )
     p5_pts = ps_pts + ck_pts + cache_pts + rec_pts
 
     # 6. Network Cleanliness, IP Fraud Score & Geo-Pinning (max 20)
-    geo_pts = 5 if (has_proxy and has_geo_pin) else (2 if has_proxy else 0)
+    geo_pts = 5 if (has_proxy and has_geo_pin) else (1 if has_proxy else 0)
     ip_pts = 0
     clean_env = not (
         info.has_meta_checkpoint or info.proxy_port_changed or info.ip_country_changed
@@ -746,7 +769,11 @@ def compute_trust_breakdown(
                     "detail": (
                         "Đầy đủ (+5đ)"
                         if has_recovery_armor
-                        else ("Có Token/2FA (+3đ)" if has_recovery_key else "Chưa lưu")
+                        else (
+                            "Có Token/2FA (+3đ)"
+                            if has_recovery_key
+                            else ("Có Pass/Mail KP (+1đ)" if has_pwd_or_rec else "Chưa lưu")
+                        )
                     ),
                     "earned": rec_pts,
                     "max_pts": 5,
@@ -768,7 +795,7 @@ def compute_trust_breakdown(
                     "detail": (
                         "Đã ghim đủ"
                         if geo_pts == 5
-                        else ("Thiếu Timezone/Locale" if geo_pts == 2 else "Chưa gắn Proxy")
+                        else ("Thiếu Timezone/Locale" if geo_pts == 1 else "Chưa gắn Proxy")
                     ),
                     "earned": geo_pts,
                     "max_pts": 5,
@@ -1967,7 +1994,7 @@ class MonitorService:
                     cached["sess_exp"] = f"Còn {int(rem_h // 24)}d"
             if not is_running:
                 if (
-                    cached.get("_cache_ver") == 2
+                    cached.get("_cache_ver") == 4
                     and cached.get("_tabs_mtime") == tabs_mtime
                     and cached.get("_cookies_mtime") == cookies_mtime
                     and cached.get("_places_mtime") == places_mtime
@@ -1987,7 +2014,7 @@ class MonitorService:
                 return cached
 
         result: dict[str, Any] = {
-            "_cache_ver": 2,
+            "_cache_ver": 4,
             "_ts": now_ts,
             "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
@@ -2065,7 +2092,7 @@ class MonitorService:
                 urls = raw if isinstance(raw, list) else (raw.get("tabs") or raw.get("urls") or [])
                 str_urls = [u for u in urls if isinstance(u, str)]
                 result["tab_count"] = len(str_urls)
-                result["has_thread_url"] = any("/thread/" in u for u in str_urls)
+                result["has_thread_url"] = any(_is_muse_thread_url(u) for u in str_urls)
             except Exception:
                 pass
 
@@ -2098,6 +2125,7 @@ class MonitorService:
                 has_meta = False
                 has_microsoft = False
                 has_ps_l = False
+                has_meta_fs = False
                 has_chk_cookie = False
                 datr_age_days = 0.0
                 earliest_datr_ct = 0.0
@@ -2108,7 +2136,9 @@ class MonitorService:
                     host_l = str(_host or "").lower().lstrip(".")
                     if host_l:
                         cookie_hosts.add(_extract_root_domain(host_l) or host_l)
-                    is_hatch_host = "muse" in host_l or "hatch" in host_l
+                    is_hatch_host = (
+                        "muse" in host_l or "hatch" in host_l or "metaaivm" in host_l
+                    )
                     cname_s = str(cname or "")
                     cname_l = cname_s.lower()
                     if cname_s == "_GRECAPTCHA" or "recaptcha" in cname_l:
@@ -2122,6 +2152,8 @@ class MonitorService:
                         has_microsoft = True
                     if cname_s in ("ps_l", "ps_n"):
                         has_ps_l = True
+                    elif cname_s == "fs" and "meta.com" in host_l:
+                        has_meta_fs = True
                     if "checkpoint" in cname_l:
                         has_chk_cookie = True
                     if is_hatch_host and cname_s == "__Host-hatch_one_tap":
@@ -2170,14 +2202,35 @@ class MonitorService:
                             while exp_val > 10_000_000_000:
                                 exp_val /= 1000.0
                             latest_exp = max(latest_exp, exp_val)
+                # As of 2026-10, muse.ai no longer sets legacy `hatch_gw` / `hatch_vml` cookies on every
+                # logged-in session; primary auth relies on `hatch_sess` + `hatch_native_auth_device` / `__Host-hatch_one_tap`
+                # and dynamically negotiates the gateway token over HTTPS (`/api/auth/check` -> `/api/hatch/token`).
                 if (
                     not hatch_gw
-                    and has_muse_onetap
-                    and has_muse_layout
-                    and (hatch_vml or result["has_thread_url"])
+                    and not has_chk_cookie
+                    and (has_muse_onetap or has_muse_native_dev)
+                    and (
+                        (has_muse_layout and (hatch_vml or result["has_thread_url"] or hatch_sess))
+                        or (hatch_sess and (has_muse_native_dev or result["has_thread_url"]))
+                    )
                 ):
                     hatch_gw = True
                     hatch_vml = True
+                elif (
+                    hatch_gw
+                    and not hatch_vml
+                    and not has_chk_cookie
+                    and (has_muse_onetap or has_muse_native_dev or result["has_thread_url"])
+                ):
+                    hatch_vml = True
+                if (
+                    not has_ps_l
+                    and not has_chk_cookie
+                    and has_meta_fs
+                    and len(datr_hosts) >= 3
+                    and (has_muse_onetap or has_muse_native_dev)
+                ):
+                    has_ps_l = True
                 if rows and not hatch_sess and len(rows) > 1:
                     hatch_sess = True
 

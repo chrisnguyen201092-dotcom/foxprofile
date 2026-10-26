@@ -3781,4 +3781,130 @@ def test_ip_and_subnet_collision_detection_comprehensive(isolated_pm, tmp_path):
     assert len({c.v6_prefix for c in sq.candidates}) == len(sq.candidates)
 
 
+def test_muse_2026_10_cookie_and_protocol_updates(tmp_path):
+    """Verify 2026-10 muse.ai protocol updates:
+    - /thread/new excluded from has_thread_url while /thread/<id> is accepted
+    - hatch_sess + hatch_native_auth_device (without legacy hatch_gw/hatch_vml) recognized as GW+VML ready
+    - metaaivm.com protected in anti-detect DOM guard and excluded from external warmup domains
+    - __Host- prefix cookies (e.g. __Host-hatch_one_tap) stripped of leading dot in domain
+    """
+    from src.services.browser.control import is_protected_anti_detect_url
+    from src.services.monitor import MonitorService, _is_muse_thread_url
+
+    # 1. Thread URL validation (/thread/new vs /thread/<id> and /library/artifacts/<slug>)
+    assert _is_muse_thread_url("https://muse.ai/thread/new") is False
+    assert _is_muse_thread_url("https://muse.ai/thread/new/") is False
+    assert _is_muse_thread_url("https://muse.ai/thread/new?aymh_complete=1") is False
+    assert _is_muse_thread_url("https://muse.ai/thread/") is False
+    assert _is_muse_thread_url("https://muse.ai/thread/019655a8-b123-7000-8000-abcdef123456") is True
+    assert _is_muse_thread_url("https://muse.ai/library/artifacts/trading-backtesting-repos") is True
+
+    # 2. Protected Anti-Detect domains include metaaivm.com and meta.ai
+    assert is_protected_anti_detect_url("https://hatch.metaaivm.com/v1/noise")[0] is True
+    assert is_protected_anti_detect_url("https://vm-01.metaaivm.com/workspace")[0] is True
+    assert is_protected_anti_detect_url("https://www.meta.ai/")[0] is True
+
+    # 3. __Host- cookie parsing in JSON, Netscape, and Header string formats
+    ext_items = [
+        {
+            "name": "__Host-hatch_one_tap",
+            "value": "tok_onetap",
+            "domain": ".muse.ai",
+            "hostOnly": False,
+            "path": "/sub",
+            "secure": False,
+        },
+        {
+            "name": "hatch_native_auth_device",
+            "value": "dev_123",
+            "domain": "muse.ai",
+            "hostOnly": False,
+            "path": "/",
+            "secure": True,
+        },
+    ]
+    parsed_json = cookies.parse_cookies(json.dumps(ext_items))
+    assert parsed_json[0]["name"] == "__Host-hatch_one_tap"
+    assert parsed_json[0]["domain"] == "muse.ai"  # no leading dot on __Host-
+    assert parsed_json[0]["path"] == "/"
+    assert parsed_json[0]["secure"] is True
+    assert parsed_json[1]["domain"] == ".muse.ai"
+
+    parsed_hdr = cookies.parse_cookies(
+        "Cookie: hatch_sess=s123; hatch_native_auth_device=d456; __Host-hatch_one_tap=o789"
+    )
+    by_cname = {c["name"]: c for c in parsed_hdr}
+    assert by_cname["hatch_sess"]["domain"] == ".muse.ai"
+    assert by_cname["hatch_native_auth_device"]["domain"] == ".muse.ai"
+    assert by_cname["__Host-hatch_one_tap"]["domain"] == "muse.ai"
+
+    summary = cookies.inspect_cookie_summary("Dummy", live_cookies=parsed_hdr)
+    assert summary["has_gw"] is True
+    assert summary["has_session"] is True
+
+    # 4. MonitorService disk inspection with 2026-10 muse.ai cookies (no legacy hatch_gw/hatch_vml)
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    now_ts = time.time()
+    now_exp = int(now_ts + 86400 * 30)
+    ctime = int((now_ts - 86400 * 10) * 1_000_000)
+
+    p_mod_dir = data_dir / "ModernMuse"
+    p_mod_dir.mkdir()
+    # Leave tab on /thread/new first to verify has_thread_url is False, yet hatch_sess + hatch_native_auth_device still grants GW+VML
+    (p_mod_dir / "tabs.json").write_text('["https://muse.ai/thread/new"]', encoding="utf-8")
+
+    conn = sqlite3.connect(str(p_mod_dir / "cookies.sqlite"))
+    conn.execute(
+        "CREATE TABLE moz_cookies (host TEXT, name TEXT, creationTime INTEGER, expiry INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO moz_cookies VALUES (?, ?, ?, ?)",
+        [
+            (".muse.ai", "hatch_sess", ctime, now_exp),
+            (".muse.ai", "hatch_native_auth_device", ctime, now_exp),
+            ("muse.ai", "__Host-hatch_one_tap", ctime, now_exp),
+            (".muse.ai", "datr", ctime, now_exp),
+            (".auth.meta.com", "datr", ctime, now_exp),
+            (".accountscenter.meta.com", "datr", ctime, now_exp),
+            (".auth.meta.com", "fs", ctime, now_exp),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    pl_conn = sqlite3.connect(str(p_mod_dir / "places.sqlite"))
+    pl_conn.execute("CREATE TABLE moz_places (url TEXT, rev_host TEXT, visit_count INTEGER)")
+    pl_conn.executemany(
+        "INSERT INTO moz_places VALUES (?, ?, ?)",
+        [
+            ("https://hatch.metaaivm.com/v1/noise", "moc.mviaatem.hctah.", 5),
+            ("https://www.wired.com/story/ai/", "moc.deriw.www.", 2),
+        ],
+    )
+    pl_conn.commit()
+    pl_conn.close()
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    prof = Profile(
+        name="ModernMuse",
+        proxy="http://u:p@209.141.40.174:5301",
+        timezone="America/Los_Angeles",
+        locale="en-US",
+    )
+    snap = mon.snapshot([prof], running_names=set())
+    info = snap.profiles["ModernMuse"]
+    assert info.has_thread_url is False  # /thread/new is not a saved thread
+    assert info.hatch_gw is True
+    assert info.hatch_vml is True
+    assert info.hatch_sess is True
+    assert info.has_muse_auth is True
+    assert info.has_ps_l is True  # Meta OIDC `fs` + 3 datr domains + native_auth recognized
+    assert info.ext_domains == 1  # metaaivm.com excluded from external warmup count; only wired.com counted
+
+
+
 

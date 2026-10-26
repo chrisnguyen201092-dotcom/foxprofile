@@ -23,8 +23,10 @@ TOKEN_HEADER = "X-Control-Token"
 
 PROTECTED_ANTI_DETECT_DOMAINS = (
     "muse.ai",
+    "metaaivm.com",
     "hatch.io",
     "meta.com",
+    "meta.ai",
     "facebook.com",
     "instagram.com",
     "challenges.cloudflare.com",

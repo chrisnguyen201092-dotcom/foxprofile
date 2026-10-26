@@ -7,7 +7,7 @@ import re
 from ..core.config import PROFILES_FILE
 
 DEFAULT_WARMUP_TEXT = """Nhóm 1: Hệ sinh thái Meta & Muse Chính thức (Tín hiệu First-Party — Ưu tiên số 1)
-(Camoufox cô lập cookie giữa các trang bằng Total Cookie Protection; chỉ các trang thuộc hệ Meta/Muse dưới đây mới đồng bộ trực tiếp cookie `datr`, `ps_l`, `layout_state` mà Meta Sigma kiểm tra)
+(Camoufox cô lập cookie giữa các trang bằng Total Cookie Protection; chỉ các trang thuộc hệ Meta/Muse dưới đây mới đồng bộ trực tiếp cookie `datr`, `ps_l`, `layout_state` mà Meta Sigma kiểm tra. Khi đóng trình duyệt, hãy để tab tại hội thoại thật `/thread/<id>`, không để ở `/thread/new`)
 https://muse.ai/?aymh_complete=1 — Đường dẫn truy cập trực tiếp Muse (bỏ qua vòng lặp chuyển hướng /aymh/redirect-cycle/).
 https://www.facebook.com — Duyệt 1–2 phút để làm mới trực tiếp cookie gốc `.facebook.com` (`datr`, `fr`, `ps_l`, `wd`).
 https://www.instagram.com — Duyệt giữ phiên Instagram liên kết trong Meta Accounts Center (`datr`, `ig_did`, `ps_l`).
