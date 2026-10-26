@@ -1254,7 +1254,7 @@ def _build_trust_score_chip(
         col = COLORS["text_dim"]
         label = get_string("trust_tier_warming", score=score)
     else:
-        col = "#F472B6"
+        col = "#F87171"
         label = get_string("trust_tier_cold", score=score)
 
     sess_status = (
@@ -1344,7 +1344,7 @@ def _build_trust_breakdown_panel(
                     else (
                         "#B45309"
                         if tier == "trusted"
-                        else (COLORS["text_dim"] if tier == "warming" else "#F472B6")
+                        else (COLORS["text_dim"] if tier == "warming" else "#F87171")
                     )
                 )
             )

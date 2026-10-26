@@ -1037,7 +1037,7 @@ def _build_squad_candidate_row(
                 else (
                     "#B45309"
                     if cand.trust_tier == "trusted"
-                    else (COLORS["text_dim"] if cand.trust_tier == "warming" else "#F472B6")
+                    else (COLORS["text_dim"] if cand.trust_tier == "warming" else "#F87171")
                 )
             )
         )

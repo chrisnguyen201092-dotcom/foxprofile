@@ -987,7 +987,7 @@ def _geo_score_badge(
                     else (
                         "#B45309"
                         if t_tier == "trusted"
-                        else (COLORS["text_dim"] if t_tier == "warming" else "#F472B6")
+                        else (COLORS["text_dim"] if t_tier == "warming" else "#F87171")
                     )
                 )
             )
