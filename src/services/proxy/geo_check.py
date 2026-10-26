@@ -340,7 +340,8 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
         or pc_data.get("organisation")
         or ""
     ).strip()
-    asn_str = str(pc_data.get("asn") or api_data.get("as") or "").split()[0].strip()
+    raw_asn_parts = str(pc_data.get("asn") or api_data.get("as") or "").split()
+    asn_str = raw_asn_parts[0].strip() if raw_asn_parts else ""
     detail_type = str(pc_data.get("type") or "").strip()
     hosting_flag = api_data.get("hosting")
     if not isinstance(hosting_flag, bool) and detail_type:

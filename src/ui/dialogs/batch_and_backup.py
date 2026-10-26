@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
 import pathlib
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import flet as ft
@@ -20,7 +22,9 @@ from ...services.proxy.geo_check import (
     lookup_ip_isp,
     lookup_ip_risk,
 )
+from ...utils.proxy_checker import check_proxy_sync
 from ...utils.proxy_parser import mask_proxy
+from ...utils.totp import fetch_hotmail_messages, parse_mail_credentials_line
 from ...utils.validation import validate_profile_name, validate_proxy_format
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_os_dropdown
@@ -484,6 +488,7 @@ def open_backup_restore_dialog(
     page.show_dialog(dlg)
 
 
+
 def open_proxy_pool_dialog(
     page: ft.Page,
     get_profiles: Callable[[], list[Profile]],
@@ -505,6 +510,53 @@ def open_proxy_pool_dialog(
     editing_target: list[str | None] = [None]
     assigning_target: list[str | None] = [None]
     adding_open: list[bool] = [False]
+    local_px_status: dict[str, tuple[str, str]] = {}
+
+    def _check_single_proxy(px_target: str, first_prof: str | None = None) -> None:
+        local_px_status[px_target] = ("checking", f"⏳ {get_string('proxy_checking')}")
+        if first_prof is not None:
+            on_check_one(first_prof)
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+        def _worker() -> None:
+            ok, detail = check_proxy_sync(px_target, timeout=10)
+            local_px_status[px_target] = (
+                ("ok", f"✓ {detail}") if ok else ("error", f"✗ {detail}")
+            )
+            _rebuild()
+            with contextlib.suppress(Exception):
+                page.update()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _check_proxy_list(px_targets: list[str], also_call_all: bool = False) -> None:
+        if not px_targets:
+            return
+        for p_item in px_targets:
+            local_px_status[p_item] = ("checking", f"⏳ {get_string('proxy_checking')}")
+        if also_call_all:
+            with contextlib.suppress(Exception):
+                on_check_all()
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+        def _batch_worker() -> None:
+            def _one(p_item: str) -> None:
+                ok, detail = check_proxy_sync(p_item, timeout=10)
+                local_px_status[p_item] = (
+                    ("ok", f"✓ {detail}") if ok else ("error", f"✗ {detail}")
+                )
+
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(_one, px_targets))
+            _rebuild()
+            with contextlib.suppress(Exception):
+                page.update()
+
+        threading.Thread(target=_batch_worker, daemon=True).start()
 
     add_input = ft.TextField(
         hint_text=get_string("batch_proxies_hint"),
@@ -621,6 +673,18 @@ def open_proxy_pool_dialog(
             free_port = extract_proxy_port(free_px) or "PROXY"
             free_masked = mask_proxy(free_px)
             is_assigning = assigning_target[0] == free_px
+            free_st = local_px_status.get(free_px)
+            free_st_controls: list[ft.Control] = []
+            if free_st is not None:
+                f_kind, f_msg = free_st
+                f_col = (
+                    COLORS["success"]
+                    if f_kind == "ok"
+                    else (COLORS["accent"] if f_kind == "checking" else COLORS["error"])
+                )
+                free_st_controls.append(
+                    ft.Text(f_msg, size=11.5, font_family=FONT_DATA, color=f_col)
+                )
 
             def _toggle_assign(target_px: str = free_px) -> Callable[[ft.ControlEvent], None]:
                 def _cb(_: ft.ControlEvent) -> None:
@@ -705,6 +769,7 @@ def open_proxy_pool_dialog(
                                                 color=COLORS["success"],
                                             ),
                                         ),
+                                        *free_st_controls,
                                     ],
                                 ),
                                 ft.Text(
@@ -718,6 +783,16 @@ def open_proxy_pool_dialog(
                             spacing=6,
                             tight=True,
                             controls=[
+                                ft.OutlinedButton(
+                                    get_string("pool_check_one_btn"),
+                                    icon=ft.Icons.WIFI_FIND,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    tooltip=get_string("check_proxy"),
+                                    on_click=lambda _, target_px=free_px: _check_single_proxy(
+                                        target_px
+                                    ),
+                                ),
                                 *(
                                     [
                                         ft.OutlinedButton(
@@ -827,7 +902,7 @@ def open_proxy_pool_dialog(
             masked = mask_proxy(px_str)
             live_members = [m for m in member_names if m in running]
             first_member = member_names[0]
-            st_pair = status_map.get(first_member)
+            st_pair = local_px_status.get(px_str) or status_map.get(first_member)
 
             status_controls: list[ft.Control] = []
             if live_members:
@@ -904,11 +979,12 @@ def open_proxy_pool_dialog(
 
                 return _cb
 
-            def _check_this(first_prof: str = first_member) -> Callable[[ft.ControlEvent], None]:
+            def _check_this(
+                target_px: str = px_str,
+                first_prof: str = first_member,
+            ) -> Callable[[ft.ControlEvent], None]:
                 def _cb(_: ft.ControlEvent) -> None:
-                    on_check_one(first_prof)
-                    _rebuild()
-                    page.update()
+                    _check_single_proxy(target_px, first_prof)
 
                 return _cb
 
@@ -961,12 +1037,11 @@ def open_proxy_pool_dialog(
                             spacing=6,
                             tight=True,
                             controls=[
-                                ft.IconButton(
+                                ft.OutlinedButton(
+                                    get_string("pool_check_one_btn"),
                                     icon=ft.Icons.WIFI_FIND,
-                                    icon_size=17,
-                                    width=32,
                                     height=32,
-                                    padding=0,
+                                    style=OUTLINE_STYLE,
                                     tooltip=get_string("check_proxy"),
                                     on_click=_check_this(),
                                 ),
@@ -1054,8 +1129,16 @@ def open_proxy_pool_dialog(
     _rebuild()
 
     def _handle_check_all(_: ft.ControlEvent) -> None:
-        page.pop_dialog()
-        on_check_all()
+        spares = get_unassigned() if get_unassigned is not None else []
+        assigned = sorted(
+            {
+                (p.proxy or "").strip()
+                for p in get_profiles()
+                if (p.proxy or "").strip()
+            }
+        )
+        all_px = list(dict.fromkeys([*spares, *assigned]))
+        _check_proxy_list(all_px, also_call_all=True)
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -1109,6 +1192,706 @@ def open_proxy_pool_dialog(
                 ),
                 ft.Text(
                     get_string("proxy_pool_subtitle"),
+                    size=12.5,
+                    color=COLORS["text_sub"],
+                ),
+            ],
+        ),
+        content=ft.Container(
+            width=980,
+            content=ft.Column(
+                spacing=8,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    stats_text,
+                    add_box,
+                    notice_text,
+                    list_col,
+                ],
+            ),
+        ),
+        actions=[
+            ft.TextButton(
+                get_string("close_btn"),
+                style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                on_click=lambda _: page.pop_dialog(),
+            ),
+        ],
+    )
+    page.show_dialog(dlg)
+
+
+def open_mail_pool_dialog(
+    page: ft.Page,
+    get_profiles: Callable[[], list[Profile]],
+    *,
+    get_unassigned: Callable[[], list[str]],
+    on_add_to_pool: Callable[[list[str]], tuple[int, int]],
+    on_remove_from_pool: Callable[[str], bool],
+    on_assign_to_profile: Callable[[str, str], bool],
+    get_all_pool: Callable[[], list[str]] | None = None,
+) -> None:
+    """Central Mail Pool Manager dialog: view spare Hotmail/OAuth2 accounts, test Inbox, assign or hot-swap."""
+    notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
+    stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
+    list_col = ft.Column(spacing=6, height=540, scroll=ft.ScrollMode.AUTO)
+    assigning_target: list[str | None] = [None]
+    replacing_prof: list[str | None] = [None]
+    adding_open: list[bool] = [False]
+    mail_status: dict[str, tuple[str, str]] = {}
+
+    add_input = ft.TextField(
+        hint_text=get_string("mail_smart_paste_hint"),
+        multiline=True,
+        min_lines=3,
+        max_lines=6,
+        text_style=_DATA,
+        **DLG_FIELD_KWARGS,
+    )
+    add_box = ft.Container(
+        visible=False,
+        padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        border_radius=8,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["rule_strong"]),
+    )
+
+    def _toggle_add(_: ft.ControlEvent) -> None:
+        adding_open[0] = not adding_open[0]
+        add_box.visible = adding_open[0]
+        notice_text.visible = False
+        page.update()
+
+    def _submit_add(_: ft.ControlEvent) -> None:
+        lines = [ln.strip() for ln in (add_input.value or "").splitlines() if ln.strip()]
+        if not lines:
+            return
+        added, skipped = on_add_to_pool(lines)
+        add_input.value = ""
+        adding_open[0] = False
+        add_box.visible = False
+        notice_text.value = get_string("mail_pool_added_log", added=added, skipped=skipped)
+        notice_text.color = COLORS["success"] if added > 0 else COLORS["warning"]
+        notice_text.visible = True
+        _rebuild()
+        page.update()
+
+    add_box.content = ft.Column(
+        spacing=8,
+        tight=True,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        controls=[
+            ft.Text(
+                get_string("mail_pool_add_label"),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["text_sub"],
+            ),
+            add_input,
+            ft.Row(
+                alignment=ft.MainAxisAlignment.END,
+                spacing=8,
+                controls=[
+                    ft.TextButton(
+                        get_string("cancel"),
+                        style=ft.ButtonStyle(color=COLORS["text_sub"]),
+                        on_click=_toggle_add,
+                    ),
+                    ft.Button(
+                        get_string("mail_pool_add_submit"),
+                        icon=ft.Icons.ADD,
+                        height=34,
+                        style=ACCENT_STYLE,
+                        on_click=_submit_add,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    def _pool_token_map() -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        raw_pool = get_all_pool() if get_all_pool is not None else get_unassigned()
+        for ln in raw_pool:
+            p_item = parse_mail_credentials_line(ln)
+            em_k = (p_item.get("email") or "").strip().lower()
+            tk_v = (p_item.get("mail_token") or "").strip()
+            if em_k and tk_v:
+                mapping[em_k] = tk_v
+        return mapping
+
+    def _check_mail_credentials(em: str, tok: str) -> None:
+        em = em.strip()
+        tok = tok.strip()
+        if not em:
+            return
+        em_key = em.lower()
+        mail_status[em_key] = ("checking", "⏳ Đang kiểm tra...")
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+        def _worker() -> None:
+            ok, otp_or_err, msgs = fetch_hotmail_messages(em, tok, top=5, timeout=10)
+            if not ok:
+                mail_status[em_key] = ("error", f"✗ {otp_or_err[:45]}")
+            elif len(msgs) > 0:
+                otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
+                mail_status[em_key] = (
+                    "ok",
+                    f"✓ Thông tuyến (Inbox: {len(msgs)} thư{otp_tag})",
+                )
+            else:
+                mail_status[em_key] = ("warn", "⏳ Inbox: 0 thư (Khởi tạo trễ)")
+            _rebuild()
+            with contextlib.suppress(Exception):
+                page.update()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _check_mail_line(raw_line: str) -> None:
+        parsed = parse_mail_credentials_line(raw_line)
+        em = (parsed.get("email") or "").strip()
+        tok = (parsed.get("mail_token") or "").strip()
+        _check_mail_credentials(em, tok)
+
+    def _run_mail_batch(pairs: list[tuple[str, str]]) -> None:
+        valid_pairs = [(e.strip(), t.strip()) for e, t in pairs if e.strip()]
+        if not valid_pairs:
+            return
+        for em, _ in valid_pairs:
+            mail_status[em.lower()] = ("checking", "⏳ Đang kiểm tra...")
+        _rebuild()
+        with contextlib.suppress(Exception):
+            page.update()
+
+        def _batch_worker() -> None:
+            def _one(pair: tuple[str, str]) -> None:
+                em, tok = pair
+                em_key = em.lower()
+                ok, otp_or_err, msgs = fetch_hotmail_messages(em, tok, top=5, timeout=10)
+                if not ok:
+                    mail_status[em_key] = ("error", f"✗ {otp_or_err[:45]}")
+                elif len(msgs) > 0:
+                    otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
+                    mail_status[em_key] = (
+                        "ok",
+                        f"✓ Thông tuyến (Inbox: {len(msgs)} thư{otp_tag})",
+                    )
+                else:
+                    mail_status[em_key] = ("warn", "⏳ Inbox: 0 thư (Khởi tạo trễ)")
+
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(_one, valid_pairs))
+            _rebuild()
+            with contextlib.suppress(Exception):
+                page.update()
+
+        threading.Thread(target=_batch_worker, daemon=True).start()
+
+    def _check_all_mails(_: ft.ControlEvent) -> None:
+        tok_map = _pool_token_map()
+        seen: set[str] = set()
+        pairs: list[tuple[str, str]] = []
+        for sp in get_unassigned():
+            parsed = parse_mail_credentials_line(sp)
+            em = (parsed.get("email") or "").strip()
+            tok = (parsed.get("mail_token") or "").strip()
+            if em and em.lower() not in seen:
+                seen.add(em.lower())
+                pairs.append((em, tok))
+        for p in get_profiles():
+            if (p.group or "").strip().lower() == "disconnected" or p.banned_at:
+                continue
+            em = (p.email or "").strip()
+            if not em or em.lower() in seen:
+                continue
+            tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
+            if tok:
+                seen.add(em.lower())
+                pairs.append((em, tok))
+        _run_mail_batch(pairs)
+
+    def _rebuild() -> None:
+        profiles = get_profiles()
+        unassigned_list = get_unassigned()
+        live_profiles = [
+            p
+            for p in profiles
+            if (p.group or "").strip().lower() != "disconnected" and not p.banned_at
+        ]
+        assigned_profiles = [p for p in live_profiles if (p.email or "").strip()]
+        empty_profiles = [p for p in live_profiles if not (p.email or "").strip()]
+
+        stats_text.value = get_string(
+            "mail_pool_stats_full",
+            assigned=len(assigned_profiles),
+            free=len(unassigned_list),
+            empty=len(empty_profiles),
+        )
+
+        list_col.controls.clear()
+        if not unassigned_list and not assigned_profiles:
+            list_col.controls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=40),
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Text(
+                        get_string("mail_pool_empty"),
+                        size=13.5,
+                        color=COLORS["text_dim"],
+                    ),
+                )
+            )
+            return
+
+        # 1. Render unassigned spare mails first
+        for idx, free_line in enumerate(unassigned_list, 1):
+            parsed = parse_mail_credentials_line(free_line)
+            em_str = (parsed.get("email") or free_line).strip()
+            rec_str = (parsed.get("recovery_email") or "").strip()
+            has_tok = bool((parsed.get("mail_token") or "").strip())
+            is_assigning = assigning_target[0] == em_str.lower()
+            st_pair = mail_status.get(em_str.lower())
+
+            st_controls: list[ft.Control] = []
+            if st_pair is not None:
+                st_kind, st_msg = st_pair
+                st_color = (
+                    COLORS["success"]
+                    if st_kind == "ok"
+                    else (
+                        COLORS["warning"]
+                        if st_kind == "warn"
+                        else (COLORS["accent"] if st_kind == "checking" else COLORS["error"])
+                    )
+                )
+                st_controls.append(
+                    ft.Text(st_msg, size=11.5, font_family=FONT_SEMIBOLD, color=st_color)
+                )
+
+            def _toggle_assign(target_em: str = em_str.lower()) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    notice_text.visible = False
+                    assigning_target[0] = None if assigning_target[0] == target_em else target_em
+                    _rebuild()
+                    page.update()
+
+                return _cb
+
+            def _do_remove(target_em: str = em_str) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    if on_remove_from_pool(target_em):
+                        _rebuild()
+                        page.update()
+
+                return _cb
+
+            def _do_assign(
+                prof_name: str,
+                raw_ln: str = free_line,
+                email_lbl: str = em_str,
+            ) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    if on_assign_to_profile(prof_name, raw_ln):
+                        assigning_target[0] = None
+                        notice_text.value = get_string(
+                            "mail_pool_assigned_log",
+                            email=email_lbl,
+                            name=prof_name,
+                        )
+                        notice_text.color = COLORS["success"]
+                        notice_text.visible = True
+                        _rebuild()
+                        page.update()
+
+                return _cb
+
+            sub_parts = [get_string("mail_pool_unassigned_sub")]
+            if rec_str:
+                sub_parts.append(f"Khôi phục: {rec_str}")
+            if has_tok:
+                sub_parts.append("OAuth2 Token ✓")
+
+            free_children: list[ft.Control] = [
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Column(
+                            spacing=3,
+                            expand=True,
+                            controls=[
+                                ft.Row(
+                                    spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    controls=[
+                                        ft.Container(
+                                            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                            border_radius=5,
+                                            bgcolor=COLORS["accent"],
+                                            content=ft.Text(
+                                                f"#{idx}",
+                                                size=11,
+                                                font_family=FONT_DATA,
+                                                color="#FFFFFF",
+                                            ),
+                                        ),
+                                        ft.Text(
+                                            em_str,
+                                            size=12.5,
+                                            font_family=FONT_DATA,
+                                            color=COLORS["text_main"],
+                                            selectable=True,
+                                        ),
+                                        ft.Container(
+                                            padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                                            border_radius=4,
+                                            bgcolor=ft.Colors.with_opacity(0.14, COLORS["success"]),
+                                            border=ft.Border.all(1, COLORS["success"]),
+                                            content=ft.Text(
+                                                get_string("mail_pool_unassigned_badge"),
+                                                size=10,
+                                                font_family=FONT_SEMIBOLD,
+                                                color=COLORS["success"],
+                                            ),
+                                        ),
+                                        *st_controls,
+                                    ],
+                                ),
+                                ft.Text(
+                                    " · ".join(sub_parts),
+                                    size=11.5,
+                                    color=COLORS["text_sub"],
+                                ),
+                            ],
+                        ),
+                        ft.Row(
+                            spacing=6,
+                            tight=True,
+                            controls=[
+                                ft.OutlinedButton(
+                                    get_string("pool_check_one_btn"),
+                                    icon=ft.Icons.MARK_EMAIL_READ_OUTLINED,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    tooltip=get_string("mail_pool_check_one_tooltip"),
+                                    on_click=lambda _, ln=free_line: _check_mail_line(ln),
+                                ),
+                                ft.OutlinedButton(
+                                    get_string("mail_pool_assign_btn"),
+                                    icon=ft.Icons.PERSON_ADD_ALT_1_OUTLINED,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    on_click=_toggle_assign(),
+                                ),
+                                ft.IconButton(
+                                    icon=ft.Icons.DELETE_OUTLINE,
+                                    icon_size=17,
+                                    width=32,
+                                    height=32,
+                                    padding=0,
+                                    icon_color=COLORS["text_sub"],
+                                    tooltip=get_string("mail_pool_remove_tooltip"),
+                                    on_click=_do_remove(),
+                                ),
+                            ],
+                        ),
+                    ],
+                )
+            ]
+
+            if is_assigning and live_profiles:
+                candidates = sorted(
+                    live_profiles,
+                    key=lambda p: (
+                        bool((p.email or "").strip()),
+                        not p.name.isdigit(),
+                        -(int(p.name) if p.name.isdigit() else 0),
+                        p.name.casefold(),
+                    ),
+                )
+                free_children.append(
+                    ft.Column(
+                        spacing=5,
+                        tight=True,
+                        controls=[
+                            ft.Text(
+                                get_string("mail_pool_assign_hint"),
+                                size=11.5,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_sub"],
+                            ),
+                            ft.Row(
+                                wrap=True,
+                                spacing=6,
+                                run_spacing=6,
+                                controls=[
+                                    ft.Container(
+                                        padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                                        border_radius=5,
+                                        bgcolor=COLORS["card_bg"],
+                                        border=ft.Border.all(
+                                            1,
+                                            COLORS["accent"]
+                                            if not (cand.email or "").strip()
+                                            else COLORS["rule_strong"],
+                                        ),
+                                        ink=True,
+                                        tooltip=(cand.email or get_string("mail_pool_no_mail_short")),
+                                        on_click=_do_assign(cand.name),
+                                        content=ft.Text(
+                                            cand.name
+                                            + (
+                                                f" ({get_string('mail_pool_no_mail_short')})"
+                                                if not (cand.email or "").strip()
+                                                else ""
+                                            ),
+                                            size=11.5,
+                                            font_family=FONT_MEDIUM,
+                                            color=COLORS["accent"]
+                                            if not (cand.email or "").strip()
+                                            else COLORS["text_main"],
+                                        ),
+                                    )
+                                    for cand in candidates[:36]
+                                ],
+                            ),
+                        ],
+                    )
+                )
+
+            list_col.controls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                    border_radius=8,
+                    bgcolor=COLORS["card_bg"],
+                    border=ft.Border.all(1, COLORS["accent"]),
+                    content=ft.Column(spacing=8, tight=True, controls=free_children),
+                )
+            )
+
+        # 2. Render assigned mails on active profiles (newest numeric profiles first)
+        tok_map = _pool_token_map()
+        sorted_assigned = sorted(
+            assigned_profiles,
+            key=lambda p: (
+                not p.name.isdigit(),
+                -(int(p.name) if p.name.isdigit() else 0),
+                p.name.casefold(),
+            ),
+        )
+        for prof in sorted_assigned:
+            em_val = (prof.email or "").strip()
+            tok_val = (getattr(prof, "mail_token", None) or "").strip() or tok_map.get(
+                em_val.lower(), ""
+            )
+            is_rep = replacing_prof[0] == prof.name
+            prof_st_pair = mail_status.get(em_val.lower())
+            prof_st_controls: list[ft.Control] = []
+            if tok_val:
+                prof_st_controls.append(
+                    ft.Text("OAuth2 ✓", size=11, font_family=FONT_DATA, color=COLORS["text_sub"])
+                )
+            if prof_st_pair is not None:
+                p_kind, p_msg = prof_st_pair
+                p_col = (
+                    COLORS["success"]
+                    if p_kind == "ok"
+                    else (
+                        COLORS["warning"]
+                        if p_kind == "warn"
+                        else (COLORS["accent"] if p_kind == "checking" else COLORS["error"])
+                    )
+                )
+                prof_st_controls.append(
+                    ft.Text(p_msg, size=11.5, font_family=FONT_SEMIBOLD, color=p_col)
+                )
+
+            def _toggle_rep(pname: str = prof.name) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    replacing_prof[0] = None if replacing_prof[0] == pname else pname
+                    _rebuild()
+                    page.update()
+
+                return _cb
+
+            def _do_swap(
+                raw_ln: str,
+                pname: str = prof.name,
+            ) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    new_em = (parse_mail_credentials_line(raw_ln).get("email") or "").strip()
+                    if on_assign_to_profile(pname, raw_ln):
+                        replacing_prof[0] = None
+                        notice_text.value = get_string(
+                            "mail_pool_assigned_log",
+                            email=new_em,
+                            name=pname,
+                        )
+                        notice_text.color = COLORS["success"]
+                        notice_text.visible = True
+                        _rebuild()
+                        page.update()
+
+                return _cb
+
+            row_children: list[ft.Control] = [
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Row(
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Container(
+                                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                                    border_radius=5,
+                                    bgcolor=COLORS["sidebar"],
+                                    content=ft.Text(
+                                        prof.name,
+                                        size=11.5,
+                                        font_family=FONT_SEMIBOLD,
+                                        color=COLORS["cover_ink"],
+                                    ),
+                                ),
+                                ft.Text(
+                                    em_val,
+                                    size=12.5,
+                                    font_family=FONT_DATA,
+                                    color=COLORS["text_main"],
+                                    selectable=True,
+                                ),
+                                *prof_st_controls,
+                            ],
+                        ),
+                        ft.Row(
+                            spacing=6,
+                            tight=True,
+                            controls=[
+                                ft.OutlinedButton(
+                                    get_string("pool_check_one_btn"),
+                                    icon=ft.Icons.MARK_EMAIL_READ_OUTLINED,
+                                    height=30,
+                                    style=OUTLINE_STYLE,
+                                    tooltip=get_string("mail_pool_check_one_tooltip"),
+                                    on_click=lambda _, e=em_val, t=tok_val: _check_mail_credentials(
+                                        e, t
+                                    ),
+                                ),
+                                ft.OutlinedButton(
+                                    get_string("proxy_pool_replace_btn"),
+                                    icon=ft.Icons.SWAP_HORIZ,
+                                    height=30,
+                                    style=OUTLINE_STYLE,
+                                    on_click=_toggle_rep(),
+                                ),
+                            ],
+                        ),
+                    ],
+                )
+            ]
+
+            if is_rep and unassigned_list:
+                row_children.append(
+                    ft.Column(
+                        spacing=4,
+                        tight=True,
+                        controls=[
+                            ft.Text(
+                                get_string("mail_pool_pick_spare", count=len(unassigned_list)),
+                                size=11.5,
+                                color=COLORS["text_sub"],
+                            ),
+                            ft.Row(
+                                wrap=True,
+                                spacing=6,
+                                run_spacing=6,
+                                controls=[
+                                    ft.Container(
+                                        padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                                        border_radius=5,
+                                        bgcolor=COLORS["card_bg"],
+                                        border=ft.Border.all(1, COLORS["accent"]),
+                                        ink=True,
+                                        on_click=_do_swap(sp_ln),
+                                        content=ft.Text(
+                                            (
+                                                parse_mail_credentials_line(sp_ln).get("email")
+                                                or sp_ln
+                                            ).strip(),
+                                            size=11.5,
+                                            font_family=FONT_DATA,
+                                            color=COLORS["accent"],
+                                        ),
+                                    )
+                                    for sp_ln in unassigned_list[:14]
+                                ],
+                            ),
+                        ],
+                    )
+                )
+
+            list_col.controls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                    border_radius=8,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["border"]),
+                    content=ft.Column(spacing=6, tight=True, controls=row_children),
+                )
+            )
+
+    _rebuild()
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        bgcolor=COLORS["card_bg"],
+        shape=ft.RoundedRectangleBorder(radius=12),
+        inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
+        title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
+        content_padding=ft.Padding.only(left=24, right=24, top=8, bottom=8),
+        actions_padding=ft.Padding.only(left=24, right=24, top=8, bottom=20),
+        title=ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(
+                            get_string("mail_pool_title"),
+                            size=19,
+                            font_family=FONT_BOLD,
+                            color=COLORS["text_main"],
+                        ),
+                        ft.Row(
+                            spacing=8,
+                            tight=True,
+                            controls=[
+                                ft.OutlinedButton(
+                                    get_string("mail_pool_add_btn"),
+                                    icon=ft.Icons.ADD,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    on_click=_toggle_add,
+                                ),
+                                ft.OutlinedButton(
+                                    get_string("mail_pool_check_all_btn"),
+                                    icon=ft.Icons.MARK_EMAIL_READ_OUTLINED,
+                                    height=32,
+                                    style=OUTLINE_STYLE,
+                                    on_click=_check_all_mails,
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                ft.Text(
+                    get_string("mail_pool_subtitle"),
                     size=12.5,
                     color=COLORS["text_sub"],
                 ),
@@ -3097,3 +3880,4 @@ def open_trust_monitor_dialog(
         ],
     )
     page.show_dialog(dlg)
+

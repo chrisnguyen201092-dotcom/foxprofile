@@ -43,6 +43,7 @@ from .dialogs import (
     open_cooldown_settings_dialog,
     open_log_dialog,
     open_mail_credentials_dialog,
+    open_mail_pool_dialog,
     open_prelaunch_guard_dialog,
     open_profile_dates_dialog,
     open_proxy_pool_dialog,
@@ -369,6 +370,49 @@ class AppHandlers:
             on_add_to_pool=_add_to_pool,
             on_remove_from_pool=_remove_from_pool,
             on_assign_to_profile=_assign_to_profile,
+        )
+
+    def on_open_mail_pool(self) -> None:
+        page = self._get_page()
+        if page is None:
+            return
+
+        def _add_to_pool(lines: list[str]) -> tuple[int, int]:
+            if not hasattr(self._pm, "add_mails_to_pool"):
+                return (0, 0)
+            added, skipped = self._pm.add_mails_to_pool(lines)
+            if added > 0:
+                self._log(get_string("mail_pool_added_log", added=added, skipped=skipped))
+                self._refresh()
+            return added, skipped
+
+        def _remove_from_pool(em_or_line: str) -> bool:
+            if not hasattr(self._pm, "remove_mail_from_pool"):
+                return False
+            ok = self._pm.remove_mail_from_pool(em_or_line)
+            if ok:
+                self._refresh()
+            return ok
+
+        def _assign_to_profile(prof_name: str, raw_line: str) -> bool:
+            if not hasattr(self._pm, "assign_mail_to_profile"):
+                return False
+            ok = self._pm.assign_mail_to_profile(prof_name, raw_line)
+            if ok:
+                p_obj = self._pm.profiles.get(prof_name)
+                em_str = (p_obj.email or "") if p_obj else ""
+                self._log(get_string("mail_pool_assigned_log", email=em_str, name=prof_name))
+                self._refresh()
+            return ok
+
+        open_mail_pool_dialog(
+            page,
+            self._pm.list_profiles,
+            get_unassigned=getattr(self._pm, "list_unassigned_mails", lambda: []),
+            on_add_to_pool=_add_to_pool,
+            on_remove_from_pool=_remove_from_pool,
+            on_assign_to_profile=_assign_to_profile,
+            get_all_pool=getattr(self._pm, "list_mail_pool", None),
         )
 
     def on_clone(self, name: str) -> None:
@@ -700,6 +744,7 @@ class AppHandlers:
             on_bulk_import=_bulk_import,
             on_copy_text=_copy_text,
             initial_tab=initial_tab,
+            get_unassigned_mails=getattr(self._pm, "list_unassigned_mails", None),
         )
 
     def on_open_warmup_sites(self) -> None:

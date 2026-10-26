@@ -50,6 +50,7 @@ def build_header_row(
     on_select_all: Callable[[bool], None],
     *,
     on_open_proxy_pool: Callable[[], None] | None = None,
+    on_open_mail_pool: Callable[[], None] | None = None,
     cooldown_chip_label: str = "",
     on_open_cooldown: Callable[[], None] | None = None,
     on_open_warmup_sites: Callable[[], None] | None = None,
@@ -135,6 +136,15 @@ def build_header_row(
                 get_string("proxy_pool_btn"),
                 get_string("proxy_pool_title"),
                 on_open_proxy_pool,
+            )
+        )
+    if on_open_mail_pool is not None:
+        prof_chips.append(
+            _head_chip(
+                ft.Icons.MARK_EMAIL_UNREAD_OUTLINED,
+                get_string("mail_pool_btn"),
+                get_string("mail_pool_title"),
+                on_open_mail_pool,
             )
         )
     if on_open_cooldown is not None and cooldown_chip_label:

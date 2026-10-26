@@ -1107,6 +1107,7 @@ class MonitorService:
         self._live_stopped_at: dict[str, dt.datetime] = {}
         self._live_sessions: dict[str, list[dict[str, Any]]] = {}
         self._disk_cache: dict[str, dict[str, Any]] = {}
+        self._disk_cache_dirty: bool = False
         self._last_free_gb_ts: float = 0.0
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
@@ -1232,6 +1233,17 @@ class MonitorService:
                             if m_list:
                                 clean_squads[sk] = m_list
                     self._fixed_work_squads = clean_squads
+                raw_disk = raw.get("disk_cache")
+                if isinstance(raw_disk, dict):
+                    clean_disk: dict[str, dict[str, Any]] = {}
+                    for pname, dval in raw_disk.items():
+                        if (
+                            isinstance(pname, str)
+                            and isinstance(dval, dict)
+                            and dval.get("_cache_ver") == 2
+                        ):
+                            clean_disk[pname] = dict(dval)
+                    self._disk_cache = clean_disk
 
     def _save_settings(self) -> None:
         path = self._settings_file()
@@ -1250,6 +1262,11 @@ class MonitorService:
                 "last_shifts": self._last_shifts,
                 "schedule_cycle_days": self._schedule_cycle_days,
                 "fixed_work_squads": self._fixed_work_squads,
+                "disk_cache": {
+                    k: v
+                    for k, v in self._disk_cache.items()
+                    if isinstance(v, dict) and not v.get("_is_running")
+                },
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
@@ -1731,9 +1748,7 @@ class MonitorService:
                     continue
                 ts_str = m.group("ts")
                 msg = m.group("msg").strip()
-                try:
-                    ts = dt.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
+                if not msg:
                     continue
 
                 mr = _RE_RENAME_PROFILE.match(msg)
@@ -1779,12 +1794,16 @@ class MonitorService:
                 if mb:
                     pname = mb.group("prof").strip()
                     rest = mb.group("rest").strip()
-                    h = _ensure(pname)
                     if (
                         rest.startswith("Starting browser for ")
                         or rest.startswith("\u0110ang kh\u1edfi \u0111\u1ed9ng tr\u00ecnh duy\u1ec7t cho ")
                         or rest == "BROWSER_STARTED"
                     ):
+                        try:
+                            ts = dt.datetime.fromisoformat(ts_str)
+                        except ValueError:
+                            continue
+                        h = _ensure(pname)
                         if h["_open_start"] is None or (
                             rest != "BROWSER_STARTED"
                             and (ts - h["_open_start"]).total_seconds() > 120.0
@@ -1793,6 +1812,11 @@ class MonitorService:
                     elif rest in ("BROWSER_CLOSED", "LAUNCH_CANCELLED") or rest.startswith(
                         "LAUNCH_FAILED:"
                     ):
+                        try:
+                            ts = dt.datetime.fromisoformat(ts_str)
+                        except ValueError:
+                            continue
+                        h = _ensure(pname)
                         if rest == "BROWSER_CLOSED":
                             _close_session(h, pname, ts, ts_str)
                         else:
@@ -1801,6 +1825,10 @@ class MonitorService:
 
                 mst = _RE_STARTING.match(msg)
                 if mst:
+                    try:
+                        ts = dt.datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
                     pname = mst.group("prof").strip()
                     h = _ensure(pname)
                     is_ready_line = msg.startswith("Browser started for profile:")
@@ -1824,6 +1852,10 @@ class MonitorService:
                     or _RE_SESSION_ENDED.match(msg)
                 )
                 if ms:
+                    try:
+                        ts = dt.datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
                     pname = next(g for g in ms.groups() if g is not None).strip()
                     h = _ensure(pname)
                     _close_session(h, pname, ts, ts_str)
@@ -1919,9 +1951,19 @@ class MonitorService:
             ct_sec = float(cached.get("_datr_ctime_sec") or 0.0)
             if 0 < ct_sec <= now_ts:
                 cached["datr_age_days"] = round((now_ts - ct_sec) / 86400.0, 2)
+            latest_exp_sec = float(cached.get("_latest_exp_sec") or 0.0)
+            if latest_exp_sec > 0:
+                rem_h = (latest_exp_sec - now_ts) / 3600.0
+                if rem_h < 0:
+                    cached["sess_exp"] = "Hết hạn"
+                elif rem_h < 24:
+                    cached["sess_exp"] = f"Còn {int(rem_h)}h"
+                else:
+                    cached["sess_exp"] = f"Còn {int(rem_h // 24)}d"
             if not is_running:
                 if (
-                    cached.get("_tabs_mtime") == tabs_mtime
+                    cached.get("_cache_ver") == 2
+                    and cached.get("_tabs_mtime") == tabs_mtime
                     and cached.get("_cookies_mtime") == cookies_mtime
                     and cached.get("_places_mtime") == places_mtime
                     and cached.get("_fp_mtime") == fp_mtime
@@ -1940,6 +1982,7 @@ class MonitorService:
                 return cached
 
         result: dict[str, Any] = {
+            "_cache_ver": 2,
             "_ts": now_ts,
             "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
@@ -1947,6 +1990,7 @@ class MonitorService:
             "_places_mtime": -1.0 if is_running else places_mtime,
             "_fp_mtime": fp_mtime,
             "_datr_ctime_sec": cached.get("_datr_ctime_sec", 0.0) if cached else 0.0,
+            "_latest_exp_sec": cached.get("_latest_exp_sec", 0.0) if cached else 0.0,
             "has_thread_url": False,
             "tab_count": 0,
             "hatch_gw": cached.get("hatch_gw", False) if cached else False,
@@ -1971,11 +2015,16 @@ class MonitorService:
             "cookie_domains": cached.get("cookie_domains", 0) if cached else 0,
             "history_pages": cached.get("history_pages", 0) if cached else 0,
             "history_domains": cached.get("history_domains", 0) if cached else 0,
-            "fp_hash": cached.get("fp_hash", "") if cached else "",
-            "fp_hw_sig": cached.get("fp_hw_sig", "") if cached else "",
+            "fp_hash": (cached.get("fp_hash", "") if cached else "") if fp_mtime > 0 else "",
+            "fp_hw_sig": (cached.get("fp_hw_sig", "") if cached else "") if fp_mtime > 0 else "",
+            "device_label": (cached.get("device_label", "") if cached else "") if fp_mtime > 0 else "",
         }
 
-        if fp_mtime > 0 and (not cached or cached.get("_fp_mtime") != fp_mtime):
+        if fp_mtime > 0 and (
+            not cached
+            or cached.get("_fp_mtime") != fp_mtime
+            or not cached.get("device_label")
+        ):
             try:
                 raw_fp = fp_file.read_text(encoding="utf-8", errors="replace")
                 fp_obj = json.loads(raw_fp)
@@ -1997,6 +2046,11 @@ class MonitorService:
                     )[:48]
                     if plat and w and h_px:
                         result["fp_hw_sig"] = f"{plat}|{w}x{h_px}|{cores}c|{rend}"
+                    scr_lbl = f"{w}x{h_px}" if w else ""
+                    cpu_lbl = f"{cores} CPU" if cores is not None and cores != "" else ""
+                    result["device_label"] = (
+                        f"{scr_lbl} · {cpu_lbl}" if (scr_lbl and cpu_lbl) else cpu_lbl
+                    )
             except Exception:
                 pass
 
@@ -2145,6 +2199,7 @@ class MonitorService:
                 result["has_ps_l"] = has_ps_l
                 result["has_meta_checkpoint"] = has_chk_cookie
                 result["_datr_ctime_sec"] = earliest_datr_ct
+                result["_latest_exp_sec"] = latest_exp
                 result["datr_age_days"] = round(datr_age_days, 2)
                 result["datr_domains"] = len(datr_hosts)
                 result["cookie_count"] = len(rows)
@@ -2237,6 +2292,8 @@ class MonitorService:
                 result["burst_10m"] = burst_10m
 
         self._disk_cache[name] = result
+        if not is_running:
+            self._disk_cache_dirty = True
         return result
 
     def snapshot(
@@ -2258,6 +2315,16 @@ class MonitorService:
         hist = self._refresh_log_history()
 
         # Group profiles by proxy endpoint (host:port) and by /64 cluster so same-branch cooldowns are tracked
+        banned_names: set[str] = {
+            p.name
+            for p in profiles
+            if (
+                p.banned_at
+                or is_ban_status(p.status)
+                or has_ban_page(p.pages)
+                or is_ban_page(p.group)
+            )
+        }
         port_to_profiles: dict[str, list[str]] = {}
         cluster_to_profiles: dict[str, list[str]] = {}
         v6_to_profiles: dict[str, list[str]] = {}
@@ -2312,9 +2379,7 @@ class MonitorService:
             lc = h.get("last_closed")
             if completed:
                 with contextlib.suppress(ValueError):
-                    end_dt = dt.datetime.strptime(
-                        str(completed[0].get("end", "")), "%Y-%m-%d %H:%M:%S"
-                    )
+                    end_dt = dt.datetime.fromisoformat(str(completed[0].get("end", "")))
                     if lc is None or end_dt > lc:
                         lc = end_dt
             live_stop = self._live_stopped_at.get(p.name)
@@ -2339,8 +2404,8 @@ class MonitorService:
                 total_all_mins += max(1, int(s_item.get("duration_mins") or 0))
                 if en_str.startswith(today_str) or st_str.startswith(today_str):
                     try:
-                        st_dt = dt.datetime.strptime(st_str, "%Y-%m-%d %H:%M:%S")
-                        en_dt = dt.datetime.strptime(en_str, "%Y-%m-%d %H:%M:%S")
+                        st_dt = dt.datetime.fromisoformat(st_str)
+                        en_dt = dt.datetime.fromisoformat(en_str)
                         eff_st = max(st_dt, midnight_today)
                         secs += max(0.0, (en_dt - eff_st).total_seconds())
                     except ValueError:
@@ -2364,7 +2429,8 @@ class MonitorService:
                 total_all_mins,
             )
 
-        if ports_seeded:
+        if ports_seeded or self._disk_cache_dirty:
+            self._disk_cache_dirty = False
             self._save_settings()
 
         snap = MonitorSnapshot(
@@ -2437,7 +2503,11 @@ class MonitorService:
                         if vm not in cd_candidates:
                             cd_candidates.append(vm)
                 for sib in cd_candidates:
-                    if sib == p.name or sib in running_names:
+                    if (
+                        sib == p.name
+                        or sib in running_names
+                        or (p.name not in banned_names and sib in banned_names)
+                    ):
                         continue
                     sib_lc = last_closed_map.get(sib)
                     if sib_lc is not None:
@@ -2757,7 +2827,7 @@ class MonitorService:
 
             cluster_busy_by: list[str] = []
             if not is_run and not busy_by:
-                if cluster:
+                if cluster and not is_gateway_ipv6_cluster(cluster):
                     cluster_busy_by = [
                         m for m in running_by_cluster.get(cluster, []) if m != p.name
                     ]
@@ -2780,10 +2850,15 @@ class MonitorService:
                 and disk["burst_10m"] < TOKEN_BURST_THRESHOLD
             )
 
+            eff_siblings = (
+                [m for m in siblings if m not in banned_names or m in running_names]
+                if p.name not in banned_names
+                else siblings
+            )
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
                 port=port,
-                shared_count=len(siblings),
+                shared_count=max(1, len(eff_siblings)),
                 last_closed=lc,
                 cooldown_mins=cooldown_mins,
                 running_mins=running_mins,
@@ -3114,6 +3189,34 @@ class MonitorService:
                     )
                 )
 
+            # Layer 2d: Reopening a Disconnected/Banned profile whose port was reassigned to a live profile
+            ep_check = extract_proxy_endpoint(proxy_str)
+            if info and info.is_banned and ep_check:
+                live_owners = [
+                    p.name
+                    for p in all_profiles
+                    if p.name != profile.name
+                    and extract_proxy_endpoint(p.proxy) == ep_check
+                    and not (
+                        p.banned_at
+                        or is_ban_status(p.status)
+                        or has_ban_page(p.pages)
+                        or is_ban_page(p.group)
+                    )
+                ]
+                if live_owners:
+                    warnings.append(
+                        PreLaunchWarning(
+                            code="port_reassigned_live",
+                            level="critical",
+                            message=get_string(
+                                "guard_port_reassigned_live",
+                                port=info.port or ep_check,
+                                others=", ".join(live_owners),
+                            ),
+                        )
+                    )
+
             # Layer 4: Proxy is set, but Timezone or Locale is missing (unpinned)
             if not (profile.timezone or "").strip() or not (profile.locale or "").strip():
                 warnings.append(
@@ -3170,13 +3273,6 @@ class MonitorService:
         seen_ports: dict[str, str] = {}
         seen_clusters: dict[str, str] = {}
         seen_v6_64: dict[str, str] = {}
-        gw_batch_names: dict[str, list[str]] = {}
-        for r_name in active_names:
-            rp = by_name.get(r_name)
-            if rp is not None:
-                rcl = extract_proxy_cluster(rp.proxy)
-                if rcl and is_gateway_ipv6_cluster(rcl):
-                    gw_batch_names.setdefault(rcl, []).append(r_name)
         issues: dict[str, list[PreLaunchWarning]] = {}
 
         for name in target_names:
@@ -3231,22 +3327,6 @@ class MonitorService:
                     )
                 else:
                     seen_clusters[cluster] = name
-            elif not port_collided and cluster and is_gateway_ipv6_cluster(cluster):
-                prev_gw = gw_batch_names.get(cluster, [])
-                if len(prev_gw) >= 1 and not any(w.code == "cluster_busy" for w in wlist):
-                    wlist.insert(
-                        0,
-                        PreLaunchWarning(
-                            code="batch_cluster_collision",
-                            level="warning",
-                            message=get_string(
-                                "guard_batch_cluster_collision",
-                                cluster=cluster,
-                                other=", ".join(prev_gw[:2]),
-                            ),
-                        ),
-                    )
-                gw_batch_names.setdefault(cluster, []).append(name)
             if (
                 not port_collided
                 and my_v6

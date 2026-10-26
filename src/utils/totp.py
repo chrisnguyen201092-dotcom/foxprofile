@@ -428,7 +428,8 @@ def _fetch_via_graph_api(
 ) -> list[dict[str, str]] | None:
     url = (
         f"https://graph.microsoft.com/v1.0/me/messages?"
-        f"%24top={int(top)}&%24select=subject,from,receivedDateTime,bodyPreview,body"
+        f"%24top={int(top)}&%24orderby=receivedDateTime%20desc"
+        f"&%24select=subject,from,receivedDateTime,bodyPreview,body"
     )
     req = urllib.request.Request(
         url,

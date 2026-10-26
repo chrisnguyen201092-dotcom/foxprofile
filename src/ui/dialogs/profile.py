@@ -926,6 +926,7 @@ def open_mail_credentials_dialog(
     *,
     initial_tab: str = "single",
     preloaded_messages: list[dict[str, str]] | None = None,
+    get_unassigned_mails: Callable[[], list[str]] | None = None,
 ) -> None:
     """Dedicated Mail Login Credentials manager dialog (single profile + inbox OTP + bulk import)."""
     active_tab: list[str] = [initial_tab if initial_tab in ("single", "inbox", "bulk") else "single"]
@@ -1076,42 +1077,93 @@ def open_mail_credentials_dialog(
     )
     two_fa_section.visible = bool((two_fa_field.value or "").strip())
 
+    spare_mails_slot = ft.Container(visible=False)
+
+    def _apply_raw_mail_line(raw: str) -> None:
+        parsed = parse_mail_credentials_line(raw)
+        if parsed["email"]:
+            email_field.value = parsed["email"]
+        if parsed["password"]:
+            password_field.value = parsed["password"]
+        if parsed["two_fa"]:
+            two_fa_field.value = parsed["two_fa"]
+            two_fa_section.visible = True
+        if parsed.get("mail_token"):
+            mail_token_field.value = parsed["mail_token"]
+        if parsed["recovery_email"]:
+            recovery_field.value = parsed["recovery_email"]
+        if parsed["notes"] and not (notes_field.value or "").strip():
+            notes_field.value = parsed["notes"]
+        quick_paste_field.value = ""
+        _refresh_otp_preview()
+        em_v = (email_field.value or "").strip() or None
+        pw_v = (password_field.value or "").strip() or None
+        tfa_v = (two_fa_field.value or "").strip() or None
+        rec_v = (recovery_field.value or "").strip() or None
+        tok_v = (mail_token_field.value or "").strip() or None
+        nt_v = (notes_field.value or "").strip() or None
+        sig_qp = inspect.signature(on_save_single)
+        if len(sig_qp.parameters) >= 6:
+            on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v, tok_v)
+        else:
+            on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v)
+        _rebuild_spare_mails()
+        feedback_text.value = f"✓ {get_string('mail_saved_log', name=profile.name)}"
+        feedback_text.color = COLORS["success"]
+        feedback_text.visible = True
+        page.update()
+
+    def _rebuild_spare_mails() -> None:
+        if get_unassigned_mails is None:
+            spare_mails_slot.visible = False
+            return
+        spares = get_unassigned_mails()
+        if not spares:
+            spare_mails_slot.visible = False
+            return
+        spare_mails_slot.visible = True
+        chips: list[ft.Control] = []
+        for sp_line in spares[:10]:
+            em_lbl = (parse_mail_credentials_line(sp_line).get("email") or sp_line).strip()
+            chips.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=5,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["accent"]),
+                    ink=True,
+                    tooltip=em_lbl,
+                    on_click=lambda _, ln=sp_line: _apply_raw_mail_line(ln),
+                    content=ft.Text(
+                        em_lbl,
+                        size=11,
+                        font_family=FONT_DATA,
+                        color=COLORS["accent"],
+                    ),
+                )
+            )
+        spare_mails_slot.content = ft.Column(
+            spacing=4,
+            tight=True,
+            controls=[
+                ft.Text(
+                    get_string("mail_pool_pick_spare", count=len(spares)),
+                    size=11.5,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_sub"],
+                ),
+                ft.Row(spacing=6, wrap=True, run_spacing=6, controls=chips),
+            ],
+        )
+
+    _rebuild_spare_mails()
+
     def _on_quick_paste_change(_: ft.ControlEvent) -> None:
         raw = (quick_paste_field.value or "").strip()
         if not raw:
             return
         if "|" in raw or "\t" in raw or ";" in raw or (":" in raw and "@" in raw):
-            parsed = parse_mail_credentials_line(raw)
-            if parsed["email"]:
-                email_field.value = parsed["email"]
-            if parsed["password"]:
-                password_field.value = parsed["password"]
-            if parsed["two_fa"]:
-                two_fa_field.value = parsed["two_fa"]
-                two_fa_section.visible = True
-            if parsed.get("mail_token"):
-                mail_token_field.value = parsed["mail_token"]
-            if parsed["recovery_email"]:
-                recovery_field.value = parsed["recovery_email"]
-            if parsed["notes"] and not (notes_field.value or "").strip():
-                notes_field.value = parsed["notes"]
-            quick_paste_field.value = ""
-            _refresh_otp_preview()
-            em_v = (email_field.value or "").strip() or None
-            pw_v = (password_field.value or "").strip() or None
-            tfa_v = (two_fa_field.value or "").strip() or None
-            rec_v = (recovery_field.value or "").strip() or None
-            tok_v = (mail_token_field.value or "").strip() or None
-            nt_v = (notes_field.value or "").strip() or None
-            sig_qp = inspect.signature(on_save_single)
-            if len(sig_qp.parameters) >= 6:
-                on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v, tok_v)
-            else:
-                on_save_single(em_v, pw_v, tfa_v, rec_v, nt_v)
-            feedback_text.value = f"✓ {get_string('mail_saved_log', name=profile.name)}"
-            feedback_text.color = COLORS["success"]
-            feedback_text.visible = True
-            page.update()
+            _apply_raw_mail_line(raw)
 
     quick_paste_field.on_change = _on_quick_paste_change
 
@@ -1136,6 +1188,7 @@ def open_mail_credentials_dialog(
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         controls=[
             _field(get_string("mail_smart_paste_label"), quick_paste_field),
+            spare_mails_slot,
             _field(
                 get_string("email_optional"),
                 ft.Row(

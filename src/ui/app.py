@@ -655,6 +655,7 @@ class App:
                 any_sel,
                 lambda select: self.h.on_select_all_page() if select else self.h.on_deselect_page(),
                 on_open_proxy_pool=self.h.on_open_proxy_pool,
+                on_open_mail_pool=self.h.on_open_mail_pool,
                 cooldown_chip_label=self._cooldown_chip_text(),
                 on_open_cooldown=self.h.on_open_cooldown_settings,
                 on_open_warmup_sites=self.h.on_open_warmup_sites,
@@ -752,8 +753,17 @@ class App:
         r.next_btn.disabled = self.state.current_page >= total_pages
         self._safe_update()
 
-    @staticmethod
-    def _device_label(name: str) -> str:
+    def _device_label(self, name: str) -> str:
+        cached = self.monitor._disk_cache.get(name) if hasattr(self, "monitor") else None
+        if cached is not None:
+            if cached.get("_fp_mtime", 0.0) > 0:
+                lbl = cached.get("device_label")
+                if isinstance(lbl, str) and lbl:
+                    return lbl
+            else:
+                prof = self.pm.profiles.get(name) if hasattr(self, "pm") else None
+                if prof is not None and getattr(prof, "browser_engine", "camoufox") != "chrome":
+                    return ""
         info = fingerprint.summary(os.path.join(DATA_DIR, name))
         if not info:
             return ""

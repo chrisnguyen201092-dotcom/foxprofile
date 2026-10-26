@@ -179,17 +179,34 @@ def validate_locale(value: str) -> tuple[bool, str]:
     """A language-region locale such as vi-VN; empty means automatic."""
     if not value:
         return True, ""
-    if not _LOCALE_PATTERN.match(value):
-        return False, get_string("validation_invalid_locale", value=value)
-    try:
-        from camoufox.locales import normalize_locale
-
-        normalize_locale(value)
-    except ImportError:
-        pass
-    except Exception:
+    if not _is_valid_locale_tag(value):
         return False, get_string("validation_invalid_locale", value=value)
     return True, ""
+
+
+@functools.cache
+def _is_valid_locale_tag(value: str) -> bool:
+    if not _LOCALE_PATTERN.match(value):
+        return False
+    try:
+        from language_tags import tags
+
+        if not tags.check(value):
+            return False
+        parsed = tags.tag(value)
+        return bool(parsed.region and parsed.language)
+    except ImportError:
+        try:
+            from camoufox.locales import normalize_locale
+
+            normalize_locale(value)
+        except ImportError:
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def valid_or_none(value: object, validate: Callable[[str], tuple[bool, str]]) -> str | None:

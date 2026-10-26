@@ -3598,14 +3598,100 @@ def test_work_squad_prioritizes_today_farming_schedule(isolated_pm, tmp_path):
     ]
 
 
+def test_mail_pool_management_and_dialog(isolated_pm):
+    from src.ui.dialogs import open_mail_credentials_dialog, open_mail_pool_dialog
+
+    isolated_pm.add_profile("M1", "http://127.0.0.1:8081", "windows", email="old1@hotmail.com")
+    isolated_pm.profiles["M1"].password = "OldPass1"
+    isolated_pm.profiles["M1"].mail_token = "M.C1_BAY.0.U.-oldtok|client1"
+    isolated_pm.add_profile("M2", "http://127.0.0.1:8082", "windows")
+
+    added, skipped = isolated_pm.add_mails_to_pool(
+        [
+            "1.spare1@hotmail.com|PassA|M.C501_BAY.0.U.-tokA|clientA|recA@smvmail.com",
+            "2.spare2@hotmail.com|PassB|M.C502_BAY.0.U.-tokB|clientB|recB@smvmail.com",
+            "spare1@hotmail.com|DuplicatePass",
+        ]
+    )
+    assert added == 2
+    assert skipped == 1
+    assert len(isolated_pm.list_unassigned_mails()) == 2
+
+    # Replacing M1's email preserves old1@hotmail.com back into mail_pool.json
+    assert isolated_pm.assign_mail_to_profile(
+        "M1", "spare1@hotmail.com|PassA|M.C501_BAY.0.U.-tokA|clientA|recA@smvmail.com"
+    )
+    assert isolated_pm.profiles["M1"].email == "spare1@hotmail.com"
+    assert isolated_pm.profiles["M1"].password == "PassA"
+    assert isolated_pm.profiles["M1"].recovery_email == "recA@smvmail.com"
+    unassigned_emails = [u.split("|", 1)[0] for u in isolated_pm.list_unassigned_mails()]
+    assert "old1@hotmail.com" in unassigned_emails
+    assert "spare2@hotmail.com" in unassigned_emails
+    assert "spare1@hotmail.com" not in unassigned_emails
+
+    # Removing an unassigned mail removes it cleanly
+    assert isolated_pm.remove_mail_from_pool("old1@hotmail.com")
+    assert [u.split("|", 1)[0] for u in isolated_pm.list_unassigned_mails()] == [
+        "spare2@hotmail.com"
+    ]
+
+    class DummyPage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, d):
+            self.dialogs.append(d)
+
+        def pop_dialog(self):
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self):
+            pass
+
+    dp = DummyPage()
+    open_mail_pool_dialog(
+        dp,  # type: ignore[arg-type]
+        lambda: list(isolated_pm.profiles.values()),
+        get_unassigned=isolated_pm.list_unassigned_mails,
+        on_add_to_pool=isolated_pm.add_mails_to_pool,
+        on_remove_from_pool=isolated_pm.remove_mail_from_pool,
+        on_assign_to_profile=isolated_pm.assign_mail_to_profile,
+    )
+    assert len(dp.dialogs) == 1
+
+    dp2 = DummyPage()
+    open_mail_credentials_dialog(
+        dp2,  # type: ignore[arg-type]
+        isolated_pm.profiles["M2"],
+        lambda _data: None,
+        get_unassigned_mails=isolated_pm.list_unassigned_mails,
+    )
+    assert len(dp2.dialogs) == 1
 
 
+def test_disconnected_shared_port_exclusion_and_reopen_guard(isolated_pm, tmp_path):
+    from src.services.monitor import MonitorService
 
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    shared_px = "http://u:p@209.141.40.174:5295"
+    isolated_pm.add_profile("DeadAcc", shared_px, "windows", pages=["Disconnected"])
+    isolated_pm.add_profile("LiveAcc", shared_px, "windows", pages=["LivePage"])
+    for p in isolated_pm.profiles.values():
+        p.ip_timezone = "America/Los_Angeles"
+        p.ip_locale = "en-US"
 
+    p_list = list(isolated_pm.profiles.values())
+    snap = mon.snapshot(p_list, running_names=set())
+    # LiveAcc must show shared_count == 1 (DeadAcc is excluded when closed)
+    assert snap.profiles["LiveAcc"].shared_count == 1
+    assert snap.profiles["LiveAcc"].port_cooldown_by is None
 
-
-
-
-
+    # Attempting to reopen DeadAcc while LiveAcc owns its port triggers CRITICAL port_reassigned_live
+    issues_dead = mon.check_prelaunch(isolated_pm.profiles["DeadAcc"], p_list, set())
+    assert any(it.code == "port_reassigned_live" and it.level == "critical" for it in issues_dead)
 
 

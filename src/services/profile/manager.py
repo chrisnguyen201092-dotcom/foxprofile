@@ -24,7 +24,11 @@ from ...models.profile import (
 )
 from ...services.monitor import extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
-from ...utils.totp import normalize_totp_secret, parse_mail_credentials_line
+from ...utils.totp import (
+    format_mail_credentials_line,
+    normalize_totp_secret,
+    parse_mail_credentials_line,
+)
 from ...utils.validation import (
     valid_or_none,
     validate_color,
@@ -84,6 +88,7 @@ class ProfileManager:
         self.custom_pages: list[str] = []
         self.all_page_index: int = 0
         self.proxy_pool: list[str] = []
+        self.mail_pool: list[str] = []
         self.status_tags: list[dict[str, str]] = default_status_tags()
         self._disk_mtime: float = 0.0
         set_active_status_tags(self.status_tags)
@@ -123,6 +128,10 @@ class ProfileManager:
         return pathlib.Path(PROFILES_FILE).with_name("proxy_pool.json")
 
     @staticmethod
+    def _mail_pool_file() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).with_name("mail_pool.json")
+
+    @staticmethod
     def _status_tags_file() -> pathlib.Path:
         return pathlib.Path(PROFILES_FILE).with_name("status_tags.json")
 
@@ -146,6 +155,20 @@ class ProfileManager:
             _replace(tmp, pool_path)
         except Exception as e:
             logger.exception("Error saving proxy pool: %s", e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+
+    def _save_mail_pool(self) -> None:
+        mp_path = self._mail_pool_file()
+        tmp = mp_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(self.mail_pool, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _replace(tmp, mp_path)
+        except Exception as e:
+            logger.exception("Error saving mail pool: %s", e)
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 
@@ -283,6 +306,30 @@ class ProfileManager:
                                 seen_px.add(norm)
                                 clean_pool.append(norm)
                     self.proxy_pool = clean_pool
+
+        mp_path = self._mail_pool_file()
+        if mp_path.exists():
+            with contextlib.suppress(Exception):
+                raw_mp = json.loads(mp_path.read_text(encoding="utf-8"))
+                if isinstance(raw_mp, list):
+                    seen_em: set[str] = set()
+                    clean_mp: list[str] = []
+                    for item in raw_mp:
+                        if isinstance(item, str) and item.strip():
+                            parsed = parse_mail_credentials_line(item.strip())
+                            em = (parsed.get("email") or "").strip().lower()
+                            if em and validate_email(em)[0] and em not in seen_em:
+                                seen_em.add(em)
+                                clean_mp.append(
+                                    format_mail_credentials_line(
+                                        parsed.get("email"),
+                                        parsed.get("password"),
+                                        parsed.get("two_fa"),
+                                        parsed.get("recovery_email"),
+                                        parsed.get("mail_token"),
+                                    )
+                                )
+                    self.mail_pool = clean_mp
 
         st_path = self._status_tags_file()
         if st_path.exists():
@@ -1497,6 +1544,116 @@ class ProfileManager:
                 self._save_proxy_pool()
                 return True
         return False
+
+    def list_mail_pool(self) -> list[str]:
+        with self._lock:
+            return list(self.mail_pool)
+
+    def list_unassigned_mails(self) -> list[str]:
+        """Return mail credential lines in `mail_pool` whose email is not assigned to any profile."""
+        with self._lock:
+            used_emails: set[str] = {
+                (p.email or "").strip().lower()
+                for p in self.profiles.values()
+                if (p.email or "").strip()
+            }
+            out: list[str] = []
+            for line in self.mail_pool:
+                parsed = parse_mail_credentials_line(line)
+                em = (parsed.get("email") or "").strip().lower()
+                if em and em not in used_emails:
+                    out.append(line)
+            return out
+
+    def add_mails_to_pool(self, raw_lines: list[str]) -> tuple[int, int]:
+        """Validate, normalize, and add new mail credential lines to the central mail pool."""
+        added = 0
+        skipped = 0
+        with self._lock:
+            existing_emails: set[str] = set()
+            for line in self.mail_pool:
+                em = (parse_mail_credentials_line(line).get("email") or "").strip().lower()
+                if em:
+                    existing_emails.add(em)
+            for raw in raw_lines:
+                s = (raw or "").strip()
+                if not s:
+                    continue
+                parsed = parse_mail_credentials_line(s)
+                em = (parsed.get("email") or "").strip()
+                if not em or not validate_email(em)[0]:
+                    skipped += 1
+                    continue
+                em_low = em.lower()
+                if em_low in existing_emails:
+                    skipped += 1
+                    continue
+                existing_emails.add(em_low)
+                norm_line = format_mail_credentials_line(
+                    em,
+                    parsed.get("password"),
+                    parsed.get("two_fa"),
+                    parsed.get("recovery_email"),
+                    parsed.get("mail_token"),
+                )
+                self.mail_pool.append(norm_line)
+                added += 1
+            if added:
+                self._save_mail_pool()
+        return added, skipped
+
+    def remove_mail_from_pool(self, email_or_line: str) -> bool:
+        target_raw = (email_or_line or "").strip()
+        if not target_raw:
+            return False
+        parsed_t = parse_mail_credentials_line(target_raw)
+        target_em = (parsed_t.get("email") or target_raw).strip().lower()
+        with self._lock:
+            before = len(self.mail_pool)
+            self.mail_pool = [
+                line
+                for line in self.mail_pool
+                if (parse_mail_credentials_line(line).get("email") or "").strip().lower()
+                != target_em
+            ]
+            if len(self.mail_pool) < before:
+                self._save_mail_pool()
+                return True
+        return False
+
+    def assign_mail_to_profile(self, name: str, raw_line: str) -> bool:
+        """Assign a mail credential line (`email|pass|token|client_id|recovery`) to profile `name`."""
+        parsed = parse_mail_credentials_line(raw_line)
+        em = (parsed.get("email") or "").strip()
+        if not em or not validate_email(em)[0]:
+            return False
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            # If the profile previously had a different email, preserve the old one in mail_pool if it had a token/password
+            old_em = (p.email or "").strip()
+            if old_em and old_em.lower() != em.lower() and (p.mail_token or p.password):
+                old_line = format_mail_credentials_line(
+                    old_em, p.password, p.two_fa, p.recovery_email, p.mail_token
+                )
+                pool_emails = {
+                    (parse_mail_credentials_line(ln).get("email") or "").strip().lower()
+                    for ln in self.mail_pool
+                }
+                if old_em.lower() not in pool_emails:
+                    self.mail_pool.insert(0, old_line)
+                    self._save_mail_pool()
+
+            return self.update_profile_credentials(
+                name,
+                email=em,
+                password=parsed.get("password") or None,
+                two_fa=parsed.get("two_fa") or p.two_fa,
+                recovery_email=parsed.get("recovery_email") or None,
+                notes=p.notes,
+                mail_token=parsed.get("mail_token") or None,
+            )
 
     def export_profiles_csv(self, csv_path: str, names: list[str] | None = None) -> int:
         """Export profiles metadata to a UTF-8-SIG CSV file (Excel-compatible)."""

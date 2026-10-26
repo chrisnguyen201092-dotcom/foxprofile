@@ -1,6 +1,7 @@
 from .batch_and_backup import (
     open_backup_restore_dialog,
     open_batch_create_dialog,
+    open_mail_pool_dialog,
     open_proxy_pool_dialog,
     open_session_history_dialog,
     open_trust_monitor_dialog,
@@ -45,6 +46,7 @@ __all__ = [
     "open_export_dialog",
     "open_log_dialog",
     "open_mail_credentials_dialog",
+    "open_mail_pool_dialog",
     "open_prelaunch_guard_dialog",
     "open_profile_dates_dialog",
     "open_profile_dialog",
