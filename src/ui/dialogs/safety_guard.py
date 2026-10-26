@@ -1049,44 +1049,62 @@ def _build_squad_candidate_row(
     )
     rest_h = int(round(cand.rest_hours))
 
-    right_badges: list[ft.Control] = [
-        ft.Container(
-            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-            border_radius=4,
-            bgcolor=cluster_col,
-            content=ft.Text(
-                f"{cand.cluster}{cand.port}",
-                size=11,
-                font_family=FONT_DATA,
-                color="#FFFFFF",
+    right_badges: list[ft.Control] = []
+    if cand.schedule_label:
+        right_badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.12, "#2563EB"),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, "#2563EB")),
+                content=ft.Text(
+                    f"📅 {cand.schedule_label}",
+                    size=10.5,
+                    font_family=FONT_SEMIBOLD,
+                    color="#2563EB",
+                ),
+            )
+        )
+    right_badges.extend(
+        [
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                border_radius=4,
+                bgcolor=cluster_col,
+                content=ft.Text(
+                    f"{cand.cluster}{cand.port}",
+                    size=11,
+                    font_family=FONT_DATA,
+                    color="#FFFFFF",
+                ),
             ),
-        ),
-        ft.Container(
-            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-            border_radius=4,
-            bgcolor=ft.Colors.with_opacity(0.11, tier_col),
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.55, tier_col)),
-            content=ft.Text(
-                f"{tier_sym} {cand.trust_score}",
-                size=11,
-                font_family=FONT_DATA,
-                weight=ft.FontWeight.W_700,
-                color=tier_col,
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.11, tier_col),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, tier_col)),
+                content=ft.Text(
+                    f"{tier_sym} {cand.trust_score}",
+                    size=11,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_700,
+                    color=tier_col,
+                ),
             ),
-        ),
-        ft.Container(
-            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-            border_radius=4,
-            bgcolor=COLORS["card_bg"],
-            border=ft.Border.all(1, COLORS["rule_strong"]),
-            content=ft.Text(
-                get_string("work_squad_rest_badge", hours=rest_h),
-                size=11,
-                font_family=FONT_DATA,
-                color=COLORS["text_sub"],
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                border_radius=4,
+                bgcolor=COLORS["card_bg"],
+                border=ft.Border.all(1, COLORS["rule_strong"]),
+                content=ft.Text(
+                    get_string("work_squad_rest_badge", hours=rest_h),
+                    size=11,
+                    font_family=FONT_DATA,
+                    color=COLORS["text_sub"],
+                ),
             ),
-        ),
-    ]
+        ]
+    )
     if cand.is_conflict:
         right_badges.append(
             ft.Container(

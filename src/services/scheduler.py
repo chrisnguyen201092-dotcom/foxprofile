@@ -1281,14 +1281,13 @@ def _resolve_profile_schedule_priority(
     *,
     has_active_schedule: bool,
 ) -> tuple[int, int, str]:
-    """Return `(sched_tier, pair_order, schedule_label)` to align work squads with Today's schedule.
+    """Return `(sched_tier, pair_order, schedule_label)` to align work squads with Today's un-run schedule.
 
     When `has_active_schedule` is True:
     - `sched_tier == 0`: Tagged for Today (`T2` on Monday, etc.) and has NOT run today yet.
-    - `sched_tier == 1`: Part of Today's farming cohort that already ran earlier today (either still
-      tagged for Today, or its Today tag was auto-cleared upon closing its browser today).
-    - `sched_tier == 2 + day_offset`: Tagged for a future day (`T3..CN`, offset 1..6 days ahead).
-    - `sched_tier == 9`: Untagged profile that has not run today (e.g. yesterday's completed cohort resting).
+    - `sched_tier == 1..6`: Tagged for upcoming days (`T3..CN`, offset 1..6 days ahead) and has NOT run today.
+    - `sched_tier == 7`: Untagged profile that has NOT run today.
+    - `sched_tier == 99`: Already opened today (`ran_today`) — never recommended ahead of un-opened accounts.
     """
     parsed_sched = parse_schedule_tag(p.status)
     shift_code = parse_schedule_shift(p.status)
@@ -1302,25 +1301,29 @@ def _resolve_profile_schedule_priority(
     if parsed_sched is not None:
         day_tag, pair_idx = parsed_sched
         shift_suffix = (
-            "·Sáng" if shift_code == "S" else ("·Tối" if shift_code == "T" else "")
+            "·Sáng"
+            if shift_code == "morning"
+            else ("·Tối" if shift_code == "evening" else "")
         )
         sched_label = f"{day_tag}·C{pair_idx}{shift_suffix}"
-        pair_order = (0 if shift_code == "S" else 1) * 50 + pair_idx
+        pair_order = (0 if shift_code == "morning" else 1) * 50 + pair_idx
         if not has_active_schedule:
-            return (0, pair_order, sched_label)
+            return (99 if ran_today else 0, pair_order, sched_label)
+        if ran_today:
+            return (99, pair_order, sched_label)
         if day_tag == today_wd_tag:
-            return (0 if not ran_today else 1, pair_order, sched_label)
+            return (0, pair_order, sched_label)
         day_idx = WEEKDAY_TAGS.index(day_tag) if day_tag in WEEKDAY_TAGS else 6
         day_offset = (day_idx - today_wd_idx) % 7 or 7
-        return (2 + day_offset, pair_order, sched_label)
+        return (day_offset, pair_order, sched_label)
 
     if not has_active_schedule:
-        return (0, 99, "")
+        return (99 if ran_today else 0, 99, "")
 
     if ran_today:
-        return (1, 90, f"Lịch {today_wd_tag}")
+        return (99, 99, "")
 
-    return (9, 99, "")
+    return (7, 99, "")
 
 
 @dataclass
@@ -1351,6 +1354,7 @@ def _build_fixed_work_squad_plan(
     """Partition eligible accounts into deterministic, time-invariant conflict-free /64 squads."""
     cand_by_name: dict[str, SquadCandidate] = {}
     rank_by_name: dict[str, tuple[int, int, float, str]] = {}
+    has_active_schedule = any(parse_schedule_tag(p.status) is not None for p in profiles)
 
     for p in profiles:
         grp = (p.group or "").strip().lower()
@@ -1395,8 +1399,14 @@ def _build_fixed_work_squad_plan(
         is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
         is_conflict = (p.name not in active_set) and (
             bool(info.has_warning)
-            or bool(info.cluster_busy_by)
+            or (not is_gateway_ipv6_cluster(cl) and bool(info.cluster_busy_by))
             or (not is_gateway_ipv6_cluster(cl) and cl in busy_clusters)
+        )
+        _, _, sched_label = _resolve_profile_schedule_priority(
+            p,
+            info,
+            now_dt,
+            has_active_schedule=has_active_schedule,
         )
         cand = SquadCandidate(
             name=p.name,
@@ -1413,6 +1423,7 @@ def _build_fixed_work_squad_plan(
             hatch_gw=info.hatch_gw,
             is_rising_star=is_rising,
             is_conflict=is_conflict,
+            schedule_label=sched_label,
         )
         cand_by_name[p.name] = cand
 
@@ -1424,7 +1435,12 @@ def _build_fixed_work_squad_plan(
             "trusted": 1,
         }.get(info.trust_tier, 2)
         jitter = _jitter_hash(p.name, shuffle_seed + 19) if shuffle_seed > 0 else 0.0
-        rank_by_name[p.name] = (gw_rank, tier_rank, jitter, p.name.casefold())
+        rank_by_name[p.name] = (
+            gw_rank,
+            tier_rank,
+            jitter,
+            p.name.casefold(),
+        )
 
     pinned_by_idx: dict[int, list[SquadCandidate]] = {}
     used_names: set[str] = set()
@@ -1524,11 +1540,12 @@ def _build_fixed_work_squad_plan(
                         if (is_gw and gw_counts.get(cl, 0) <= 1 and need_second_gw)
                         else (gw_counts.get(cl, 0) * 100)
                     )
+                    cand_rank = rank_by_name[pool[valid_idx].name]
                     avail_cls.append(
                         (
                             gw_slot_pen,
                             -len(pool),
-                            rank_by_name[pool[valid_idx].name],
+                            cand_rank,
                             cl,
                             valid_idx,
                         )
@@ -1642,8 +1659,8 @@ def select_parallel_work_squad(
             now_dt=now_dt,
         )
 
-    fresh_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
-    rested_fallback_by_cluster: dict[str, list[tuple[float, SquadCandidate]]] = {}
+    has_active_schedule = any(parse_schedule_tag(p.status) is not None for p in profiles)
+    cands_by_cluster: dict[str, list[tuple[int, float, SquadCandidate]]] = {}
 
     for p in profiles:
         if p.name in active_set:
@@ -1656,8 +1673,6 @@ def select_parallel_work_squad(
             continue
         info = snap.profiles.get(p.name)
         if info is None or info.is_banned:
-            continue
-        if info.has_warning or info.cluster_busy_by:
             continue
         if any(
             c in info.audit_codes
@@ -1682,7 +1697,8 @@ def select_parallel_work_squad(
         cl = extract_proxy_cluster(p.proxy)
         if not cl:
             continue
-        if not is_gateway_ipv6_cluster(cl) and cl in busy_clusters:
+        is_gw_cl = is_gateway_ipv6_cluster(cl)
+        if info.has_warning or (not is_gw_cl and (info.cluster_busy_by or cl in busy_clusters)):
             continue
 
         lc = info.last_closed
@@ -1692,6 +1708,12 @@ def select_parallel_work_squad(
             else 72.0
         )
         is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
+        sched_tier, pair_order, sched_label = _resolve_profile_schedule_priority(
+            p,
+            info,
+            now_dt,
+            has_active_schedule=has_active_schedule,
+        )
         cand = SquadCandidate(
             name=p.name,
             email=(p.email or p.name).strip(),
@@ -1706,38 +1728,57 @@ def select_parallel_work_squad(
             total_minutes=info.total_minutes,
             hatch_gw=info.hatch_gw,
             is_rising_star=is_rising,
+            schedule_label=sched_label,
         )
 
         # Fatigue check: avoid picking accounts that already worked today or closed recently
         min_rest_h = 18.0 if mode == "rotation" else 12.0
-        is_fatigued = info.today_minutes >= 15 or rest_h < min_rest_h
+        ran_today = bool(
+            info.today_minutes > 0 or (lc is not None and lc.date() == now_dt.date())
+        )
+        is_fatigued = ran_today or rest_h < min_rest_h
 
         gw_bonus = 1000.0 if info.hatch_gw else (300.0 if info.hatch_sess else 0.0)
-        jitter = _jitter_hash(p.name, shuffle_seed + 7) * 16.0
+        jitter_scale = 220.0 if (has_active_schedule and shuffle_seed > 0) else 16.0
+        jitter = _jitter_hash(p.name, shuffle_seed + 7) * jitter_scale
+        pair_bonus = (
+            max(0.0, (120 - pair_order) * 4.0)
+            if (has_active_schedule and sched_tier < 7 and shuffle_seed == 0)
+            else 0.0
+        )
         if mode == "prime":
             rank_score = (
                 gw_bonus
                 + info.trust_score * 5.0
                 + min(96.0, rest_h) * 0.6
+                + pair_bonus
                 + jitter
             )
         else:
             # Rotation mode: prioritize well-rested accounts and rising stars so strong accounts rest safely
             rising_bonus = 40.0 if (is_rising and rest_h >= 24.0) else 0.0
+            today_load_pen = min(120.0, info.today_minutes * 1.2)
             rank_score = (
                 gw_bonus
                 + min(120.0, rest_h) * 2.5
                 + info.trust_score * 0.8
                 + rising_bonus
+                - today_load_pen
+                + pair_bonus
                 + jitter
             )
 
-        bucket = rested_fallback_by_cluster if is_fatigued else fresh_by_cluster
-        bucket.setdefault(cl, []).append((rank_score, cand))
+        if has_active_schedule:
+            # 0 = Today un-run, 1..6 = Next days un-run (T3..CN), 7 = untagged un-run, 99 = already ran today / fatigued
+            bucket_tier = 99 if is_fatigued else sched_tier
+        else:
+            bucket_tier = 99 if is_fatigued else 0
+
+        cands_by_cluster.setdefault(cl, []).append((bucket_tier, rank_score, cand))
 
     # Pick top representative(s) per cluster: 1 for each usa10X /64 node, up to 2-3 for /48 gateway
     picked_pool: list[tuple[int, float, SquadCandidate]] = []
-    all_clusters = sorted(set(fresh_by_cluster) | set(rested_fallback_by_cluster))
+    all_clusters = sorted(cands_by_cluster)
     max_gw_take = min(3, max(1, (target_n + 2) // 3))
 
     for cl in all_clusters:
@@ -1746,22 +1787,23 @@ def select_parallel_work_squad(
         cap = max(0, max_gw_take - busy_cnt) if is_gw else 1
         if cap <= 0:
             continue
-        fresh_list = sorted(fresh_by_cluster.get(cl, []), key=lambda x: -x[0])
-        fb_list = sorted(rested_fallback_by_cluster.get(cl, []), key=lambda x: -x[0])
+        sorted_cands = sorted(
+            cands_by_cluster.get(cl, []),
+            key=lambda x: (x[0], -x[1], x[2].name.casefold()),
+        )
         chosen_for_cl: list[tuple[int, float, SquadCandidate]] = []
         seen_eps: set[str] = set()
-        for tier_priority, src_list in ((0, fresh_list), (1, fb_list)):
-            for sc, c_item in src_list:
-                if len(chosen_for_cl) >= cap:
-                    break
-                if c_item.endpoint and c_item.endpoint in seen_eps:
-                    continue
-                if c_item.endpoint:
-                    seen_eps.add(c_item.endpoint)
-                # Slightly defer extra gateway slots (2nd/3rd on 209.141.40.174) behind primary /64 nodes
-                slot_pen = len(chosen_for_cl) * 120.0
-                picked_pool.append((tier_priority, -(sc - slot_pen), c_item))
-                chosen_for_cl.append((tier_priority, sc, c_item))
+        for tier_priority, sc, c_item in sorted_cands:
+            if len(chosen_for_cl) >= cap:
+                break
+            if c_item.endpoint and c_item.endpoint in seen_eps:
+                continue
+            if c_item.endpoint:
+                seen_eps.add(c_item.endpoint)
+            # Slightly defer extra gateway slots (2nd/3rd on 209.141.40.174) behind primary /64 nodes
+            slot_pen = len(chosen_for_cl) * 120.0
+            picked_pool.append((tier_priority, -(sc - slot_pen), c_item))
+            chosen_for_cl.append((tier_priority, sc, c_item))
 
     picked_pool.sort(key=lambda item: (item[0], item[1], item[2].name.casefold()))
     final_candidates = [item[2] for item in picked_pool[:target_n]]

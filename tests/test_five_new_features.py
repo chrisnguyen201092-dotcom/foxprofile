@@ -3487,6 +3487,118 @@ def test_master_and_immortal_trust_tiers_above_diamond(tmp_path):
         assert _build_trust_breakdown_panel(info_obj, p_obj) is not None
 
 
+def test_work_squad_prioritizes_today_farming_schedule(isolated_pm, tmp_path):
+    """Verify select_parallel_work_squad picks Today's un-run schedule first and never re-recommends accounts already opened today."""
+    import datetime as dt
+
+    from src.services.monitor import MonitorService
+    from src.services.scheduler import select_parallel_work_squad
+    from src.ui.dialogs.safety_guard import _build_squad_candidate_row
+
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    # Monday 2026-10-26 (T2) at 14:00
+    monday = dt.datetime(2026, 10, 26, 14, 0, 0)
+
+    specs = [
+        # Today (T2) un-run Evening pair (sched_tier == 0)
+        ("T2_Unrun_GW", "http://u:p@209.141.40.174:5301", "T2-C2-T"),
+        ("T2_Unrun_U101", "http://u:p@sp02-usa101.proxysystem.net:10101", "T2-C2-T"),
+        # Today (T2) Morning pair that ALREADY ran today -> must NOT be recommended again today (sched_tier == 99)
+        ("T2_Done_U102", "http://u:p@sp02-usa102.proxysystem.net:10102", "ready"),
+        ("T2_Done_U103", "http://u:p@sp02-usa103.proxysystem.net:10103", "T2-C1-S"),
+        # Tomorrow (T3) un-run accounts (sched_tier == 1) and Wednesday (T4) un-run accounts (sched_tier == 2)
+        ("T3_Unrun_U104", "http://u:p@sp02-usa104.proxysystem.net:10104", "T3-C1-S"),
+        ("T3_Unrun_U105", "http://u:p@sp02-usa105.proxysystem.net:10105", "T3-C1-S"),
+        ("T4_Unrun_U106", "http://u:p@sp02-usa106.proxysystem.net:10106", "T4-C1-S"),
+    ]
+    for name, px, st in specs:
+        isolated_pm.add_profile(
+            name,
+            px,
+            "windows",
+            status=st,
+            email=f"{name.lower()}@hotmail.com",
+        )
+        p = isolated_pm.profiles[name]
+        p.ip_timezone = "America/Chicago"
+        p.ip_locale = "en-US"
+        p.created_at = "2026-09-01"
+
+    # Simulate T2_Done_U102 and T2_Done_U103 having run for 35m this morning on Monday (T2)
+    for done_name in ("T2_Done_U102", "T2_Done_U103"):
+        mon._live_stopped_at[done_name] = monday - dt.timedelta(hours=5)
+        mon._live_sessions[done_name] = [
+            {
+                "start": "2026-10-26 08:25:00",
+                "end": "2026-10-26 09:00:00",
+                "duration_mins": 35,
+                "port": ":10102",
+                "is_live": False,
+            }
+        ]
+
+    p_list = list(isolated_pm.profiles.values())
+    snap = mon.snapshot(p_list, running_names=set())
+
+    for mode in ("rotation", "prime"):
+        sq = select_parallel_work_squad(
+            p_list,
+            snap,
+            set(),
+            count=4,
+            mode=mode,
+            now=monday,
+        )
+        picked_names = [c.name for c in sq.candidates]
+        # Already-opened today accounts (T2_Done_*) must NEVER be recommended ahead of un-opened accounts
+        assert "T2_Done_U102" not in picked_names
+        assert "T2_Done_U103" not in picked_names
+        assert set(picked_names) == {
+            "T2_Unrun_GW",
+            "T2_Unrun_U101",
+            "T3_Unrun_U104",
+            "T3_Unrun_U105",
+        }
+        # Un-run T2 accounts (sched_tier == 0) come first, followed by un-run T3 accounts (sched_tier == 1)
+        assert set(picked_names[:2]) == {"T2_Unrun_GW", "T2_Unrun_U101"}
+        assert set(picked_names[2:]) == {"T3_Unrun_U104", "T3_Unrun_U105"}
+
+        by_name = {c.name: c for c in sq.candidates}
+        assert by_name["T2_Unrun_GW"].schedule_label == "T2·C2·Tối"
+        assert by_name["T3_Unrun_U104"].schedule_label == "T3·C1·Sáng"
+        row_ctrl = _build_squad_candidate_row(1, by_name["T2_Unrun_GW"])
+        assert row_ctrl is not None
+
+    # Fixed mode ("fixed") must keep its squad members 100% fixed regardless of whether an account ran today
+    sq_fixed_before = select_parallel_work_squad(
+        p_list,
+        snap,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=0,
+        now=monday,
+    )
+    mon._live_stopped_at["T2_Unrun_GW"] = monday - dt.timedelta(minutes=20)
+    snap_after = mon.snapshot(p_list, running_names=set())
+    sq_fixed_after = select_parallel_work_squad(
+        p_list,
+        snap_after,
+        set(),
+        count=4,
+        mode="fixed",
+        squad_index=0,
+        now=monday,
+    )
+    assert [c.name for c in sq_fixed_before.candidates] == [
+        c.name for c in sq_fixed_after.candidates
+    ]
+
+
+
 
 
 
