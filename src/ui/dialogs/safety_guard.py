@@ -62,7 +62,7 @@ def open_prelaunch_guard_dialog(
         on_force_launch()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         title=ft.Row(
             spacing=8,
@@ -183,7 +183,7 @@ def open_bulk_prelaunch_guard_dialog(
     )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         title=ft.Row(
             spacing=8,
@@ -286,7 +286,7 @@ def open_cooldown_settings_dialog(
     tf.on_submit = _save
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),
@@ -381,7 +381,7 @@ def open_token_burst_alert_dialog(
         )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         title=ft.Row(
@@ -941,7 +941,7 @@ def open_safe_schedule_dialog(
     _refresh_view(recompute=True)
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),
@@ -1574,7 +1574,7 @@ def open_work_squad_dialog(
     _refresh_squad(recompute=True)
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         title_padding=ft.Padding.only(left=24, right=24, top=20, bottom=0),

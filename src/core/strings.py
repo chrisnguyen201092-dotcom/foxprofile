@@ -588,10 +588,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ip_score_high": "❖ {score}pt · Risk",
         "ip_score_unscored": "◌ Score IP",
         "ip_score_tooltip": (
-            "✦ IP Fraud / Risk Score: {score}/100 (lower is cleaner)\n"
-            "• Scamalytics Fraud Score: {scam}/100\n"
-            "• ProxyCheck Risk: {pc}/100\n"
-            "• Proxy / VPN Flag: {flag}\n"
+            "✦ Meta IP Risk Score: {score}/100 (Scamalytics + ASN Factor)\n"
+            "• Scamalytics Base Score: {scam}/100 (+10pt if DC/Hosting ASN)\n"
+            "• ProxyCheck Reference: {pc}/100\n"
+            "• Network Flag: {flag}\n"
             "• ISP / ASN: {isp}"
         ),
         "ip_flag_yes": "⚠ Flagged (Proxy/VPN)",
@@ -1307,10 +1307,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ip_score_high": "❖ {score}pt · Rủi ro",
         "ip_score_unscored": "◌ Kiểm tra IP",
         "ip_score_tooltip": (
-            "✦ Điểm rủi ro IP: {score}/100 (càng thấp càng an toàn)\n"
-            "• Scamalytics Fraud Score: {scam}/100\n"
-            "• ProxyCheck Risk: {pc}/100\n"
-            "• Cờ Proxy / VPN: {flag}\n"
+            "✦ Điểm rủi ro IP (Chuẩn Meta): {score}/100 (Scamalytics + Hệ số ASN)\n"
+            "• Điểm gốc Scamalytics: {scam}/100 (+10đ nếu mạng DC/Hosting)\n"
+            "• Tham chiếu ProxyCheck: {pc}/100\n"
+            "• Trạng thái mạng: {flag}\n"
             "• Nhà mạng (ISP/ASN): {isp}"
         ),
         "ip_flag_yes": "⚠ Bị gắn cờ Proxy/VPN",

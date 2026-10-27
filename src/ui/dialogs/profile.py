@@ -608,7 +608,7 @@ def open_profile_dialog(
             on_batch_create()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -1614,7 +1614,7 @@ def open_mail_credentials_dialog(
     save_btn.on_click = _on_submit
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -1948,7 +1948,7 @@ def open_warmup_sites_dialog(
     _rebuild_tabs()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),

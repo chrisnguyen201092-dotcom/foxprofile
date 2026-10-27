@@ -23,7 +23,7 @@ def open_confirm_dialog(
         page.pop_dialog()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         title=ft.Text(
             title if title is not None else get_string("confirm_delete_msg", name=profile_name),
             size=18,

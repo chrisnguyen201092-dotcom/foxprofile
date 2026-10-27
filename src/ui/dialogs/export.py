@@ -112,7 +112,7 @@ def open_export_dialog(
     )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),

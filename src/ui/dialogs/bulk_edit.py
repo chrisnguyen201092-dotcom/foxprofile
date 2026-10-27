@@ -60,7 +60,7 @@ def open_bulk_group_dialog(
         )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -149,7 +149,7 @@ def open_bulk_color_dialog(
         )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -322,7 +322,7 @@ def open_bulk_proxy_dialog(
         _call_apply(valid_assignments, bool(auto_geo_cb.value))
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -712,7 +712,7 @@ def open_status_dialog(
     _rebuild_body()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -834,7 +834,7 @@ def open_profile_dates_dialog(
     banned_field.on_submit = _save
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),

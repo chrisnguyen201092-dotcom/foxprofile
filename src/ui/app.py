@@ -9,7 +9,12 @@ from ..core.container import Container
 from ..core.logging import get_logger
 from ..core.strings import current_language, get_string, set_language
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
-from ..models.profile import compute_days_since, parse_schedule_tag, schedule_sort_key
+from ..models.profile import (
+    compute_days_since,
+    natural_name_key,
+    parse_schedule_tag,
+    schedule_sort_key,
+)
 from ..services.browser import fingerprint
 from ..services.monitor import MonitorService, MonitorSnapshot
 from .components import (
@@ -461,19 +466,25 @@ class App:
             ]
         sort_by = self.state.sort_by
         if sort_by == "schedule":
-            all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), p.name.casefold()))
+            all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), natural_name_key(p.name)))
         elif sort_by == "name_asc":
-            all_profiles.sort(key=lambda p: p.name.casefold())
+            all_profiles.sort(key=lambda p: natural_name_key(p.name))
         elif sort_by == "name_desc":
-            all_profiles.sort(key=lambda p: p.name.casefold(), reverse=True)
+            all_profiles.sort(key=lambda p: natural_name_key(p.name), reverse=True)
         elif sort_by == "group":
             all_profiles.sort(
-                key=lambda p: (not bool(p.group), (p.group or "").casefold(), p.name.casefold())
+                key=lambda p: (
+                    not bool(p.group),
+                    natural_name_key(p.group or ""),
+                    natural_name_key(p.name),
+                )
             )
         elif sort_by == "running":
-            all_profiles.sort(key=lambda p: (not self.bl.is_running(p.name), p.name.casefold()))
+            all_profiles.sort(
+                key=lambda p: (not self.bl.is_running(p.name), natural_name_key(p.name))
+            )
         elif sort_by == "proxy":
-            all_profiles.sort(key=lambda p: (not bool(p.proxy), p.name.casefold()))
+            all_profiles.sort(key=lambda p: (not bool(p.proxy), natural_name_key(p.name)))
         elif sort_by in ("cooldown_desc", "cooldown_asc"):
             snap = self._last_monitor_snap or self.monitor.snapshot(
                 self.pm.list_profiles(),
@@ -483,21 +494,21 @@ class App:
             def _cd_desc_key(p: object) -> tuple:
                 pname = getattr(p, "name", "")
                 if self.bl.is_running(pname):
-                    return (2, 0, pname.casefold())
+                    return (2, 0, natural_name_key(pname))
                 info = snap.profiles.get(pname)
                 if info is not None and info.cooldown_mins is not None:
                     port_busy = 1 if (info.busy_by or info.port_cooldown_by) else 0
-                    return (0, port_busy, -info.cooldown_mins, pname.casefold())
-                return (1, 0, 0, pname.casefold())
+                    return (0, port_busy, -info.cooldown_mins, natural_name_key(pname))
+                return (1, 0, 0, natural_name_key(pname))
 
             def _cd_asc_key(p: object) -> tuple:
                 pname = getattr(p, "name", "")
                 if self.bl.is_running(pname):
-                    return (0, 0, pname.casefold())
+                    return (0, 0, natural_name_key(pname))
                 info = snap.profiles.get(pname)
                 if info is not None and info.cooldown_mins is not None:
-                    return (1, info.cooldown_mins, pname.casefold())
-                return (2, 0, pname.casefold())
+                    return (1, info.cooldown_mins, natural_name_key(pname))
+                return (2, 0, natural_name_key(pname))
 
             all_profiles.sort(key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key)
         elif sort_by in ("trust_desc", "trust_asc"):
@@ -510,7 +521,7 @@ class App:
                 pname = getattr(p, "name", "")
                 info = snap.profiles.get(pname)
                 score = info.trust_score if info is not None else 0
-                return (-score if sort_by == "trust_desc" else score, pname.casefold())
+                return (-score if sort_by == "trust_desc" else score, natural_name_key(pname))
 
             all_profiles.sort(key=_trust_key)
         elif sort_by in ("age_desc", "age_asc"):
@@ -528,8 +539,8 @@ class App:
                     else compute_days_since(getattr(p, "created_at", None))
                 )
                 if days is None:
-                    return (1, 0, pname.casefold())
-                return (0, -days if sort_by == "age_desc" else days, pname.casefold())
+                    return (1, 0, natural_name_key(pname))
+                return (0, -days if sort_by == "age_desc" else days, natural_name_key(pname))
 
             all_profiles.sort(key=_age_key)
 

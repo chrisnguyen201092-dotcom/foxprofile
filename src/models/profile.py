@@ -157,6 +157,21 @@ def parse_schedule_shift(status: str | None) -> str | None:
     return None
 
 
+_RE_NATURAL_CHUNKS = re.compile(r"(\d+)")
+
+
+def natural_name_key(name: str | None) -> tuple[str, ...]:
+    """Natural sort key so numeric names order as 1, 2, ..., 9, 10, 11 instead of 1, 10, ..., 19, 2."""
+    clean = (name or "").strip()
+    if not clean:
+        return ("",)
+    return tuple(
+        f"{int(part):012d}" if part.isdigit() else part.casefold()
+        for part in _RE_NATURAL_CHUNKS.split(clean)
+        if part
+    )
+
+
 def schedule_sort_key(status: str | None, today: date | None = None) -> tuple[int, int, int, int]:
     """Sort key ordering scheduled profiles by day offset (0..6), shift (Sáng before Tối), and pair number."""
     parsed = parse_schedule_tag(status)

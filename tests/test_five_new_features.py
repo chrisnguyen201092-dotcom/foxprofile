@@ -2260,6 +2260,34 @@ def test_lookup_ip_risk_multi_source_scoring(monkeypatch):
     assert res["asn"] == "AS7922"
     assert "Comcast" in res["isp"]
 
+    # Datacenter IP (FranTech / Hostodo): consistent Scamalytics + 10pt DC ASN penalty
+    # even when ProxyCheck.io rate-limits / returns empty during batch checks
+    def _fake_dc_get(url: str, *args, **kwargs):
+        if "scamalytics.com" in url:
+            return _FakeResp(
+                200,
+                text=(
+                    "<div>Fraud Score: 28</div>"
+                    "<th>ASN</th><td>53667</td>"
+                    "<th>ISP Name</th><td><a>FranTech Solutions</a></td>"
+                    "<th>Datacenter</th><td><div class='risk yes'>Yes</div></td>"
+                ),
+            )
+        return _FakeResp(429, text="rate limited")
+
+    monkeypatch.setattr(requests, "get", _fake_dc_get)
+    res_dc = gc.lookup_ip_risk("2605:6400:48d1::1")
+    assert res_dc["scamalytics"] == 28
+    assert res_dc["ip_type"] == "DC"
+    assert res_dc["isp"] == "FranTech Solutions"
+    assert res_dc["asn"] == "AS53667"
+    assert res_dc["fraud_score"] == 38
+
+    from src.models.profile import natural_name_key
+
+    names = ["14", "15", "19", "2", "20", "1", "10", "9"]
+    assert sorted(names, key=natural_name_key) == ["1", "2", "9", "10", "14", "15", "19", "20"]
+
 
 def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
     """Test Account Warmup Trust Score, IP Risk persistence, and Cross-Profile Correlation Auditor."""

@@ -9,7 +9,7 @@ from typing import Any
 import flet as ft
 
 from ...core.strings import get_string
-from ...models.profile import Profile
+from ...models.profile import Profile, natural_name_key
 from ...services.monitor import (
     MonitorSnapshot,
     ProfileMonitorInfo,
@@ -254,7 +254,7 @@ def open_batch_create_dialog(
     )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -452,7 +452,7 @@ def open_backup_restore_dialog(
     _rebuild()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -1007,7 +1007,7 @@ def open_proxy_pool_dialog(
                 # Prioritize profiles without proxy, then other non-running profiles
                 candidates = sorted(
                     [p for p in profiles if p.name not in running],
-                    key=lambda p: (bool(p.proxy), p.name.casefold()),
+                    key=lambda p: (bool(p.proxy), natural_name_key(p.name)),
                 )
                 free_children.append(
                     ft.Column(
@@ -1362,7 +1362,7 @@ def open_proxy_pool_dialog(
         _check_proxy_list(all_px, also_call_all=True)
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=18, vertical=14),
@@ -2103,7 +2103,7 @@ def open_mail_pool_dialog(
     _rebuild()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=18, vertical=14),
@@ -3303,7 +3303,7 @@ def open_session_history_dialog(
     )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
@@ -3783,7 +3783,13 @@ def open_trust_monitor_dialog(
         elif flt == "warming":
             infos = [(p, i) for p, i in infos if i.trust_tier in ("warming", "cold")]
 
-        infos.sort(key=lambda pair: (pair[1].is_banned, -pair[1].trust_score, pair[0].name.casefold()))
+        infos.sort(
+            key=lambda pair: (
+                pair[1].is_banned,
+                -pair[1].trust_score,
+                natural_name_key(pair[0].name),
+            )
+        )
 
         score_rows: list[ft.Control] = []
         for p, info in infos:
@@ -4087,7 +4093,7 @@ def open_trust_monitor_dialog(
     _rebuild()
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),

@@ -8,7 +8,7 @@ def open_log_dialog(page: ft.Page, log_lines: list[str]) -> None:
     content = "\n".join(log_lines) if log_lines else get_string("log_no_activity")
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         inset_padding=ft.Padding.symmetric(horizontal=24, vertical=18),
         title=ft.Text(get_string("activity_log"), size=22, weight=ft.FontWeight.BOLD),
         content=ft.Container(

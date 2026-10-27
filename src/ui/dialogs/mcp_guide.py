@@ -106,7 +106,7 @@ def open_mcp_guide(page: ft.Page, clipboard: ft.Clipboard) -> None:
     )
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         title=ft.Row(
             spacing=10,

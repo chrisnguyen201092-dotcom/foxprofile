@@ -52,7 +52,7 @@ def open_clone_dialog(
     name_field.on_submit = _submit
 
     dlg = ft.AlertDialog(
-        modal=True,
+        modal=False,
         bgcolor=COLORS["card_bg"],
         shape=ft.RoundedRectangleBorder(radius=12),
         title_padding=ft.Padding.only(left=24, right=24, top=22, bottom=0),

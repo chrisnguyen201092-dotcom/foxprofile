@@ -35,6 +35,7 @@ from ..models.profile import (
     is_ban_status,
 )
 from ..utils.totp import split_mail_token
+from .proxy.geo_check import classify_isp_type, compute_meta_ip_fraud_score
 
 PORT_COOLDOWN_MINUTES = 15
 TOKEN_BURST_THRESHOLD = 12
@@ -644,7 +645,12 @@ def compute_trust_breakdown(
                 ip_pts = 9
             elif info.ip_fraud_score < 65:
                 ip_pts = 5
-            flag_str = "Cờ Proxy" if info.ip_proxy_flag else "Không cờ Proxy"
+            if info.last_exit_ip_type == "DC":
+                flag_str = "Mạng DC (+10đ ASN)"
+            elif info.ip_proxy_flag:
+                flag_str = "Cờ Proxy"
+            else:
+                flag_str = "Không cờ Proxy"
             longevity_bonus = 0
             if info.ip_fraud_score <= 55 and clean_env:
                 if eff_datr_age >= 45.0 and active_days >= 28 and has_recovery_armor:
@@ -1176,7 +1182,25 @@ class MonitorService:
                     clean_scores: dict[str, dict[str, Any]] = {}
                     for ip_k, s_val in raw_scores.items():
                         if isinstance(ip_k, str) and isinstance(s_val, dict):
-                            clean_scores[ip_k.strip()] = dict(s_val)
+                            sd = dict(s_val)
+                            s_isp = str(sd.get("isp") or "").strip()
+                            s_type = str(sd.get("ip_type") or "").strip().upper()
+                            if not s_type and s_isp:
+                                s_type = classify_isp_type(s_isp)
+                                if s_type:
+                                    sd["ip_type"] = s_type
+                            if sd.get("scamalytics") is not None:
+                                meta_sc = compute_meta_ip_fraud_score(
+                                    int(sd["scamalytics"]),
+                                    int(sd["proxycheck_risk"])
+                                    if sd.get("proxycheck_risk") is not None
+                                    else None,
+                                    ip_type=s_type,
+                                    proxy_flag=bool(sd.get("proxy_flag")),
+                                )
+                                if meta_sc is not None:
+                                    sd["fraud_score"] = meta_sc
+                            clean_scores[ip_k.strip()] = sd
                     self._ip_scores = clean_scores
                 raw_ips = raw.get("ip_history")
                 if isinstance(raw_ips, dict):
@@ -1188,14 +1212,18 @@ class MonitorService:
                         for item in entries[:20]:
                             if isinstance(item, dict) and item.get("ip"):
                                 ip_str = str(item.get("ip", "")).strip()
+                                i_isp = str(item.get("isp", "")).strip()
+                                i_type = str(item.get("ip_type", "")).strip().upper()
+                                if not i_type and i_isp:
+                                    i_type = classify_isp_type(i_isp)
                                 entry_d: dict[str, Any] = {
                                     "ip": ip_str,
                                     "country": str(item.get("country", "")).strip().upper(),
                                     "tz": str(item.get("tz", "")).strip(),
                                     "port": str(item.get("port", "")).strip(),
                                     "ts": str(item.get("ts", "")).strip(),
-                                    "isp": str(item.get("isp", "")).strip(),
-                                    "ip_type": str(item.get("ip_type", "")).strip().upper(),
+                                    "isp": i_isp,
+                                    "ip_type": i_type,
                                 }
                                 if item.get("fraud_score") is not None:
                                     with contextlib.suppress(TypeError, ValueError):
@@ -1210,6 +1238,23 @@ class MonitorService:
                                     entry_d["proxy_flag"] = bool(item["proxy_flag"])
                                 if item.get("asn"):
                                     entry_d["asn"] = str(item["asn"]).strip()
+                                sc_ref = self._ip_scores.get(ip_str, {})
+                                eff_scam = entry_d.get("scamalytics", sc_ref.get("scamalytics"))
+                                eff_pc = entry_d.get(
+                                    "proxycheck_risk", sc_ref.get("proxycheck_risk")
+                                )
+                                eff_type = i_type or str(sc_ref.get("ip_type") or "").upper()
+                                if eff_scam is not None:
+                                    meta_f = compute_meta_ip_fraud_score(
+                                        int(eff_scam),
+                                        int(eff_pc) if eff_pc is not None else None,
+                                        ip_type=eff_type,
+                                        proxy_flag=bool(
+                                            entry_d.get("proxy_flag") or sc_ref.get("proxy_flag")
+                                        ),
+                                    )
+                                    if meta_f is not None:
+                                        entry_d["fraud_score"] = meta_f
                                 items.append(entry_d)
                         if items:
                             clean_hist[pname] = items
@@ -1390,6 +1435,23 @@ class MonitorService:
             val = risk_data.get(k)
             if val is not None and val != "":
                 stored[k] = val
+        s_isp = str(stored.get("isp") or "").strip()
+        s_type = str(stored.get("ip_type") or "").strip().upper()
+        if not s_type and s_isp:
+            s_type = classify_isp_type(s_isp)
+            if s_type:
+                stored["ip_type"] = s_type
+        if stored.get("scamalytics") is not None:
+            meta_f = compute_meta_ip_fraud_score(
+                int(stored["scamalytics"]),
+                int(stored["proxycheck_risk"])
+                if stored.get("proxycheck_risk") is not None
+                else None,
+                ip_type=s_type,
+                proxy_flag=bool(stored.get("proxy_flag")),
+            )
+            if meta_f is not None:
+                stored["fraud_score"] = meta_f
         stored["ts"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._ip_scores[clean_ip] = stored
         for entries in self._ip_history.values():
@@ -1467,6 +1529,21 @@ class MonitorService:
             clean_isp = str(cached_risk["isp"])
         if not clean_type and cached_risk.get("ip_type"):
             clean_type = str(cached_risk["ip_type"]).upper()
+        if not clean_type and clean_isp:
+            clean_type = classify_isp_type(clean_isp)
+        if eff_scam is not None:
+            meta_f = compute_meta_ip_fraud_score(
+                int(eff_scam),
+                int(eff_pc) if eff_pc is not None else None,
+                ip_type=clean_type,
+                proxy_flag=eff_flag,
+            )
+            if meta_f is not None:
+                eff_fraud = meta_f
+                if clean_ip in self._ip_scores:
+                    self._ip_scores[clean_ip]["fraud_score"] = meta_f
+                    if clean_type:
+                        self._ip_scores[clean_ip]["ip_type"] = clean_type
 
         port = extract_proxy_port(proxy)
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

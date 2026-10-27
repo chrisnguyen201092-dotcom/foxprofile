@@ -155,6 +155,7 @@ _DC_KEYWORDS = (
     "zenlayer",
     "frantech",
     "buyvm",
+    "hostodo",
     "multacom",
     "colocrossing",
     "sharktech",
@@ -181,6 +182,48 @@ _DC_KEYWORDS = (
 _ISP_MEMO: dict[str, tuple[str, str]] = {}
 _IP_RISK_MEMO: dict[str, dict[str, Any]] = {}
 _SCAMALYTICS_SCORE_RE = re.compile(r"Fraud\s+Score:\s*(\d{1,3})\b", re.IGNORECASE)
+_SCAMALYTICS_ASN_RE = re.compile(
+    r"ASN\s*</th>\s*<td[^>]*>\s*(?:<a[^>]*>)?\s*(?:AS)?(\d+)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SCAMALYTICS_ISP_RE = re.compile(
+    r"ISP\s+Name\s*</th>\s*<td[^>]*>\s*(?:<a[^>]*>)?\s*([^<\r\n]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_SCAMALYTICS_DC_RE = re.compile(
+    r"Datacenter\s*</th>\s*<td[^>]*>\s*<div[^>]*>\s*(Yes|No)\s*</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+DC_ASN_PENALTY = 10
+
+
+def compute_meta_ip_fraud_score(
+    scamalytics: int | None,
+    proxycheck_risk: int | None = None,
+    *,
+    ip_type: str = "",
+    proxy_flag: bool = False,
+) -> int | None:
+    """Compute Meta Sigma-aligned IP risk score (0-100).
+
+    Uses Scamalytics subnet/IP abuse score as the primary behavioral signal
+    plus a fixed +10 ASN baseline penalty for Datacenter/Hosting ('DC') networks,
+    so scores stay 100% consistent even when ProxyCheck.io rate-limits batch scans.
+    Falls back to `proxycheck_risk` only when Scamalytics is unavailable.
+    """
+    is_dc = str(ip_type or "").strip().upper() == "DC"
+    if scamalytics is not None:
+        base = max(0, min(100, int(scamalytics)))
+        score = min(100, base + (DC_ASN_PENALTY if is_dc else 0))
+        if not is_dc and proxy_flag and score < 35:
+            score = 35
+        return score
+    if proxycheck_risk is not None:
+        score = max(0, min(100, int(proxycheck_risk)))
+        if proxy_flag and score < 35:
+            score = 35
+        return score
+    return None
 
 
 def classify_isp_type(isp_or_org: str | None, hosting_flag: bool | None = None) -> str:
@@ -258,7 +301,13 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
 
     import requests
 
-    def _q_scamalytics() -> int | None:
+    def _q_scamalytics() -> dict[str, Any]:
+        out_scam: dict[str, Any] = {
+            "score": None,
+            "isp": "",
+            "asn": "",
+            "dc": None,
+        }
         try:
             r = requests.get(
                 f"https://scamalytics.com/ip/{clean_ip}",
@@ -266,12 +315,24 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
                 timeout=timeout,
             )
             if r.status_code == 200:
-                m = _SCAMALYTICS_SCORE_RE.search(r.text)
+                html = r.text
+                m = _SCAMALYTICS_SCORE_RE.search(html)
                 if m:
-                    return max(0, min(100, int(m.group(1))))
+                    out_scam["score"] = max(0, min(100, int(m.group(1))))
+                m_asn = _SCAMALYTICS_ASN_RE.search(html)
+                if m_asn:
+                    out_scam["asn"] = f"AS{m_asn.group(1).strip()}"
+                m_isp = _SCAMALYTICS_ISP_RE.search(html)
+                if m_isp:
+                    isp_txt = m_isp.group(1).strip()
+                    if isp_txt and isp_txt.lower() not in ("n/a", "unknown", "-"):
+                        out_scam["isp"] = isp_txt
+                m_dc = _SCAMALYTICS_DC_RE.search(html)
+                if m_dc:
+                    out_scam["dc"] = m_dc.group(1).strip().lower() == "yes"
         except Exception:
             pass
-        return None
+        return out_scam
 
     def _q_proxycheck() -> dict[str, Any]:
         try:
@@ -308,9 +369,9 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
         f_pc = pool.submit(_q_proxycheck)
         f_api = pool.submit(_q_ipapi)
         try:
-            scam_score = f_scam.result(timeout=timeout + 1.0)
+            scam_data = f_scam.result(timeout=timeout + 1.0)
         except Exception:
-            scam_score = None
+            scam_data = {}
         try:
             pc_data = f_pc.result(timeout=timeout + 1.0)
         except Exception:
@@ -321,6 +382,11 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
             api_data = {}
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+
+    scam_score: int | None = scam_data.get("score") if isinstance(scam_data, dict) else None
+    scam_isp = str(scam_data.get("isp") or "").strip() if isinstance(scam_data, dict) else ""
+    scam_asn = str(scam_data.get("asn") or "").strip() if isinstance(scam_data, dict) else ""
+    scam_dc = scam_data.get("dc") if isinstance(scam_data, dict) else None
 
     pc_risk: int | None = None
     if "risk" in pc_data and pc_data["risk"] is not None:
@@ -338,26 +404,27 @@ def lookup_ip_risk(ip: str | None, timeout: float = 4.5) -> dict[str, Any]:
         or api_data.get("org")
         or pc_data.get("provider")
         or pc_data.get("organisation")
+        or scam_isp
         or ""
     ).strip()
-    raw_asn_parts = str(pc_data.get("asn") or api_data.get("as") or "").split()
+    raw_asn_parts = str(pc_data.get("asn") or api_data.get("as") or scam_asn or "").split()
     asn_str = raw_asn_parts[0].strip() if raw_asn_parts else ""
-    detail_type = str(pc_data.get("type") or "").strip()
+    detail_type = str(pc_data.get("type") or ("Datacenter" if scam_dc is True else "")).strip()
     hosting_flag = api_data.get("hosting")
+    if not isinstance(hosting_flag, bool) and isinstance(scam_dc, bool):
+        hosting_flag = scam_dc
     if not isinstance(hosting_flag, bool) and detail_type:
         hosting_flag = detail_type.lower() in ("hosting", "vpn", "datacenter")
     ip_type = classify_isp_type(raw_isp, hosting_flag if isinstance(hosting_flag, bool) else None)
     if raw_isp and ip_type:
         _ISP_MEMO[clean_ip] = (raw_isp, ip_type)
 
-    scores = [s for s in (scam_score, pc_risk) if s is not None]
-    fraud_score: int | None = None
-    if scam_score is not None and pc_risk is not None:
-        fraud_score = scam_score if scam_score >= pc_risk else round((scam_score * 2 + pc_risk) / 3)
-    elif scores:
-        fraud_score = scores[0]
-    if fraud_score is not None and proxy_flag and fraud_score < 35:
-        fraud_score = 35
+    fraud_score = compute_meta_ip_fraud_score(
+        scam_score,
+        pc_risk,
+        ip_type=ip_type,
+        proxy_flag=proxy_flag,
+    )
 
     res = {
         "ip": clean_ip,
