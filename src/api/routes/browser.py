@@ -172,12 +172,18 @@ def launch_browser(
     elif force:
         mon.acknowledge_proxy_change(name, profile.proxy)
 
+    ready_state = {"started": False}
+
     def _on_ready() -> None:
+        ready_state["started"] = True
         mon.record_started(name, profile.proxy)
         bus.emit()
 
     def _on_stop() -> None:
-        mon.record_stopped(name)
+        if ready_state["started"]:
+            mon.record_stopped(name)
+        else:
+            mon.record_launch_failed(name)
         bus.emit()
 
     try:

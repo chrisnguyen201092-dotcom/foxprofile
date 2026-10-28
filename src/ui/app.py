@@ -569,15 +569,18 @@ class App:
         running = self.bl.running_profile_names()
         # A failure mark lasts until the profile runs again or is gone.
         self.state.failed.intersection_update(all_names - running)
-        for name in running - set(self._live_since):
+        ready_running = running - self.state.loading
+        for name in ready_running - set(self._live_since):
             self._live_since[name] = time.strftime("%H:%M")
             p_live = self.pm.profiles.get(name)
             self.monitor.record_started(name, p_live.proxy if p_live else None)
         stopped_scheduled: list[str] = []
         for name in set(self._live_since) - running:
             del self._live_since[name]
-            self.monitor.record_stopped(name)
-            if name not in self.state.failed:
+            if name in self.state.failed:
+                self.monitor.record_launch_failed(name)
+            else:
+                self.monitor.record_stopped(name)
                 p_done = self.pm.profiles.get(name)
                 if p_done is not None and parse_schedule_tag(p_done.status) is not None:
                     stopped_scheduled.append(name)

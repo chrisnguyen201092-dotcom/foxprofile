@@ -1681,6 +1681,10 @@ class MonitorService:
                 self._last_used_ports[profile_name] = port
                 self._save_settings()
 
+    def record_launch_failed(self, profile_name: str) -> None:
+        """Discard any pending live start timestamp when a browser launch fails before opening."""
+        self._live_started_at.pop(profile_name, None)
+
     def record_stopped(self, profile_name: str) -> None:
         now = dt.datetime.now()
         self._live_stopped_at[profile_name] = now
@@ -1709,6 +1713,7 @@ class MonitorService:
         if hist is None:
             hist = self._refresh_log_history()
         h = hist.get(profile_name, {})
+        failed_ends: list[dt.datetime] = list(h.get("failed_ends", []))
         port = self._last_used_ports.get(profile_name, "") or fallback_port
         merged: list[dict[str, Any]] = []
         accepted_intervals: list[tuple[dt.datetime | None, dt.datetime | None, str]] = []
@@ -1730,6 +1735,10 @@ class MonitorService:
                 continue
             st_dt = _parse_ts(st)
             en_dt = _parse_ts(en)
+            if en_dt is not None and any(
+                abs((en_dt - f_dt).total_seconds()) <= 10.0 for f_dt in failed_ends
+            ):
+                continue
             is_dup = False
             for idx, (ast_dt, aen_dt, ast_str) in enumerate(accepted_intervals):
                 if (
@@ -1825,6 +1834,7 @@ class MonitorService:
                     "today_seconds": 0.0,
                     "_open_start": None,
                     "sessions": [],
+                    "failed_ends": [],
                 }
             return hist[pname]
 
@@ -1844,7 +1854,33 @@ class MonitorService:
                     }
                 )
                 h["_open_start"] = None
-            h["last_closed"] = ts
+                h["last_closed"] = ts
+
+        def _abort_failed_open(h: dict[str, Any], ts: dt.datetime | None) -> None:
+            h["_open_start"] = None
+            if ts is not None:
+                h["failed_ends"].append(ts)
+                if h["sessions"]:
+                    last_s = h["sessions"][-1]
+                    with contextlib.suppress(ValueError):
+                        last_end = dt.datetime.strptime(
+                            str(last_s.get("end", "")), "%Y-%m-%d %H:%M:%S"
+                        )
+                        last_start = dt.datetime.strptime(
+                            str(last_s.get("start", "")), "%Y-%m-%d %H:%M:%S"
+                        )
+                        if abs((last_end - ts).total_seconds()) <= 10.0:
+                            h["sessions"].pop()
+                            dur_rem = max(0.0, (last_end - last_start).total_seconds())
+                            if str(last_s.get("end", "")).startswith(today_str):
+                                h["today_seconds"] = max(0.0, h["today_seconds"] - dur_rem)
+                            if h["sessions"]:
+                                prev_end_str = str(h["sessions"][-1].get("end", ""))
+                                h["last_closed"] = dt.datetime.strptime(
+                                    prev_end_str, "%Y-%m-%d %H:%M:%S"
+                                )
+                            else:
+                                h["last_closed"] = None
 
         for lf in log_files:
             try:
@@ -1885,6 +1921,7 @@ class MonitorService:
                                         nh["sessions"].append(copied)
                                         existing_starts.add(s_item["start"])
                                 nh["today_seconds"] += oh["today_seconds"]
+                                nh["failed_ends"].extend(oh.get("failed_ends", []))
                                 if oh["last_closed"] and (
                                     not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
                                 ):
@@ -1929,7 +1966,7 @@ class MonitorService:
                         if rest == "BROWSER_CLOSED":
                             _close_session(h, pname, ts, ts_str)
                         else:
-                            h["_open_start"] = None
+                            _abort_failed_open(h, ts)
                     continue
 
                 mst = _RE_STARTING.match(msg)
@@ -1950,9 +1987,13 @@ class MonitorService:
 
                 mlf = _RE_LAUNCH_FAILED.match(msg)
                 if mlf:
+                    try:
+                        ts_fail = dt.datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        ts_fail = None
                     pname = mlf.group("prof").strip()
                     h = _ensure(pname)
-                    h["_open_start"] = None
+                    _abort_failed_open(h, ts_fail)
                     continue
 
                 ms = (
@@ -1987,10 +2028,39 @@ class MonitorService:
                             existing_starts.add(s_item["start"])
                     nh["sessions"].sort(key=lambda item: str(item.get("start", "")))
                     nh["today_seconds"] += oh["today_seconds"]
+                    nh["failed_ends"].extend(oh.get("failed_ends", []))
                     if oh["last_closed"] and (
                         not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
                     ):
                         nh["last_closed"] = oh["last_closed"]
+
+        # Prune any persisted _live_sessions entries that correspond to LAUNCH_FAILED timestamps
+        pruned_live = False
+        for pname, h_entry in hist.items():
+            f_ends: list[dt.datetime] = h_entry.get("failed_ends", [])
+            if not f_ends or pname not in self._live_sessions:
+                continue
+            orig_list = self._live_sessions[pname]
+            kept_list = []
+            for s_item in orig_list:
+                en_str = str(s_item.get("end", "")).strip()
+                is_failed = False
+                if en_str:
+                    with contextlib.suppress(ValueError):
+                        en_dt = dt.datetime.strptime(en_str, "%Y-%m-%d %H:%M:%S")
+                        if any(abs((en_dt - f_dt).total_seconds()) <= 10.0 for f_dt in f_ends):
+                            is_failed = True
+                if is_failed:
+                    pruned_live = True
+                else:
+                    kept_list.append(s_item)
+            if len(kept_list) != len(orig_list):
+                if kept_list:
+                    self._live_sessions[pname] = kept_list
+                else:
+                    self._live_sessions.pop(pname, None)
+        if pruned_live:
+            self._save_settings()
 
         self._log_cache_key = cache_key
         self._log_history = hist
