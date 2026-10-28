@@ -1247,9 +1247,14 @@ class AppHandlers:
             )
             self._state.sort_by = "schedule"
             self._state.current_page = 1
+            if hasattr(self._monitor, "set_sort_by"):
+                self._monitor.set_sort_by("schedule")
             refs = self._get_refs()
             if refs is not None and refs.sort_dropdown is not None:
-                refs.sort_dropdown.value = "schedule"
+                if hasattr(refs.sort_dropdown, "sync_value"):
+                    refs.sort_dropdown.sync_value("schedule")  # type: ignore[attr-defined]
+                else:
+                    refs.sort_dropdown.value = "schedule"
             self._log(
                 get_string(
                     "schedule_applied_log",
@@ -1267,9 +1272,14 @@ class AppHandlers:
             cnt = self._pm.clear_schedule_tags()
             if self._state.sort_by == "schedule":
                 self._state.sort_by = "custom"
+                if hasattr(self._monitor, "set_sort_by"):
+                    self._monitor.set_sort_by("custom")
                 refs = self._get_refs()
                 if refs is not None and refs.sort_dropdown is not None:
-                    refs.sort_dropdown.value = "custom"
+                    if hasattr(refs.sort_dropdown, "sync_value"):
+                        refs.sort_dropdown.sync_value("custom")  # type: ignore[attr-defined]
+                    else:
+                        refs.sort_dropdown.value = "custom"
             self._log(get_string("schedule_cleared_log", count=cnt))
             self._refresh()
 

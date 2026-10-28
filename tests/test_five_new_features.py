@@ -3934,5 +3934,63 @@ def test_muse_2026_10_cookie_and_protocol_updates(tmp_path):
     assert info.ext_domains == 1  # metaaivm.com excluded from external warmup count; only wired.com counted
 
 
+def test_sort_by_persistence_and_smart_instant_search(tmp_path):
+    from src.ui.app import _search_match_rank
+
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    mon1 = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon1.sort_by == "custom"
+    mon1.set_sort_by("schedule")
+    assert mon1.sort_by == "schedule"
+
+    mon2 = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    assert mon2.sort_by == "schedule"
+
+    p_monica = Profile(
+        name="#1  Monica",
+        email="abcxyz@hotmail.com",
+        proxy="sp02-usa102.nguonproxy.com:10620:LF0AI:81379",
+    )
+    p_num1 = Profile(
+        name="1",
+        email="user1@hotmail.com",
+        proxy="sp02-usa102.nguonproxy.com:10621:ZZ999:11111",
+    )
+    p_num10 = Profile(
+        name="10",
+        email="user10@hotmail.com",
+        proxy="sp02-usa102.nguonproxy.com:10622:MM888:22222",
+    )
+    p_14 = Profile(
+        name="14",
+        email="sputyph@hotmail.com",
+        proxy="sp02-usa114.nguonproxy.com:5350:SECRET1:99999",
+    )
+
+    # Single-char 'm' matches Monica (token prefix) but does NOT match @hotmail.com or proxy user MM888
+    assert _search_match_rank(p_monica, "m") is not None
+    assert _search_match_rank(p_monica, "m")[0] == 1
+    assert _search_match_rank(p_num1, "m") is None
+    assert _search_match_rank(p_num10, "m") is None
+
+    # Exact token '1' ranks higher (tier 0) than prefix '10' / '14' (tier 1)
+    r_1 = _search_match_rank(p_num1, "1")
+    r_monica = _search_match_rank(p_monica, "1")
+    r_10 = _search_match_rank(p_num10, "1")
+    assert r_1 is not None and r_1[0] == 0
+    assert r_monica is not None and r_monica[0] == 0
+    assert r_10 is not None and r_10[0] == 1
+
+    # Proxy port prefix '53' matches port :5350 on p_14, while random proxy password digits '81379' are ignored
+    assert _search_match_rank(p_14, "53") is not None
+    assert _search_match_rank(p_monica, "813") is None
+    assert _search_match_rank(p_14, "sp") is not None
+
+
+
 
 

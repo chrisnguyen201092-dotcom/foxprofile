@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 
 import flet as ft
@@ -16,7 +17,12 @@ from ..models.profile import (
     schedule_sort_key,
 )
 from ..services.browser import fingerprint
-from ..services.monitor import MonitorService, MonitorSnapshot
+from ..services.monitor import (
+    MonitorService,
+    MonitorSnapshot,
+    extract_proxy_endpoint,
+    extract_proxy_port,
+)
 from .components import (
     build_content_area,
     build_empty_state,
@@ -45,6 +51,76 @@ from .theme.styles import OUTLINE_STYLE
 
 logger = get_logger("app")
 
+_SEARCH_TOKEN_RE = re.compile(r"[0-9a-z\u00c0-\u024f\u1e00-\u1eff]+")
+_SEARCH_EMAIL_DOM_RE = re.compile(r"@[a-z0-9.-]+\.[a-z]{2,}")
+
+
+def _search_match_rank(prof: object, query: str) -> tuple[int, tuple] | None:
+    """Return a (relevance_tier, natural_name_key) tuple if `prof` matches `query`, else None.
+
+    Strips generic email domains (@hotmail.com/@gmail.com) unless '@' is in `query`,
+    and matches proxy port/endpoint rather than random proxy credentials (:user:pass),
+    so typing 1-2 characters immediately surfaces the closest matching profiles.
+    """
+    q = query.strip().lower()
+    if not q:
+        return (0, ())
+    name_raw = getattr(prof, "name", "") or ""
+    name_l = name_raw.lower()
+    has_at = "@" in q
+    name_clean = name_l if has_at else _SEARCH_EMAIL_DOM_RE.sub("", name_l)
+    name_tokens = _SEARCH_TOKEN_RE.findall(name_clean)
+
+    email_raw = (getattr(prof, "email", None) or "").lower()
+    email_target = email_raw if has_at else email_raw.split("@", 1)[0]
+    rec_raw = (getattr(prof, "recovery_email", None) or "").lower()
+    rec_target = rec_raw if has_at else rec_raw.split("@", 1)[0]
+
+    proxy_raw = getattr(prof, "proxy", None) or ""
+    port_digits = extract_proxy_port(proxy_raw).lstrip(":")
+    endpoint = extract_proxy_endpoint(proxy_raw).lower()
+    q_port = q.lstrip(":")
+
+    group_l = (getattr(prof, "group", None) or "").lower()
+    status_l = (getattr(prof, "status", None) or "").lower()
+    notes_l = (getattr(prof, "notes", None) or "").lower()
+
+    nkey = natural_name_key(name_raw)
+
+    # Tier 0: Exact profile name or exact word/number token in profile name
+    if name_clean == q or q in name_tokens:
+        return (0, nkey)
+    # Tier 1: Profile name or word/number token starts with query
+    if name_clean.startswith(q) or any(tok.startswith(q) for tok in name_tokens):
+        return (1, nkey)
+    # Tier 2: Email username starts with query, or proxy port starts with query
+    if (email_target and email_target.startswith(q)) or (
+        q_port.isdigit() and len(q_port) >= 2 and port_digits.startswith(q_port)
+    ):
+        return (2, nkey)
+    # Tier 3: Substring in profile name, or token prefix in group / status / notes
+    if (
+        q in name_clean
+        or any(tok.startswith(q) for tok in _SEARCH_TOKEN_RE.findall(group_l))
+        or any(tok.startswith(q) for tok in _SEARCH_TOKEN_RE.findall(status_l))
+        or any(tok.startswith(q) for tok in _SEARCH_TOKEN_RE.findall(notes_l))
+    ):
+        return (3, nkey)
+    # Tier 4: Substring in email username, recovery email, group, status, notes, or proxy port
+    if len(q) >= 2 and (
+        q in email_target
+        or q in rec_target
+        or q in group_l
+        or q in status_l
+        or q in notes_l
+        or (q_port.isdigit() and q_port in port_digits)
+    ):
+        return (4, nkey)
+    # Tier 5: Proxy host / IP / cluster match for >= 3 characters
+    if len(q) >= 3 and q in endpoint:
+        return (5, nkey)
+    return None
+
 
 class App:
     def __init__(self, container: Container | None = None) -> None:
@@ -64,6 +140,9 @@ class App:
         self._live_since: dict[str, str] = {}
         self._alerted_token_bursts: set[str] = set()
         self.monitor: MonitorService = c.monitor_service
+        saved_sort = getattr(self.monitor, "sort_by", "custom")
+        if isinstance(saved_sort, str) and saved_sort:
+            self.state.sort_by = saved_sort
         self._last_monitor_snap: MonitorSnapshot | None = None
         self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
         self._header_slot = ft.Container()
@@ -168,7 +247,9 @@ class App:
                 self.state.search_query = ""
                 if self.refs is not None and self.refs.search_field is not None:
                     self.refs.search_field.value = ""
-                self._refresh_profiles()
+                    if isinstance(self.refs.search_field.suffix, ft.Control):
+                        self.refs.search_field.suffix.visible = False
+                self._refresh_profiles(reuse_snapshot=True)
 
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
@@ -286,12 +367,20 @@ class App:
     def _on_search(self, query: str) -> None:
         self.state.search_query = query.strip().lower()
         self.state.current_page = 1
-        self._refresh_profiles()
+        self._refresh_profiles(reuse_snapshot=True)
 
     def _on_sort(self, sort_by: str) -> None:
         self.state.sort_by = sort_by
         self.state.current_page = 1
-        self._refresh_profiles()
+        if hasattr(self.monitor, "set_sort_by"):
+            self.monitor.set_sort_by(sort_by)
+        if (
+            self.refs is not None
+            and self.refs.sort_dropdown is not None
+            and hasattr(self.refs.sort_dropdown, "sync_value")
+        ):
+            self.refs.sort_dropdown.sync_value(sort_by)  # type: ignore[attr-defined]
+        self._refresh_profiles(reuse_snapshot=True)
 
     def _on_select_custom_page(self, page_id: str) -> None:
         self.active_page = page_id
@@ -453,99 +542,106 @@ class App:
             test = self._filter_tests().get(self.filter, lambda p: True)
             all_profiles = [p for p in all_profiles if test(p)]
         if q := self.state.search_query:
-            all_profiles = [
-                p
+            ranked = [
+                (rank, p)
                 for p in all_profiles
-                if q in p.name.lower()
-                or q in (getattr(p, "email", None) or "").lower()
-                or q in (getattr(p, "recovery_email", None) or "").lower()
-                or q in (p.proxy or "").lower()
-                or q in (p.group or "").lower()
-                or q in (p.status or "").lower()
-                or q in (p.notes or "").lower()
+                if (rank := _search_match_rank(p, q)) is not None
             ]
-        sort_by = self.state.sort_by
-        if sort_by == "schedule":
-            all_profiles.sort(key=lambda p: (schedule_sort_key(p.status), natural_name_key(p.name)))
-        elif sort_by == "name_asc":
-            all_profiles.sort(key=lambda p: natural_name_key(p.name))
-        elif sort_by == "name_desc":
-            all_profiles.sort(key=lambda p: natural_name_key(p.name), reverse=True)
-        elif sort_by == "group":
-            all_profiles.sort(
-                key=lambda p: (
-                    not bool(p.group),
-                    natural_name_key(p.group or ""),
-                    natural_name_key(p.name),
+            if not ranked and (self.active_page != "__all__" or self.filter != "all"):
+                ranked = [
+                    (rank, p)
+                    for p in self.pm.list_profiles()
+                    if (rank := _search_match_rank(p, q)) is not None
+                ]
+            ranked.sort(key=lambda item: item[0])
+            if len(q) <= 2:
+                ranked = ranked[:12]
+            all_profiles = [p for _, p in ranked]
+        else:
+            sort_by = self.state.sort_by
+            if sort_by == "schedule":
+                all_profiles.sort(
+                    key=lambda p: (schedule_sort_key(p.status), natural_name_key(p.name))
                 )
-            )
-        elif sort_by == "running":
-            all_profiles.sort(
-                key=lambda p: (not self.bl.is_running(p.name), natural_name_key(p.name))
-            )
-        elif sort_by == "proxy":
-            all_profiles.sort(key=lambda p: (not bool(p.proxy), natural_name_key(p.name)))
-        elif sort_by in ("cooldown_desc", "cooldown_asc"):
-            snap = self._last_monitor_snap or self.monitor.snapshot(
-                self.pm.list_profiles(),
-                self.bl.running_profile_names() | self.state.loading,
-            )
+            elif sort_by == "name_asc":
+                all_profiles.sort(key=lambda p: natural_name_key(p.name))
+            elif sort_by == "name_desc":
+                all_profiles.sort(key=lambda p: natural_name_key(p.name), reverse=True)
+            elif sort_by == "group":
+                all_profiles.sort(
+                    key=lambda p: (
+                        not bool(p.group),
+                        natural_name_key(p.group or ""),
+                        natural_name_key(p.name),
+                    )
+                )
+            elif sort_by == "running":
+                all_profiles.sort(
+                    key=lambda p: (not self.bl.is_running(p.name), natural_name_key(p.name))
+                )
+            elif sort_by == "proxy":
+                all_profiles.sort(key=lambda p: (not bool(p.proxy), natural_name_key(p.name)))
+            elif sort_by in ("cooldown_desc", "cooldown_asc"):
+                snap = self._last_monitor_snap or self.monitor.snapshot(
+                    self.pm.list_profiles(),
+                    self.bl.running_profile_names() | self.state.loading,
+                )
 
-            def _cd_desc_key(p: object) -> tuple:
-                pname = getattr(p, "name", "")
-                if self.bl.is_running(pname):
+                def _cd_desc_key(p: object) -> tuple:
+                    pname = getattr(p, "name", "")
+                    if self.bl.is_running(pname):
+                        return (2, 0, natural_name_key(pname))
+                    info = snap.profiles.get(pname)
+                    if info is not None and info.cooldown_mins is not None:
+                        port_busy = 1 if (info.busy_by or info.port_cooldown_by) else 0
+                        return (0, port_busy, -info.cooldown_mins, natural_name_key(pname))
+                    return (1, 0, 0, natural_name_key(pname))
+
+                def _cd_asc_key(p: object) -> tuple:
+                    pname = getattr(p, "name", "")
+                    if self.bl.is_running(pname):
+                        return (0, 0, natural_name_key(pname))
+                    info = snap.profiles.get(pname)
+                    if info is not None and info.cooldown_mins is not None:
+                        return (1, info.cooldown_mins, natural_name_key(pname))
                     return (2, 0, natural_name_key(pname))
-                info = snap.profiles.get(pname)
-                if info is not None and info.cooldown_mins is not None:
-                    port_busy = 1 if (info.busy_by or info.port_cooldown_by) else 0
-                    return (0, port_busy, -info.cooldown_mins, natural_name_key(pname))
-                return (1, 0, 0, natural_name_key(pname))
 
-            def _cd_asc_key(p: object) -> tuple:
-                pname = getattr(p, "name", "")
-                if self.bl.is_running(pname):
-                    return (0, 0, natural_name_key(pname))
-                info = snap.profiles.get(pname)
-                if info is not None and info.cooldown_mins is not None:
-                    return (1, info.cooldown_mins, natural_name_key(pname))
-                return (2, 0, natural_name_key(pname))
-
-            all_profiles.sort(key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key)
-        elif sort_by in ("trust_desc", "trust_asc"):
-            snap = self._last_monitor_snap or self.monitor.snapshot(
-                self.pm.list_profiles(),
-                self.bl.running_profile_names() | self.state.loading,
-            )
-
-            def _trust_key(p: object) -> tuple:
-                pname = getattr(p, "name", "")
-                info = snap.profiles.get(pname)
-                score = info.trust_score if info is not None else 0
-                return (-score if sort_by == "trust_desc" else score, natural_name_key(pname))
-
-            all_profiles.sort(key=_trust_key)
-        elif sort_by in ("age_desc", "age_asc"):
-            snap = self._last_monitor_snap or self.monitor.snapshot(
-                self.pm.list_profiles(),
-                self.bl.running_profile_names() | self.state.loading,
-            )
-
-            def _age_key(p: object) -> tuple:
-                pname = getattr(p, "name", "")
-                info = snap.profiles.get(pname)
-                days = (
-                    info.age_days
-                    if info is not None
-                    else compute_days_since(getattr(p, "created_at", None))
+                all_profiles.sort(key=_cd_desc_key if sort_by == "cooldown_desc" else _cd_asc_key)
+            elif sort_by in ("trust_desc", "trust_asc"):
+                snap = self._last_monitor_snap or self.monitor.snapshot(
+                    self.pm.list_profiles(),
+                    self.bl.running_profile_names() | self.state.loading,
                 )
-                if days is None:
-                    return (1, 0, natural_name_key(pname))
-                return (0, -days if sort_by == "age_desc" else days, natural_name_key(pname))
 
-            all_profiles.sort(key=_age_key)
+                def _trust_key(p: object) -> tuple:
+                    pname = getattr(p, "name", "")
+                    info = snap.profiles.get(pname)
+                    score = info.trust_score if info is not None else 0
+                    return (-score if sort_by == "trust_desc" else score, natural_name_key(pname))
 
-        # Pinned profiles always float to the top while preserving the active sort within each group
-        all_profiles.sort(key=lambda p: not bool(getattr(p, "pinned", False)))
+                all_profiles.sort(key=_trust_key)
+            elif sort_by in ("age_desc", "age_asc"):
+                snap = self._last_monitor_snap or self.monitor.snapshot(
+                    self.pm.list_profiles(),
+                    self.bl.running_profile_names() | self.state.loading,
+                )
+
+                def _age_key(p: object) -> tuple:
+                    pname = getattr(p, "name", "")
+                    info = snap.profiles.get(pname)
+                    days = (
+                        info.age_days
+                        if info is not None
+                        else compute_days_since(getattr(p, "created_at", None))
+                    )
+                    if days is None:
+                        return (1, 0, natural_name_key(pname))
+                    return (0, -days if sort_by == "age_desc" else days, natural_name_key(pname))
+
+                all_profiles.sort(key=_age_key)
+
+            # Pinned profiles always float to the top while preserving the active sort within each group
+            all_profiles.sort(key=lambda p: not bool(getattr(p, "pinned", False)))
 
         per_page = self.state.items_per_page
         if per_page <= 0:
@@ -556,7 +652,7 @@ class App:
         start = (self.state.current_page - 1) * per_page
         return all_profiles, all_profiles[start : start + per_page], total
 
-    def _refresh_profiles(self) -> None:
+    def _refresh_profiles(self, *, reuse_snapshot: bool = False) -> None:
         r = self.refs
         assert r is not None
         self._update_stats()
@@ -589,8 +685,11 @@ class App:
         self._alerted_token_bursts.intersection_update(running)
 
         everything = self.pm.list_profiles()
-        snap = self.monitor.snapshot(everything, running | self.state.loading)
-        self._last_monitor_snap = snap
+        if reuse_snapshot and self._last_monitor_snap is not None:
+            snap = self._last_monitor_snap
+        else:
+            snap = self.monitor.snapshot(everything, running | self.state.loading)
+            self._last_monitor_snap = snap
         alert_bar = build_monitor_bar(snap, len(everything))
         self._monitor_bar_slot.content = alert_bar
         self._monitor_bar_slot.visible = alert_bar is not None
@@ -819,11 +918,13 @@ class App:
         self.state.search_query = ""
         if self.refs and self.refs.search_field is not None:
             self.refs.search_field.value = ""
-        self._refresh_profiles()
+            if isinstance(self.refs.search_field.suffix, ft.Control):
+                self.refs.search_field.suffix.visible = False
+        self._refresh_profiles(reuse_snapshot=True)
 
     def _change_page(self, delta: int) -> None:
         self.state.current_page += delta
-        self._refresh_profiles()
+        self._refresh_profiles(reuse_snapshot=True)
 
     def _set_subtitle(self, text: ft.Text) -> None:
         """ "10 profile · 2 đang chạy", the running count in stamp violet."""

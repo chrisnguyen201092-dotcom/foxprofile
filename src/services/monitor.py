@@ -1157,6 +1157,7 @@ class MonitorService:
         self._last_shifts: dict[str, str] = {}
         self._schedule_cycle_days: int = 5
         self._fixed_work_squads: dict[str, list[str]] = {}
+        self._sort_by: str = "custom"
         self._load_settings()
 
     def _settings_file(self) -> pathlib.Path:
@@ -1301,6 +1302,9 @@ class MonitorService:
                 raw_cyc = raw.get("schedule_cycle_days")
                 if isinstance(raw_cyc, int) and 2 <= raw_cyc <= 7:
                     self._schedule_cycle_days = raw_cyc
+                raw_sort = raw.get("sort_by")
+                if isinstance(raw_sort, str) and raw_sort.strip():
+                    self._sort_by = raw_sort.strip()
                 raw_squads = raw.get("fixed_work_squads")
                 if isinstance(raw_squads, dict):
                     clean_squads: dict[str, list[str]] = {}
@@ -1338,6 +1342,7 @@ class MonitorService:
                 "last_pairings": self._last_pairings,
                 "last_shifts": self._last_shifts,
                 "schedule_cycle_days": self._schedule_cycle_days,
+                "sort_by": self._sort_by,
                 "fixed_work_squads": self._fixed_work_squads,
                 "disk_cache": {
                     k: v
@@ -1355,6 +1360,16 @@ class MonitorService:
     def set_cooldown_minutes(self, minutes: int) -> None:
         self._cooldown_minutes = max(0, min(1440, int(minutes)))
         self._save_settings()
+
+    @property
+    def sort_by(self) -> str:
+        return self._sort_by
+
+    def set_sort_by(self, sort_by: str) -> None:
+        clean = (sort_by or "custom").strip() or "custom"
+        if clean != self._sort_by:
+            self._sort_by = clean
+            self._save_settings()
 
     @property
     def last_pairings(self) -> list[list[str]]:

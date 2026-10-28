@@ -18,4 +18,4 @@ class UIRefs:
     bulk_bar: ft.Row
     file_picker: ft.FilePicker
     search_field: ft.TextField
-    sort_dropdown: ft.Dropdown | None = None
+    sort_dropdown: ft.Control | None = None
