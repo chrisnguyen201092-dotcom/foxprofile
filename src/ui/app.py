@@ -780,9 +780,11 @@ class App:
                 on_open_cooldown=self.h.on_open_cooldown_settings,
                 on_open_warmup_sites=self.h.on_open_warmup_sites,
                 on_open_trust_monitor=self.h.on_open_trust_monitor,
-                on_open_safe_schedule=self.h.on_open_safe_schedule,
                 on_open_work_squad=self.h.on_open_work_squad,
-                audit_alert=bool(snap.audit_findings),
+                audit_alert=any(
+                    f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+                    for f in snap.audit_findings
+                ),
                 mail_alert=bool(snap.mail_checkpoint_hits),
             )
             if page_profiles

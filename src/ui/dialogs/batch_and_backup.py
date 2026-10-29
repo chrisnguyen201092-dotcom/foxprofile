@@ -523,7 +523,12 @@ def open_proxy_pool_dialog(
     """Central Proxy Manager dialog: view all unique proxies, spare unassigned proxies, test, assign, or replace."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=6, height=600, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, expand=True, scroll=ft.ScrollMode.AUTO)
+    list_box = ft.Container(
+        height=420,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        content=list_col,
+    )
     editing_target: list[str | None] = [None]
     assigning_target: list[str | None] = [None]
     adding_open: list[bool] = [False]
@@ -1440,7 +1445,7 @@ def open_proxy_pool_dialog(
                     stats_text,
                     add_box,
                     notice_text,
-                    list_col,
+                    list_box,
                 ],
             ),
         ),
@@ -1473,7 +1478,12 @@ def open_mail_pool_dialog(
     """Central Mail Pool Manager dialog: view spare Hotmail/OAuth2 accounts, test Inbox, assign or hot-swap."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=6, height=520, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, expand=True, scroll=ft.ScrollMode.AUTO)
+    list_box = ft.Container(
+        height=380,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        content=list_col,
+    )
     assigning_target: list[str | None] = [None]
     replacing_prof: list[str | None] = [None]
     adding_open: list[bool] = [False]
@@ -2510,7 +2520,7 @@ def open_mail_pool_dialog(
                     stats_text,
                     add_box,
                     notice_text,
-                    list_col,
+                    list_box,
                 ],
             ),
         ),
@@ -2618,67 +2628,47 @@ def _build_trust_score_chip(
     *,
     on_click: Callable[[], None] | None = None,
 ) -> ft.Container:
-    """Render an Account Warmup & Trust Score badge with tier symbol and breakdown tooltip."""
-    tier = info.trust_tier
-    score = info.trust_score
-    if tier == "banned":
+    """Render a Historical Cleanliness & Muse Session Countdown (`hatch_sess` 30d) badge."""
+    taint_codes = ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+    is_tainted = any(c in info.audit_codes for c in taint_codes)
+    if info.is_banned:
         col = COLORS["error"]
-        label = get_string("trust_tier_banned")
-    elif tier == "diamond":
-        col = "#1D4ED8"
-        label = get_string("trust_tier_diamond", score=score)
-    elif tier == "elite":
-        col = "#15803D"
-        label = get_string("trust_tier_elite", score=score)
-    elif tier == "platinum":
-        col = "#7C3AED"
-        label = get_string("trust_tier_platinum", score=score)
-    elif tier == "trusted":
-        col = "#B45309"
-        label = get_string("trust_tier_trusted", score=score)
-    elif tier == "warming":
-        col = COLORS["text_dim"]
-        label = get_string("trust_tier_warming", score=score)
-    else:
-        col = "#F87171"
-        label = get_string("trust_tier_cold", score=score)
-
-    sess_status = (
-        get_string("trust_badge_gw_ok")
-        if (info.hatch_gw and info.hatch_vml)
-        else (
-            get_string("trust_yes")
-            if info.hatch_gw
-            else (
-                get_string("trust_badge_no_gw")
-                if info.hatch_sess
-                else get_string("trust_no")
-            )
+        label = "✕ Ban"
+        clean_desc = "✕ Đã bị khóa / Disconnected"
+    elif is_tainted:
+        col = "#D97706"
+        label = (
+            f"⚠️ {info.sess_exp_days}d"
+            if (info.sess_exp_days is not None and info.sess_exp_days >= 0)
+            else "⚠️"
         )
-    )
-    tip = get_string(
-        "trust_breakdown_tooltip",
-        score=score,
-        datr_age=f"{info.datr_age_days:.1f}" if info.datr_age_days > 0 else str(info.age_days),
-        datr_doms=info.datr_domains,
-        sess=sess_status,
-        cookies=info.cookie_count,
-        ps_l=get_string("trust_yes") if info.has_ps_l else get_string("trust_no"),
-        ext_doms=info.ext_domains,
-        hpages=info.history_pages,
-        chk_scar=(
-            get_string("trust_chk_scar")
-            if info.has_meta_checkpoint
-            else get_string("trust_chk_clean")
-        ),
-        cache2=(
-            get_string("trust_yes")
-            if (info.has_cache2 and info.cookie_count > 0)
-            else get_string("trust_no")
-        ),
-        act_days=info.active_days,
-        sess_cnt=info.session_count,
-        mins=info.total_minutes,
+        clean_desc = "⚠️ Liên đới lịch sử IP / Cổng Proxy / Phôi gốc với acc đã bị khóa"
+    elif info.sess_exp_days is not None:
+        if info.sess_exp_days < 0:
+            col = COLORS["error"]
+            label = "✕ Hết hạn"
+        elif info.sess_exp_days < 10:
+            col = "#B45309"
+            label = f"⏳ {info.sess_exp_days}d"
+        else:
+            col = "#15803D"
+            label = f"✓ {info.sess_exp_days}d"
+        clean_desc = "✓ Sạch 100% (Độc lập IPv6 128-bit, Cổng Proxy & Phôi gốc)"
+    elif info.trust_score > 0:
+        col = "#15803D"
+        label = "✓ Sạch"
+        clean_desc = "✓ Sạch 100% (Độc lập IPv6 128-bit, Cổng Proxy & Phôi gốc)"
+    else:
+        col = COLORS["text_dim"]
+        label = "○ Chưa mở"
+        clean_desc = "○ Chưa mở trình duyệt"
+
+    tip = (
+        f"{clean_desc}\n"
+        f"• Thời hạn phiên Muse (`hatch_sess` trượt 30 ngày): còn {info.sess_exp} "
+        f"(chỉ cần mở muse.ai 1 lần trước khi hết 30d)\n"
+        f"• Tuổi cookie gốc (`datr`): {info.datr_age_days:.1f} ngày · "
+        f"Hoạt động: {info.active_days} ngày mở ({info.session_count} phiên, {info.total_minutes}p)"
     )
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=8, vertical=2),
@@ -3197,7 +3187,12 @@ def open_session_history_dialog(
     active_tab: list[str] = [init_key]
     tab_bar = ft.Row(spacing=8)
     summary_badges_row = ft.Row(spacing=6, wrap=True)
-    list_col = ft.Column(spacing=6, height=520, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, expand=True, scroll=ft.ScrollMode.AUTO)
+    list_box = ft.Container(
+        height=420,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        content=list_col,
+    )
     clear_ip_btn = ft.TextButton(
         get_string("ip_hist_clear_btn"),
         icon=ft.Icons.DELETE_SWEEP_OUTLINED,
@@ -3690,7 +3685,7 @@ def open_session_history_dialog(
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
                     tab_bar,
-                    list_col,
+                    list_box,
                 ],
             ),
         ),
@@ -3731,7 +3726,12 @@ def open_trust_monitor_dialog(
     )
     table_header_slot = ft.Container()
     status_banner = ft.Text("", size=12, color=COLORS["accent"], visible=False)
-    list_col = ft.Column(spacing=4, height=580, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=4, expand=True, scroll=ft.ScrollMode.AUTO)
+    list_box = ft.Container(
+        height=400,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        content=list_col,
+    )
     score_all_btn = ft.Button(
         get_string("trust_score_all_ips_btn"),
         icon=ft.Icons.RADAR_ROUNDED,
@@ -3943,23 +3943,41 @@ def open_trust_monitor_dialog(
             (p, snap.profiles.get(p.name) or ProfileMonitorInfo(name=p.name))
             for p in profiles
         ]
-        c_diamond = sum(1 for _, i in infos if i.trust_tier == "diamond")
-        c_elite = sum(1 for _, i in infos if i.trust_tier == "elite")
-        c_platinum = sum(1 for _, i in infos if i.trust_tier == "platinum")
-        c_trusted = sum(1 for _, i in infos if i.trust_tier == "trusted")
-        c_warming = sum(1 for _, i in infos if i.trust_tier in ("warming", "cold"))
+        taint_codes = ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+        c_clean = sum(
+            1
+            for _, i in infos
+            if not i.is_banned and not any(c in i.audit_codes for c in taint_codes)
+        )
+        c_expiring = sum(
+            1
+            for _, i in infos
+            if not i.is_banned
+            and i.sess_exp_days is not None
+            and 0 <= i.sess_exp_days < 15
+        )
+        c_tainted = sum(
+            1
+            for _, i in infos
+            if not i.is_banned and any(c in i.audit_codes for c in taint_codes)
+        )
+        c_banned = sum(1 for _, i in infos if i.is_banned)
 
+        fixable_audit = any(
+            f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+            for f in snap.audit_findings
+        )
         left_toolbar: list[ft.Control] = [
             _seg_btn(
                 "scores",
-                f"Điểm Trust & IP ({len(profiles)})",
+                f"Độ Sạch & Hạn Phiên ({len(profiles)})",
                 ft.Icons.VERIFIED_USER_OUTLINED,
             ),
             _seg_btn(
                 "audit",
                 f"Kiểm toán ({len(snap.audit_findings)})",
                 ft.Icons.SHIELD_OUTLINED,
-                alert=bool(snap.audit_findings),
+                alert=fixable_audit,
             ),
         ]
         if active_tab[0] == "scores":
@@ -3972,11 +3990,10 @@ def open_trust_monitor_dialog(
                         margin=ft.Margin.symmetric(horizontal=2),
                     ),
                     _fchip("all", get_string("trust_filter_all", count=len(infos))),
-                    _fchip("diamond", get_string("trust_filter_diamond", count=c_diamond)),
-                    _fchip("elite", get_string("trust_filter_elite", count=c_elite)),
-                    _fchip("platinum", get_string("trust_filter_platinum", count=c_platinum)),
-                    _fchip("trusted", get_string("trust_filter_trusted", count=c_trusted)),
-                    _fchip("warming", get_string("trust_filter_warming", count=c_warming)),
+                    _fchip("clean", f"✓ Sạch & An toàn ({c_clean})"),
+                    _fchip("expiring", f"⏳ Hạn phiên <15d ({c_expiring})"),
+                    _fchip("tainted", f"⚠️ Liên đới lịch sử ({c_tainted})"),
+                    _fchip("banned", f"✕ Đã khóa ({c_banned})"),
                 ]
             )
 
@@ -4091,14 +4108,14 @@ def open_trust_monitor_dialog(
                                 color=COLORS["text_dim"],
                             ),
                             ft.Text(
-                                "ĐỘ CHÍN TRUST",
-                                width=142,
+                                "TRẠNG THÁI",
+                                width=96,
                                 size=11,
                                 font_family=FONT_SEMIBOLD,
                                 color=COLORS["text_dim"],
                             ),
                             ft.Text(
-                                "GỢI Ý TĂNG ĐIỂM",
+                                "CHẨN ĐOÁN AN TOÀN & HẠN PHIÊN MUSE (30 NGÀY)",
                                 expand=True,
                                 size=11,
                                 font_family=FONT_SEMIBOLD,
@@ -4119,145 +4136,95 @@ def open_trust_monitor_dialog(
         )
 
         flt = active_filter[0]
-        if flt == "diamond":
-            infos = [(p, i) for p, i in infos if i.trust_tier == "diamond"]
-        elif flt == "elite":
-            infos = [(p, i) for p, i in infos if i.trust_tier == "elite"]
-        elif flt == "platinum":
-            infos = [(p, i) for p, i in infos if i.trust_tier == "platinum"]
-        elif flt == "trusted":
-            infos = [(p, i) for p, i in infos if i.trust_tier == "trusted"]
-        elif flt == "warming":
-            infos = [(p, i) for p, i in infos if i.trust_tier in ("warming", "cold")]
+        if flt == "clean":
+            infos = [
+                (p, i)
+                for p, i in infos
+                if not i.is_banned and not any(c in i.audit_codes for c in taint_codes)
+            ]
+        elif flt == "expiring":
+            infos = [
+                (p, i)
+                for p, i in infos
+                if not i.is_banned
+                and i.sess_exp_days is not None
+                and 0 <= i.sess_exp_days < 15
+            ]
+        elif flt == "tainted":
+            infos = [
+                (p, i)
+                for p, i in infos
+                if not i.is_banned and any(c in i.audit_codes for c in taint_codes)
+            ]
+        elif flt == "banned":
+            infos = [(p, i) for p, i in infos if i.is_banned]
 
         infos.sort(
             key=lambda pair: (
                 pair[1].is_banned,
-                -pair[1].trust_score,
+                any(c in pair[1].audit_codes for c in taint_codes),
+                pair[1].sess_exp_days if pair[1].sess_exp_days is not None else 999,
                 natural_name_key(pair[0].name),
             )
         )
 
         score_rows: list[ft.Control] = []
         for p, info in infos:
-            # Build concise, actionable next-steps suggestion for Col 3
             action_color = COLORS["text_sub"]
+            is_tainted_row = any(c in info.audit_codes for c in taint_codes)
             if info.is_banned:
-                summary_str = "Đang tạm ngưng / Ban"
+                summary_str = "✕ Đã bị khóa / Disconnected (Meta Checkpoint = Ban 100%)"
                 action_color = COLORS["error"]
-            elif info.trust_tier == "diamond":
-                summary_str = "✦ Hạng Kim Cương (≥45d) — Đạt đỉnh tín nhiệm an toàn"
-                action_color = "#1D4ED8"
-            elif info.trust_tier == "elite":
-                m_steps: list[str] = []
-                if info.active_days < 28:
-                    m_steps.append(f"Mở thêm {28 - info.active_days} ngày")
-                elif info.session_count < 50:
-                    m_steps.append(f"Thêm {50 - info.session_count} phiên")
-                if info.total_minutes < 2700:
-                    m_steps.append(f"Treo thêm {_format_duration_mins(2700 - info.total_minutes)}")
-                if info.datr_age_days < 45.0 and len(m_steps) < 3:
-                    m_steps.append(f"Đợi cookie +{max(1, int(round(45.0 - info.datr_age_days)))}d")
-                if not info.has_recovery_armor and len(m_steps) < 3:
-                    m_steps.append("Bổ sung 2FA hoặc Pass/Mail phụ")
-                m_tail = " · ".join(m_steps[:2]) if m_steps else "Sẵn sàng lên ✦ Kim Cương"
-                summary_str = f"🛡️ Tin cậy (Đủ tuổi cài 2FA) → {m_tail}"
-                action_color = "#15803D"
-            elif info.trust_tier == "platinum":
-                d_steps: list[str] = []
-                if info.active_days < 20:
-                    d_steps.append(f"Mở thêm {20 - info.active_days} ngày")
-                elif info.session_count < 35:
-                    d_steps.append(f"Thêm {35 - info.session_count} phiên")
-                if info.total_minutes < 1800:
-                    d_steps.append(f"Treo thêm {_format_duration_mins(1800 - info.total_minutes)}")
-                if info.datr_age_days < 30.0 and len(d_steps) < 3:
-                    d_steps.append(f"Đợi cookie +{max(1, int(round(30.0 - info.datr_age_days)))}d")
-                if not info.has_recovery_key and len(d_steps) < 3:
-                    d_steps.append("Lưu mail_token/2FA")
-                d_tail = " · ".join(d_steps[:2]) if d_steps else "Sẵn sàng lên 🛡️ Tin cậy"
-                summary_str = f"❖ Bền vững (Cày việc tốt) → {d_tail}"
-                action_color = "#7C3AED"
+            elif is_tainted_row:
+                reasons: list[str] = []
+                if "burned_batch" in info.audit_codes:
+                    reasons.append("Chung lô phôi gốc (@tuan89.site / @fviainboxes.com) với 58 acc bị quét")
+                if "burned_ip" in info.audit_codes:
+                    reasons.append("Từng trùng IPv6 128-bit với acc bị khóa")
+                if "burned_proxy" in info.audit_codes:
+                    reasons.append("Từng dùng chung cổng Proxy với acc bị khóa")
+                if "burned_subnet" in info.audit_codes and not reasons:
+                    reasons.append("Cùng dải /64 với acc bị khóa")
+                summary_str = (
+                    f"⚠️ Liên đới lịch sử: {' · '.join(reasons)} — Cách ly, không xếp chung đội"
+                )
+                action_color = COLORS["warning"]
             elif info.cookie_count == 0 and info.session_count == 0 and info.history_pages == 0:
-                summary_str = "Mở trình duyệt · Đăng nhập Muse & Meta"
+                summary_str = "○ Hồ sơ chưa mở hoặc chưa đăng nhập Muse"
                 action_color = COLORS["text_dim"]
             else:
-                steps: list[str] = []
-                if info.has_meta_checkpoint:
-                    steps.append("⚠ Vết Checkpoint")
-                    action_color = COLORS["error"]
+                op_warns: list[str] = []
                 if info.ip_country_changed:
-                    steps.append("⚠ Khác quốc gia IP cũ")
-                    action_color = COLORS["warning"]
+                    op_warns.append("⚠ Khác quốc gia IP cũ")
                 if info.proxy_port_changed:
-                    steps.append("⚠ Đổi port proxy")
+                    op_warns.append("⚠ Đổi cổng/máy chủ Proxy")
+                if op_warns:
+                    summary_str = " · ".join(op_warns) + f" · Phiên Muse còn {info.sess_exp}"
                     action_color = COLORS["warning"]
-
-                if info.trust_tier == "trusted":
-                    if info.has_meta and info.datr_domains < 4:
-                        steps.append("Mở Facebook/Instagram đồng bộ (≥4 miền)")
-                    if info.active_days < 14:
-                        steps.append(f"Mở thêm {14 - info.active_days} ngày")
-                    elif info.session_count < 25:
-                        steps.append(f"Thêm {25 - info.session_count} phiên")
-                    if info.total_minutes < 1200:
-                        steps.append(
-                            f"Treo thêm {_format_duration_mins(1200 - info.total_minutes)}"
-                        )
-                    elif (
-                        info.total_minutes / max(1, info.session_count)
-                    ) < 20.0 and info.total_minutes < 1800:
-                        steps.append("Treo phiên dài ≥25p")
-                    if info.datr_age_days < 21.0 and len(steps) < 3:
-                        steps.append(
-                            f"Đợi cookie +{max(1, int(round(21.0 - info.datr_age_days)))}d"
-                        )
-                    if (
-                        info.ip_fraud_score is not None
-                        and info.ip_fraud_score >= 65
-                        and len(steps) < 3
-                    ):
-                        steps.append("Đổi IP sạch (<65pt)")
-                    if not steps and not info.has_thread_url:
-                        steps.append("Mở 1 hội thoại Muse")
-                    if not steps:
-                        steps.append("Kiểm tra độ sạch IP (≤25pt) để lên Kim Cương")
+                elif info.sess_exp_days is not None and info.sess_exp_days < 0:
+                    summary_str = "✕ Phiên hatch_sess đã quá hạn 30 ngày — Cần kiểm tra đăng nhập lại"
+                    action_color = COLORS["error"]
+                elif info.sess_exp_days is not None and info.sess_exp_days < 10:
+                    summary_str = (
+                        f"⏳ Phiên Muse còn {info.sess_exp_days} ngày — "
+                        "Hãy mở muse.ai 1 lần để tự động trượt hạn +30 ngày"
+                    )
+                    action_color = "#B45309"
                 else:
-                    if not p.proxy:
-                        steps.append("Gắn Proxy")
-                    elif not (p.timezone and p.locale):
-                        steps.append("Điền Timezone/Locale")
-                    if not info.hatch_gw:
-                        steps.append("Đăng nhập Muse")
-                    if info.has_meta and not info.has_ps_l:
-                        steps.append("Mở Facebook/Meta lấy ps_l")
-                    elif info.has_meta and info.datr_domains < 3:
-                        steps.append("Mở Facebook/Instagram đồng bộ (≥3 miền)")
-                    if (
-                        info.session_count >= 4
-                        and (info.total_minutes / max(1, info.session_count)) < 15.0
-                        and info.total_minutes < 900
-                    ):
-                        steps.append("Giữ phiên ≥20p (tránh tắt nhanh)")
-                    if info.active_days < 7:
-                        steps.append(f"Mở thêm {7 - info.active_days} ngày")
-                    elif info.session_count < 12:
-                        steps.append(f"Thêm {12 - info.session_count} phiên")
-                    if info.total_minutes < 480:
-                        steps.append(
-                            f"Treo thêm {_format_duration_mins(480 - info.total_minutes)}"
-                        )
-                    if info.datr_age_days < 12.0 and len(steps) < 3:
-                        steps.append(
-                            f"Đợi cookie +{max(1, int(round(12.0 - info.datr_age_days)))}d"
-                        )
-                    if not steps and not info.has_thread_url:
-                        steps.append("Mở 1 hội thoại Muse")
-                summary_str = " · ".join(steps[:3]) if steps else "Tiếp tục duy trì phiên"
+                    sess_txt = (
+                        f"Phiên Muse (hatch_sess): còn {info.sess_exp}"
+                        if info.sess_exp not in ("-", "")
+                        else "Đã có phiên Muse"
+                    )
+                    summary_str = (
+                        f"✓ Sạch (Độc lập IP & Phôi) · {sess_txt} · "
+                        f"Cookie gốc {info.datr_age_days:.0f}d — Chỉ mở khi làm việc hoặc giữ phiên <30d"
+                    )
+                    action_color = "#15803D"
 
             detail_tip = (
-                f"Cần làm: {summary_str}\n"
-                f"Hiện tại: Cookie {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
+                f"Chẩn đoán: {summary_str}\n"
+                f"Hiện tại: Cookie gốc {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
                 f"{info.active_days}d mở ({info.session_count} phiên, {_format_duration_mins(info.total_minutes)})"
             )
 
@@ -4380,7 +4347,7 @@ def open_trust_monitor_dialog(
                                         ),
                                     ),
                                     ft.Container(
-                                        width=142,
+                                        width=96,
                                         alignment=ft.Alignment(-1, 0),
                                         content=_build_trust_score_chip(info),
                                     ),
@@ -4476,7 +4443,7 @@ def open_trust_monitor_dialog(
                 controls=[
                     tab_bar,
                     table_header_slot,
-                    list_col,
+                    list_box,
                 ],
             ),
         ),

@@ -1631,6 +1631,8 @@ class SquadCandidate:
     schedule_label: str = ""
     v6_prefix: str = ""
     exit_ip: str = ""
+    sess_exp: str = "-"
+    sess_exp_days: int | None = None
 
 
 def _resolve_profile_schedule_priority(
@@ -1727,7 +1729,7 @@ def _build_fixed_work_squad_plan(
             continue
         if any(
             c in info.audit_codes
-            for c in ("burned_proxy", "burned_ip", "duplicate_fingerprint")
+            for c in ("burned_proxy", "burned_ip", "burned_batch", "duplicate_fingerprint")
         ):
             continue
         has_disk_activity = bool(
@@ -1786,6 +1788,8 @@ def _build_fixed_work_squad_plan(
             schedule_label=sched_label,
             v6_prefix=_ipv6_prefix_64(raw_exit_ip),
             exit_ip=raw_exit_ip.lower(),
+            sess_exp=info.sess_exp,
+            sess_exp_days=info.sess_exp_days,
         )
         cand_by_name[p.name] = cand
 
@@ -2053,7 +2057,7 @@ def select_parallel_work_squad(
             continue
         if any(
             c in info.audit_codes
-            for c in ("burned_proxy", "burned_ip", "duplicate_fingerprint")
+            for c in ("burned_proxy", "burned_ip", "burned_batch", "duplicate_fingerprint")
         ):
             continue
         has_disk_activity = bool(
@@ -2109,6 +2113,8 @@ def select_parallel_work_squad(
             schedule_label=sched_label,
             v6_prefix=_ipv6_prefix_64(raw_exit_ip),
             exit_ip=raw_exit_ip.lower(),
+            sess_exp=info.sess_exp,
+            sess_exp_days=info.sess_exp_days,
         )
 
         # Fatigue check: avoid picking accounts that already worked today or closed recently
@@ -2127,10 +2133,17 @@ def select_parallel_work_squad(
             else 0.0
         )
         if mode == "prime":
+            # Keep-Alive 30d mode: prioritize clean accounts whose .muse.ai hatch_sess cookie has the fewest days left
+            sess_urgency_bonus = (
+                max(0.0, (35.0 - float(min(35, max(0, info.sess_exp_days)))) * 45.0)
+                if (info.sess_exp_days is not None and info.sess_exp_days >= 0)
+                else 0.0
+            )
             rank_score = (
                 gw_bonus
-                + info.trust_score * 5.0
-                + min(96.0, rest_h) * 0.6
+                + sess_urgency_bonus
+                + info.trust_score * 3.0
+                + min(96.0, rest_h) * 1.2
                 + pair_bonus
                 + jitter
             )

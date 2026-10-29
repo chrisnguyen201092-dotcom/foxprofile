@@ -973,55 +973,64 @@ def _geo_score_badge(
         return None
     t_score = int(getattr(monitor_info, "trust_score", 0) or 0)
     t_tier = str(getattr(monitor_info, "trust_tier", "cold") or "cold")
-    if t_score <= 0 and t_tier != "banned":
+    is_banned = bool(getattr(monitor_info, "is_banned", False) or t_tier == "banned")
+    sess_days = getattr(monitor_info, "sess_exp_days", None)
+    audit_codes = list(getattr(monitor_info, "audit_codes", ()) or ())
+    tainted_codes = [
+        c
+        for c in audit_codes
+        if c in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+    ]
+    if t_score <= 0 and not is_banned and not tainted_codes and sess_days is None:
         return None
 
-    tier_sym = {
-        "diamond": "✦",
-        "elite": "🛡️",
-        "platinum": "❖",
-        "trusted": "◈",
-        "warming": "◇",
-        "cold": "○",
-        "banned": "✕",
-    }.get(t_tier, "◈")
-
-    col = (
-        COLORS["error"]
-        if t_tier == "banned"
-        else (
-            "#1D4ED8"
-            if t_tier == "diamond"
-            else (
-                "#15803D"
-                if t_tier == "elite"
-                else (
-                    "#7C3AED"
-                    if t_tier == "platinum"
-                    else (
-                        "#B45309"
-                        if t_tier == "trusted"
-                        else (COLORS["text_dim"] if t_tier == "warming" else "#F87171")
-                    )
-                )
-            )
-        )
-    )
-    tier_name = {
-        "diamond": "Kim Cương",
-        "elite": "Tin cậy",
-        "platinum": "Bền vững",
-        "trusted": "Ổn định",
-        "warming": "Tích lũy",
-        "cold": "Khởi tạo",
-        "banned": "Tạm ngưng / Khóa",
-    }.get(t_tier, "Ổn định")
-    text_val = "✕ Ban" if t_tier == "banned" else f"{tier_sym} {t_score}"
     datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
-    act_d = int(getattr(monitor_info, "active_days", 0) or 0)
     f_score = getattr(monitor_info, "ip_fraud_score", None)
     ip_part = f" · IP Risk {f_score}/100" if f_score is not None and f_score >= 0 else ""
-    tip = f"{tier_sym} {tier_name} ({t_score}/150đ) · datr {datr_d:.1f}d · {act_d}d mở{ip_part}"
+
+    if is_banned:
+        col = COLORS["error"]
+        text_val = "✕ Ban"
+        tip = f"✕ Tài khoản đã bị khóa / Disconnected{ip_part}"
+    elif tainted_codes:
+        col = "#D97706"
+        text_val = f"⚠️ {sess_days}d" if (sess_days is not None and sess_days >= 0) else "⚠️"
+        reasons: list[str] = []
+        if "burned_proxy" in tainted_codes:
+            reasons.append("Trùng cổng Proxy từng có acc Ban")
+        if "burned_ip" in tainted_codes:
+            reasons.append("Trùng IPv6 128-bit lịch sử với acc Ban")
+        if "burned_batch" in tainted_codes:
+            reasons.append("Chung lô phôi @tuan89.site (đợt 63..121)")
+        if "burned_subnet" in tainted_codes and not reasons:
+            reasons.append("Chung dải mạng /64 với acc Ban")
+        reason_str = " + ".join(reasons)
+        sess_tip = f" · Phiên Muse còn {sess_days}d" if (sess_days is not None and sess_days >= 0) else ""
+        tip = f"⚠️ Liên đới lịch sử ({reason_str}) — Cách ly, không gộp chung đội mở song song{sess_tip}{ip_part}"
+    elif sess_days is not None:
+        if sess_days < 0:
+            col = COLORS["error"]
+            text_val = "✕ Hết hạn"
+            tip = f"✕ Phiên Muse (hatch_sess) đã hết hạn — Cần đăng nhập lại{ip_part}"
+        elif sess_days < 10:
+            col = "#B45309"
+            text_val = f"⏳ {sess_days}d"
+            tip = (
+                f"⏳ Phiên Muse (hatch_sess) còn {sess_days} ngày — "
+                f"Hãy mở muse.ai 1 lần để tự động trượt hạn thêm +30 ngày · datr {datr_d:.1f}d{ip_part}"
+            )
+        else:
+            col = "#15803D"
+            text_val = f"✓ {sess_days}d"
+            tip = (
+                f"✓ Sạch (Độc lập IP & Phôi) · Hạn phiên Muse (hatch_sess): còn {sess_days} ngày "
+                f"· datr {datr_d:.1f}d{ip_part}"
+            )
+    else:
+        col = "#15803D"
+        text_val = "✓ Sạch"
+        tip = f"✓ Sạch (Độc lập IP & Phôi) · datr {datr_d:.1f}d{ip_part}"
+
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=5, vertical=1),
         border_radius=4,

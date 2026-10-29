@@ -4319,6 +4319,111 @@ def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_pat
     assert "Live2" not in mon2.mail_checkpoint_hits
 
 
+def test_hatch_sess_30d_expiry_and_historical_taint_audit(tmp_path):
+    from src.services.scheduler import select_parallel_work_squad
+
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    data_dir.mkdir()
+    log_dir.mkdir()
+
+    now_ts = int(time.time())
+    # Create Clean1 with 7-day hatch_sess and 393-day c_user
+    for name, days_left in [("Clean7d", 7), ("Clean28d", 28), ("TaintedBatch", 27)]:
+        pdir = data_dir / name
+        pdir.mkdir()
+        db_file = pdir / "cookies.sqlite"
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("CREATE TABLE moz_cookies (host TEXT, name TEXT, expiry INTEGER)")
+        conn.execute(
+            "INSERT INTO moz_cookies VALUES (?, ?, ?)",
+            (".muse.ai", "hatch_sess", now_ts + days_left * 86400 + 3600),
+        )
+        conn.execute(
+            "INSERT INTO moz_cookies VALUES (?, ?, ?)",
+            (".muse.ai", "hatch_gw", now_ts + 365 * 86400),
+        )
+        conn.execute(
+            "INSERT INTO moz_cookies VALUES (?, ?, ?)",
+            (".facebook.com", "c_user", now_ts + 393 * 86400),
+        )
+        conn.commit()
+        conn.close()
+
+    profiles = [
+        Profile(
+            name="Clean7d",
+            proxy="http://u:p@sp02-usa102.nguonproxy.com:10778",
+            os_type="windows",
+            pages=["Live"],
+            recovery_email="clean7@smvv.vn",
+        ),
+        Profile(
+            name="Clean28d",
+            proxy="http://u:p@sp02-usa103.nguonproxy.com:10888",
+            os_type="windows",
+            pages=["Live"],
+            recovery_email="clean28@smvv.vn",
+        ),
+        Profile(
+            name="TaintedBatch",
+            proxy="http://u:p@sp02-usa104.nguonproxy.com:10999",
+            os_type="windows",
+            pages=["Live"],
+            recovery_email="tainted@fviainboxes.com",
+        ),
+        Profile(
+            name="Ban1",
+            proxy="http://u:p@209.141.40.174:5299",
+            os_type="windows",
+            group="Disconnected",
+            pages=["Disconnected"],
+            recovery_email="b1@fviainboxes.com",
+        ),
+        Profile(
+            name="Ban2",
+            proxy="http://u:p@209.141.40.174:5299",
+            os_type="windows",
+            group="Disconnected",
+            pages=["Disconnected"],
+            recovery_email="b2@fviainboxes.com",
+        ),
+        Profile(
+            name="Ban3",
+            proxy="http://u:p@209.141.40.174:5299",
+            os_type="windows",
+            group="Disconnected",
+            pages=["Disconnected"],
+            recovery_email="b3@fviainboxes.com",
+        ),
+    ]
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    snap = mon.snapshot(profiles, set())
+
+    # 1. hatch_sess 30d takes priority over 393d c_user
+    assert snap.profiles["Clean7d"].sess_exp == "Còn 7d"
+    assert snap.profiles["Clean7d"].sess_exp_days == 7
+    assert snap.profiles["Clean28d"].sess_exp == "Còn 28d"
+    assert snap.profiles["Clean28d"].sess_exp_days == 28
+
+    # 2. TaintedBatch is flagged with burned_batch, Clean7d and Clean28d have 0 audit codes
+    assert "burned_batch" in snap.profiles["TaintedBatch"].audit_codes
+    assert snap.profiles["Clean7d"].audit_codes == []
+    assert snap.profiles["Clean28d"].audit_codes == []
+
+    # 3. Work Squad excludes TaintedBatch and prioritizes Clean7d before Clean28d in 'prime' mode
+    plan = select_parallel_work_squad(profiles, snap, count=5, mode="prime")
+    cand_names = [c.name for c in plan.candidates]
+    assert "TaintedBatch" not in cand_names
+    assert cand_names == ["Clean7d", "Clean28d"]
+
+    # 4. Changing server cluster with the SAME port number triggers proxy_port_changed
+    profiles[0].proxy = "http://u:p@sp02-usa109.nguonproxy.com:10778"
+    snap2 = mon.snapshot(profiles, set())
+    assert snap2.profiles["Clean7d"].proxy_port_changed is True
+
+
 
 
 

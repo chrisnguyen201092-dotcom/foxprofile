@@ -1017,31 +1017,19 @@ def _build_squad_candidate_row(
 ) -> ft.Container:
     is_gw = is_gateway_ipv6_cluster(cand.cluster)
     cluster_col = "#0284C7" if is_gw else "#059669"
-    tier_sym = {
-        "diamond": "✦",
-        "elite": "🛡️",
-        "platinum": "❖",
-        "trusted": "◈",
-        "warming": "◇",
-        "cold": "○",
-    }.get(cand.trust_tier, "◈")
-    tier_col = (
-        "#1D4ED8"
-        if cand.trust_tier == "diamond"
-        else (
-            "#15803D"
-            if cand.trust_tier == "elite"
-            else (
-                "#7C3AED"
-                if cand.trust_tier == "platinum"
-                else (
-                    "#B45309"
-                    if cand.trust_tier == "trusted"
-                    else (COLORS["text_dim"] if cand.trust_tier == "warming" else "#F87171")
-                )
-            )
-        )
-    )
+    if cand.sess_exp_days is not None:
+        if cand.sess_exp_days < 0:
+            sess_badge_txt = "✕ Hết hạn"
+            sess_col = COLORS["error"]
+        elif cand.sess_exp_days < 10:
+            sess_badge_txt = f"⏳ {cand.sess_exp_days}d"
+            sess_col = "#B45309"
+        else:
+            sess_badge_txt = f"✓ {cand.sess_exp_days}d"
+            sess_col = "#15803D"
+    else:
+        sess_badge_txt = "✓ Sạch"
+        sess_col = "#15803D"
     display_name = (
         cand.name
         if cand.name == cand.email or not cand.email
@@ -1081,14 +1069,15 @@ def _build_squad_candidate_row(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=6, vertical=2),
                 border_radius=4,
-                bgcolor=ft.Colors.with_opacity(0.11, tier_col),
-                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, tier_col)),
+                bgcolor=ft.Colors.with_opacity(0.11, sess_col),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, sess_col)),
+                tooltip="Độ sạch lịch sử IP/Phôi & Thời hạn còn lại của phiên Muse (hatch_sess 30 ngày)",
                 content=ft.Text(
-                    f"{tier_sym} {cand.trust_score}",
+                    sess_badge_txt,
                     size=11,
                     font_family=FONT_DATA,
                     weight=ft.FontWeight.W_700,
-                    color=tier_col,
+                    color=sess_col,
                 ),
             ),
             ft.Container(
@@ -1135,18 +1124,18 @@ def _build_squad_candidate_row(
                 ),
             )
         )
-    elif cand.is_rising_star:
+    elif cand.sess_exp_days is not None and 0 <= cand.sess_exp_days < 15:
         right_badges.append(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=6, vertical=2),
                 border_radius=4,
                 bgcolor=COLORS["card_bg"],
-                border=ft.Border.all(1, COLORS["accent"]),
+                border=ft.Border.all(1, "#B45309"),
                 content=ft.Text(
-                    get_string("work_squad_rising_badge"),
+                    "⏳ Sắp cần gia hạn phiên",
                     size=10.5,
                     font_family=FONT_SEMIBOLD,
-                    color=COLORS["accent"],
+                    color="#B45309",
                 ),
             )
         )

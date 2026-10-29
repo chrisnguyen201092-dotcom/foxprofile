@@ -265,6 +265,7 @@ class ProfileMonitorInfo:
     hatch_gw: bool = False
     hatch_sess: bool = False
     sess_exp: str = "-"
+    sess_exp_days: int | None = None
     burst_10m: int = 0
     last_used_port: str = ""
     proxy_port_changed: bool = False
@@ -312,6 +313,18 @@ class ProfileMonitorInfo:
     has_geo_pin: bool = False
     has_recovery_key: bool = False
     has_recovery_armor: bool = False
+
+    def __post_init__(self) -> None:
+        if self.sess_exp_days is None and self.sess_exp and self.sess_exp != "-":
+            s = self.sess_exp.strip()
+            if "Hết hạn" in s or "Expired" in s:
+                self.sess_exp_days = -1
+            elif s.endswith("d"):
+                num_str = "".join(ch for ch in s if ch.isdigit())
+                if num_str:
+                    self.sess_exp_days = int(num_str)
+            elif s.endswith("h"):
+                self.sess_exp_days = 0
 
     @property
     def has_warning(self) -> bool:
@@ -1151,6 +1164,7 @@ class MonitorService:
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
         self._last_used_ports: dict[str, str] = {}
+        self._last_used_endpoints: dict[str, str] = {}
         self._ip_history: dict[str, list[dict[str, Any]]] = {}
         self._ip_scores: dict[str, dict[str, Any]] = {}
         self._token_entry_memo: dict[str, tuple[float, bool]] = {}
@@ -1181,6 +1195,11 @@ class MonitorService:
                 if isinstance(ports, dict):
                     self._last_used_ports = {
                         str(k): str(v) for k, v in ports.items() if isinstance(k, str) and v
+                    }
+                eps = raw.get("last_used_endpoints")
+                if isinstance(eps, dict):
+                    self._last_used_endpoints = {
+                        str(k): str(v) for k, v in eps.items() if isinstance(k, str) and v
                     }
                 raw_scores = raw.get("ip_scores")
                 if isinstance(raw_scores, dict):
@@ -1325,7 +1344,7 @@ class MonitorService:
                         if (
                             isinstance(pname, str)
                             and isinstance(dval, dict)
-                            and dval.get("_cache_ver") == 4
+                            and dval.get("_cache_ver") == 5
                         ):
                             clean_disk[pname] = dict(dval)
                     self._disk_cache = clean_disk
@@ -1362,6 +1381,7 @@ class MonitorService:
             payload = {
                 "cooldown_minutes": self._cooldown_minutes,
                 "last_used_ports": self._last_used_ports,
+                "last_used_endpoints": self._last_used_endpoints,
                 "ip_history": self._ip_history,
                 "ip_scores": self._ip_scores,
                 "session_history": {
@@ -1567,10 +1587,15 @@ class MonitorService:
 
     def acknowledge_proxy_change(self, profile_name: str, proxy: str | None) -> None:
         port = extract_proxy_port(proxy)
+        ep = extract_proxy_endpoint(proxy)
         if port:
             self._last_used_ports[profile_name] = port
         else:
             self._last_used_ports.pop(profile_name, None)
+        if ep:
+            self._last_used_endpoints[profile_name] = ep
+        else:
+            self._last_used_endpoints.pop(profile_name, None)
         if profile_name in self._ip_history and len(self._ip_history[profile_name]) > 1:
             self._ip_history[profile_name] = self._ip_history[profile_name][:1]
         self._save_settings()
@@ -1795,6 +1820,9 @@ class MonitorService:
         if old_name in self._last_used_ports:
             self._last_used_ports[new_name] = self._last_used_ports.pop(old_name)
             changed = True
+        if old_name in self._last_used_endpoints:
+            self._last_used_endpoints[new_name] = self._last_used_endpoints.pop(old_name)
+            changed = True
         if old_name in self._ip_history:
             self._ip_history[new_name] = self._ip_history.pop(old_name)
             changed = True
@@ -1836,8 +1864,15 @@ class MonitorService:
         self._live_started_at[profile_name] = dt.datetime.now()
         if proxy is not None:
             port = extract_proxy_port(proxy)
+            ep = extract_proxy_endpoint(proxy)
+            changed = False
             if port and self._last_used_ports.get(profile_name) != port:
                 self._last_used_ports[profile_name] = port
+                changed = True
+            if ep and self._last_used_endpoints.get(profile_name) != ep:
+                self._last_used_endpoints[profile_name] = ep
+                changed = True
+            if changed:
                 self._save_settings()
 
     def record_launch_failed(self, profile_name: str) -> None:
@@ -2300,7 +2335,7 @@ class MonitorService:
                     cached["sess_exp"] = f"Còn {int(rem_h // 24)}d"
             if not is_running:
                 if (
-                    cached.get("_cache_ver") == 4
+                    cached.get("_cache_ver") == 5
                     and cached.get("_tabs_mtime") == tabs_mtime
                     and cached.get("_cookies_mtime") == cookies_mtime
                     and cached.get("_places_mtime") == places_mtime
@@ -2320,7 +2355,7 @@ class MonitorService:
                 return cached
 
         result: dict[str, Any] = {
-            "_cache_ver": 4,
+            "_cache_ver": 5,
             "_ts": now_ts,
             "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
@@ -2437,7 +2472,9 @@ class MonitorService:
                 earliest_datr_ct = 0.0
                 datr_hosts: set[str] = set()
                 cookie_hosts: set[str] = set()
-                latest_exp = 0.0
+                exact_hatch_sess_exp = 0.0
+                muse_auth_exp = 0.0
+                fallback_sess_exp = 0.0
                 for _host, cname, ctime, exp in rows:
                     host_l = str(_host or "").lower().lstrip(".")
                     if host_l:
@@ -2507,7 +2544,13 @@ class MonitorService:
                             exp_val = float(exp)
                             while exp_val > 10_000_000_000:
                                 exp_val /= 1000.0
-                            latest_exp = max(latest_exp, exp_val)
+                            if cname_s == "hatch_sess":
+                                exact_hatch_sess_exp = max(exact_hatch_sess_exp, exp_val)
+                            elif is_hatch_host:
+                                muse_auth_exp = max(muse_auth_exp, exp_val)
+                            else:
+                                fallback_sess_exp = max(fallback_sess_exp, exp_val)
+                latest_exp = exact_hatch_sess_exp or muse_auth_exp or fallback_sess_exp
                 # As of 2026-10, muse.ai no longer sets legacy `hatch_gw` / `hatch_vml` cookies on every
                 # logged-in session; primary auth relies on `hatch_sess` + `hatch_native_auth_device` / `__Host-hatch_one_tap`
                 # and dynamically negotiates the gateway token over HTTPS (`/api/auth/check` -> `/api/hatch/token`).
@@ -2721,11 +2764,14 @@ class MonitorService:
             disk_map[p.name] = disk
 
             port = extract_proxy_port(p.proxy)
+            ep_seed = extract_proxy_endpoint(p.proxy)
             if port and p.name in self._last_used_ports and self._last_used_ports[p.name] != port:
                 m_leg = _RE_LEGACY_PORT.search((p.proxy or "").strip())
                 leg_port = f":{m_leg.group(1)}" if m_leg else ""
                 if leg_port and self._last_used_ports[p.name] == leg_port:
                     self._last_used_ports[p.name] = port
+                    if ep_seed:
+                        self._last_used_endpoints[p.name] = ep_seed
                     for s_live in self._live_sessions.get(p.name, []):
                         if s_live.get("port") == leg_port:
                             s_live["port"] = port
@@ -2736,6 +2782,16 @@ class MonitorService:
                 and p.name not in self._last_used_ports
             ):
                 self._last_used_ports[p.name] = port
+                if ep_seed:
+                    self._last_used_endpoints[p.name] = ep_seed
+                ports_seeded = True
+            elif (
+                ep_seed
+                and (disk.get("hatch_gw") or disk.get("hatch_sess"))
+                and p.name not in self._last_used_endpoints
+                and self._last_used_ports.get(p.name) == port
+            ):
+                self._last_used_endpoints[p.name] = ep_seed
                 ports_seeded = True
 
             h = hist.get(p.name, {})
@@ -2902,8 +2958,13 @@ class MonitorService:
                 snap.token_bursts.append((p.name, disk["burst_10m"]))
 
             last_port = self._last_used_ports.get(p.name, "")
+            last_ep = self._last_used_endpoints.get(p.name, "")
             has_sess = bool(disk["hatch_gw"] or disk["hatch_sess"])
-            proxy_port_changed = bool(has_sess and last_port and port != last_port)
+            port_diff = bool(last_port and port != last_port)
+            ep_diff = bool(last_ep and ep and ep != last_ep)
+            proxy_port_changed = bool(has_sess and (port_diff or ep_diff))
+            if ep_diff and not port_diff:
+                last_port = last_ep
 
             ip_entries = self._ip_history.get(p.name, [])
             last_ip = ip_entries[0].get("ip", "") if ip_entries else ""
@@ -3341,25 +3402,47 @@ class MonitorService:
                 if info is not None and code not in info.audit_codes:
                     info.audit_codes.append(code)
 
-        # 1. Burned Proxy / IP / IPv6 /64 Subnet shared with explicitly Banned profiles
+        # 1. Burned Proxy / Historical 128-bit IP / IPv6 /64 Subnet / Seller Batch shared with Banned profiles
         banned_by_ep: dict[str, list[str]] = {}
+        banned_by_gw_port: dict[str, list[str]] = {}
         banned_by_ip: dict[str, list[str]] = {}
         banned_by_v6: dict[str, list[str]] = {}
-        hard_banned_names: set[str] = set()
+        banned_fvia_names: list[str] = []
         for p in profiles:
             info = snap.profiles.get(p.name)
             if not info or not info.is_banned:
                 continue
-            if is_ban_status(p.status):
-                hard_banned_names.add(p.name)
             ep = extract_proxy_endpoint(p.proxy)
             if ep:
                 banned_by_ep.setdefault(ep, []).append(p.name)
+            for s_item in self._live_sessions.get(p.name, []):
+                pt_s = str(s_item.get("port") or "").strip()
+                if pt_s.startswith(":5"):
+                    lst_gw = banned_by_gw_port.setdefault(pt_s, [])
+                    if p.name not in lst_gw:
+                        lst_gw.append(p.name)
+            p_ips: list[str] = []
             if info.last_exit_ip:
-                banned_by_ip.setdefault(info.last_exit_ip, []).append(p.name)
+                p_ips.append(info.last_exit_ip.strip().lower())
+            for ent in self._ip_history.get(p.name, []):
+                ip_h = str(ent.get("ip") or "").strip().lower()
+                if ip_h and ip_h not in p_ips:
+                    p_ips.append(ip_h)
+                pt_h = str(ent.get("port") or "").strip()
+                if pt_h.startswith(":5"):
+                    lst_gw = banned_by_gw_port.setdefault(pt_h, [])
+                    if p.name not in lst_gw:
+                        lst_gw.append(p.name)
+            for ip_val in p_ips:
+                lst_ip = banned_by_ip.setdefault(ip_val, [])
+                if p.name not in lst_ip:
+                    lst_ip.append(p.name)
+            if info.last_exit_ip:
                 v6_pref = _ipv6_prefix_64(info.last_exit_ip)
                 if v6_pref and is_ban_status(p.status):
                     banned_by_v6.setdefault(v6_pref, []).append(p.name)
+            if (p.recovery_email or "").strip().lower().endswith("@fviainboxes.com"):
+                banned_fvia_names.append(p.name)
 
         subnet_affected: dict[str, list[str]] = {}
         for p in profiles:
@@ -3367,32 +3450,70 @@ class MonitorService:
             if not info or info.is_banned:
                 continue
             ep = extract_proxy_endpoint(p.proxy)
-            if ep and ep in banned_by_ep:
-                b_list = banned_by_ep[ep]
-                # Do not flag active accounts that already established a working Hatch gateway if the old account was only Disconnected
-                is_working_replacement = info.hatch_gw and not info.has_meta_checkpoint
-                if not is_working_replacement or any(bn in hard_banned_names for bn in b_list):
-                    b_names = ", ".join(b_list)
-                    _attach(
-                        "burned_proxy",
-                        "critical",
-                        get_string("audit_burned_proxy_title", name=p.name, port=info.port or ep),
-                        get_string("audit_burned_proxy_detail", name=p.name, banned=b_names, port=info.port or ep),
-                        [p.name, *b_list],
-                    )
-            elif info.last_exit_ip and info.last_exit_ip in banned_by_ip:
-                b_names = ", ".join(banned_by_ip[info.last_exit_ip])
+            b_ep_list: list[str] = list(banned_by_ep.get(ep, [])) if ep else []
+            if (
+                is_gateway_ipv6_cluster(info.cluster)
+                and info.port
+                and info.port in banned_by_gw_port
+            ):
+                for bn in banned_by_gw_port[info.port]:
+                    if bn not in b_ep_list:
+                        b_ep_list.append(bn)
+
+            my_hist_ips: list[str] = []
+            if info.last_exit_ip:
+                my_hist_ips.append(info.last_exit_ip.strip().lower())
+            for ent in self._ip_history.get(p.name, []):
+                ip_h = str(ent.get("ip") or "").strip().lower()
+                if ip_h and ip_h not in my_hist_ips:
+                    my_hist_ips.append(ip_h)
+            matched_hist_ip = next((ip_v for ip_v in my_hist_ips if ip_v in banned_by_ip), "")
+
+            if b_ep_list:
+                b_names = ", ".join(b_ep_list)
+                _attach(
+                    "burned_proxy",
+                    "critical",
+                    get_string("audit_burned_proxy_title", name=p.name, port=info.port or ep),
+                    get_string(
+                        "audit_burned_proxy_detail",
+                        name=p.name,
+                        banned=b_names,
+                        port=info.port or ep,
+                    ),
+                    [p.name, *b_ep_list],
+                )
+            elif matched_hist_ip:
+                b_ip_list = banned_by_ip[matched_hist_ip]
+                b_names = ", ".join(b_ip_list)
                 _attach(
                     "burned_ip",
                     "critical",
-                    get_string("audit_burned_ip_title", name=p.name, ip=info.last_exit_ip),
-                    get_string("audit_burned_ip_detail", name=p.name, banned=b_names, ip=info.last_exit_ip),
-                    [p.name, *banned_by_ip[info.last_exit_ip]],
+                    get_string("audit_burned_ip_title", name=p.name, ip=matched_hist_ip),
+                    get_string(
+                        "audit_burned_ip_detail",
+                        name=p.name,
+                        banned=b_names,
+                        ip=matched_hist_ip,
+                    ),
+                    [p.name, *b_ip_list],
                 )
             elif info.last_exit_ip:
                 v6_pref = _ipv6_prefix_64(info.last_exit_ip)
                 if v6_pref and v6_pref in banned_by_v6:
                     subnet_affected.setdefault(v6_pref, []).append(p.name)
+
+            if (
+                len(banned_fvia_names) >= 3
+                and (p.recovery_email or "").strip().lower().endswith("@fviainboxes.com")
+            ):
+                _attach(
+                    "burned_batch",
+                    "warning",
+                    f"Hồ sơ [{p.name}] thuộc lô phôi @tuan89.site (cùng đợt quét 63..121)",
+                    f"Hồ sơ [{p.name}] dùng mail khôi phục @fviainboxes.com thuộc cùng lô phôi gốc @tuan89.site với {len(banned_fvia_names)} tài khoản đã bị quét ngầm (63..121). Nên cách ly, không gộp chung đội mở song song.",
+                    [p.name],
+                )
 
         for v6_pref, aff_names in subnet_affected.items():
             b_list = banned_by_v6.get(v6_pref, [])
