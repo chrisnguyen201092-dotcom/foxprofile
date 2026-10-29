@@ -1120,6 +1120,7 @@ class MonitorSnapshot:
     total_ports: int = 0
     proxy_collisions: list[tuple[str, list[str]]] = field(default_factory=list)
     token_bursts: list[tuple[str, int]] = field(default_factory=list)
+    mail_checkpoint_hits: list[tuple[str, dict[str, str]]] = field(default_factory=list)
     audit_findings: list[AuditFinding] = field(default_factory=list)
     diamond_count: int = 0
     elite_count: int = 0
@@ -1158,6 +1159,9 @@ class MonitorService:
         self._schedule_cycle_days: int = 5
         self._fixed_work_squads: dict[str, list[str]] = {}
         self._sort_by: str = "custom"
+        self._last_mail_scan_ts: float = 0.0
+        self._mail_checkpoint_hits: dict[str, dict[str, str]] = {}
+        self._mail_dead_tokens: set[str] = set()
         self._load_settings()
 
     def _settings_file(self) -> pathlib.Path:
@@ -1321,15 +1325,39 @@ class MonitorService:
                         if (
                             isinstance(pname, str)
                             and isinstance(dval, dict)
-                            and dval.get("_cache_ver") == 2
+                            and dval.get("_cache_ver") == 4
                         ):
                             clean_disk[pname] = dict(dval)
                     self._disk_cache = clean_disk
+                raw_scan_ts = raw.get("last_mail_scan_ts")
+                if isinstance(raw_scan_ts, (int, float)) and raw_scan_ts >= 0:
+                    self._last_mail_scan_ts = float(raw_scan_ts)
+                raw_cp_hits = raw.get("mail_checkpoint_hits")
+                if isinstance(raw_cp_hits, dict):
+                    clean_hits: dict[str, dict[str, str]] = {}
+                    for pname, hval in raw_cp_hits.items():
+                        if isinstance(pname, str) and isinstance(hval, dict):
+                            clean_hits[pname] = {
+                                str(k): str(v) for k, v in hval.items() if v is not None
+                            }
+                    self._mail_checkpoint_hits = clean_hits
+                raw_dead = raw.get("mail_dead_tokens")
+                if isinstance(raw_dead, list):
+                    self._mail_dead_tokens = {
+                        str(em).strip().lower() for em in raw_dead if str(em).strip()
+                    }
 
     def _save_settings(self) -> None:
         path = self._settings_file()
         with contextlib.suppress(Exception):
             path.parent.mkdir(parents=True, exist_ok=True)
+            if self._last_mail_scan_ts <= 0.0 and path.exists():
+                with contextlib.suppress(Exception):
+                    disk_raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(disk_raw, dict):
+                        disk_ts = disk_raw.get("last_mail_scan_ts")
+                        if isinstance(disk_ts, (int, float)) and disk_ts > self._last_mail_scan_ts:
+                            self._last_mail_scan_ts = float(disk_ts)
             tmp = path.with_suffix(".json.tmp")
             payload = {
                 "cooldown_minutes": self._cooldown_minutes,
@@ -1344,6 +1372,9 @@ class MonitorService:
                 "schedule_cycle_days": self._schedule_cycle_days,
                 "sort_by": self._sort_by,
                 "fixed_work_squads": self._fixed_work_squads,
+                "last_mail_scan_ts": self._last_mail_scan_ts,
+                "mail_checkpoint_hits": self._mail_checkpoint_hits,
+                "mail_dead_tokens": sorted(self._mail_dead_tokens),
                 "disk_cache": {
                     k: v
                     for k, v in self._disk_cache.items()
@@ -1352,6 +1383,119 @@ class MonitorService:
             }
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             os.replace(tmp, path)
+
+    @property
+    def last_mail_scan_ts(self) -> float:
+        return self._last_mail_scan_ts
+
+    @property
+    def mail_checkpoint_hits(self) -> dict[str, dict[str, str]]:
+        return {k: dict(v) for k, v in self._mail_checkpoint_hits.items()}
+
+    @property
+    def mail_dead_tokens(self) -> set[str]:
+        return set(self._mail_dead_tokens)
+
+    def should_auto_scan_mail(
+        self,
+        now_ts: float | None = None,
+        cooldown_hours: float = 20.0,
+    ) -> bool:
+        """Return True if at least `cooldown_hours` have elapsed since the last daily mail scan."""
+        cur = time.time() if now_ts is None else float(now_ts)
+        return (cur - self._last_mail_scan_ts) >= (cooldown_hours * 3600.0)
+
+    def get_live_mail_scan_targets(
+        self,
+        profiles: list[Profile],
+        pool_token_map: dict[str, str] | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """Return `[(profile_name, email, mail_token), ...]` for active `Live` profiles eligible for daily mail check."""
+        has_live_page = any(
+            any(pg.casefold() == "live" for pg in (p.pages or [])) for p in profiles
+        )
+        tok_lookup = pool_token_map or {}
+        targets: list[tuple[str, str, str]] = []
+        for p in profiles:
+            if (
+                p.banned_at
+                or is_ban_status(p.status)
+                or has_ban_page(p.pages)
+                or is_ban_page(p.group)
+            ):
+                continue
+            if has_live_page and not any(pg.casefold() == "live" for pg in (p.pages or [])):
+                continue
+            em = (p.email or "").strip()
+            if not em or em.lower() in self._mail_dead_tokens:
+                continue
+            tok = (getattr(p, "mail_token", None) or "").strip() or tok_lookup.get(
+                em.lower(), ""
+            )
+            rt, _ = split_mail_token(tok)
+            if not rt:
+                continue
+            targets.append((p.name, em, tok))
+        return targets
+
+    def record_mail_checkpoint_hit(
+        self,
+        profile_name: str,
+        hit: dict[str, str] | None,
+    ) -> None:
+        clean_name = (profile_name or "").strip()
+        if not clean_name:
+            return
+        if hit is None:
+            if self._mail_checkpoint_hits.pop(clean_name, None) is not None:
+                self._save_settings()
+            return
+        self._mail_checkpoint_hits[clean_name] = {
+            str(k): str(v) for k, v in hit.items() if v is not None
+        }
+        self._save_settings()
+
+    def record_mail_scan(
+        self,
+        hits: dict[str, dict[str, str]],
+        *,
+        dead_tokens: set[str] | list[str] | None = None,
+        scanned_names: set[str] | list[str] | None = None,
+        update_timestamp: bool = True,
+    ) -> None:
+        if update_timestamp:
+            self._last_mail_scan_ts = time.time()
+        if scanned_names:
+            for pname in scanned_names:
+                if pname not in hits:
+                    self._mail_checkpoint_hits.pop(pname, None)
+        for pname, hval in (hits or {}).items():
+            if pname and isinstance(hval, dict):
+                self._mail_checkpoint_hits[pname] = {
+                    str(k): str(v) for k, v in hval.items() if v is not None
+                }
+        if dead_tokens:
+            for em in dead_tokens:
+                clean_em = str(em).strip().lower()
+                if clean_em:
+                    self._mail_dead_tokens.add(clean_em)
+        self._save_settings()
+
+    def clear_mail_checkpoint_hits(
+        self,
+        names: list[str] | set[str] | None = None,
+    ) -> None:
+        if names is None:
+            if self._mail_checkpoint_hits:
+                self._mail_checkpoint_hits.clear()
+                self._save_settings()
+            return
+        changed = False
+        for n in names:
+            if self._mail_checkpoint_hits.pop(n, None) is not None:
+                changed = True
+        if changed:
+            self._save_settings()
 
     @property
     def cooldown_minutes(self) -> int:
@@ -2119,23 +2263,23 @@ class MonitorService:
         fp_file = pdir / "fingerprint.json"
         has_cache2 = (pdir / "cache2").is_dir()
         try:
-            tabs_mtime = tabs_file.stat().st_mtime if tabs_file.exists() else 0.0
+            tabs_mtime = tabs_file.stat().st_mtime
         except OSError:
             tabs_mtime = 0.0
         try:
-            cookies_mtime = cookies_db.stat().st_mtime if cookies_db.exists() else 0.0
+            cookies_mtime = cookies_db.stat().st_mtime
         except OSError:
             cookies_mtime = 0.0
         try:
-            places_mtime = places_db.stat().st_mtime if places_db.exists() else 0.0
+            places_mtime = places_db.stat().st_mtime
         except OSError:
             places_mtime = 0.0
         try:
-            prefs_mtime = prefs_file.stat().st_mtime if prefs_file.exists() else 0.0
+            prefs_mtime = prefs_file.stat().st_mtime
         except OSError:
             prefs_mtime = 0.0
         try:
-            fp_mtime = fp_file.stat().st_mtime if fp_file.exists() else 0.0
+            fp_mtime = fp_file.stat().st_mtime
         except OSError:
             fp_mtime = 0.0
         last_active_ts = max(tabs_mtime, cookies_mtime, prefs_mtime)
@@ -2818,7 +2962,9 @@ class MonitorService:
             has_cache2 = bool(disk.get("has_cache2"))
             hatch_vml = bool(disk.get("hatch_vml"))
             has_ps_l = bool(disk.get("has_ps_l"))
-            has_meta_checkpoint = bool(disk.get("has_meta_checkpoint"))
+            has_meta_checkpoint = bool(
+                disk.get("has_meta_checkpoint") or p.name in self._mail_checkpoint_hits
+            )
             datr_age_days = float(disk.get("datr_age_days") or 0.0)
             datr_domains = int(disk.get("datr_domains") or 0)
             ext_domains = int(disk.get("ext_domains") or 0)
@@ -2864,6 +3010,10 @@ class MonitorService:
                 or has_ban_page(p.pages)
                 or is_ban_page(p.group)
             )
+            if not is_banned and p.name in self._mail_checkpoint_hits:
+                snap.mail_checkpoint_hits.append(
+                    (p.name, dict(self._mail_checkpoint_hits[p.name]))
+                )
 
             # Calculate Strict Meta Sigma (L14/L28/L45) & Hatch OIDC Trust Score (0 - 150)
             score = 0

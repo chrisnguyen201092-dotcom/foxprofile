@@ -3,7 +3,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.api.app import create_app
 from src.api.auth import check_bind_safety
 from src.api.server import APIServer
 from src.core.config import API_HOST, API_PORT, API_TOKEN
@@ -14,12 +13,17 @@ from src.ui.app import App
 logger = get_logger("main")
 
 
+def _build_api_app(container: Container):
+    from src.api.app import create_app
+
+    return create_app(container)
+
+
 def main() -> None:
     check_bind_safety(API_HOST, API_TOKEN)
     container = Container()
 
-    fastapi_app = create_app(container)
-    api_server = APIServer(fastapi_app)
+    api_server = APIServer(lambda: _build_api_app(container))
     api_server.start()
     logger.info("API available at http://%s:%s/api/v1", API_HOST, API_PORT)
 

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import datetime as dt
 import pathlib
 import threading
 from collections.abc import Callable
@@ -9,7 +10,13 @@ from typing import Any
 import flet as ft
 
 from ...core.strings import get_string
-from ...models.profile import Profile, natural_name_key
+from ...models.profile import (
+    Profile,
+    has_ban_page,
+    is_ban_page,
+    is_ban_status,
+    natural_name_key,
+)
 from ...services.monitor import (
     MonitorSnapshot,
     ProfileMonitorInfo,
@@ -28,7 +35,12 @@ from ...services.proxy.geo_check import (
 )
 from ...utils.proxy_checker import check_proxy_sync
 from ...utils.proxy_parser import mask_proxy
-from ...utils.totp import fetch_hotmail_messages, parse_mail_credentials_line
+from ...utils.totp import (
+    detect_meta_checkpoint_mail,
+    fetch_hotmail_messages,
+    parse_mail_credentials_line,
+    run_safe_mail_checkpoint_scan,
+)
 from ...utils.validation import validate_profile_name, validate_proxy_format
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_os_dropdown
@@ -1452,15 +1464,39 @@ def open_mail_pool_dialog(
     on_remove_from_pool: Callable[[str], bool],
     on_assign_to_profile: Callable[[str, str], bool],
     get_all_pool: Callable[[], list[str]] | None = None,
+    get_last_scan_ts: Callable[[], float] | None = None,
+    get_checkpoint_hits: Callable[[], dict[str, dict[str, str]]] | None = None,
+    on_record_scan: Callable[[dict[str, dict[str, str]], set[str], set[str], bool], None]
+    | None = None,
+    on_quarantine_checkpoints: Callable[[list[str]], int] | None = None,
 ) -> None:
     """Central Mail Pool Manager dialog: view spare Hotmail/OAuth2 accounts, test Inbox, assign or hot-swap."""
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
-    list_col = ft.Column(spacing=6, height=600, scroll=ft.ScrollMode.AUTO)
+    list_col = ft.Column(spacing=6, height=520, scroll=ft.ScrollMode.AUTO)
     assigning_target: list[str | None] = [None]
     replacing_prof: list[str | None] = [None]
     adding_open: list[bool] = [False]
     mail_status: dict[str, tuple[str, str]] = {}
+    local_cp_hits: dict[str, dict[str, str]] = (
+        dict(get_checkpoint_hits()) if get_checkpoint_hits is not None else {}
+    )
+    scan_running: list[bool] = [False]
+    scan_stop_evt = threading.Event()
+    scanner_sub_text = ft.Text("", size=11.5, font_family=FONT_DATA, color=COLORS["text_sub"])
+    scanner_box = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+        border_radius=8,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["rule_strong"]),
+    )
+    checkpoint_alert_box = ft.Container(
+        visible=False,
+        padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+        border_radius=8,
+        bgcolor=ft.Colors.with_opacity(0.11, COLORS["error"]),
+        border=ft.Border.all(1.5, COLORS["error"]),
+    )
 
     add_input = ft.TextField(
         hint_text=get_string("mail_smart_paste_hint"),
@@ -1542,7 +1578,21 @@ def open_mail_pool_dialog(
                 mapping[em_k] = tk_v
         return mapping
 
-    def _check_mail_credentials(em: str, tok: str) -> None:
+    def _is_active_live_profile(p: Profile, has_live_page: bool) -> bool:
+        if (
+            p.banned_at
+            or is_ban_status(p.status)
+            or has_ban_page(p.pages)
+            or is_ban_page(p.group)
+        ):
+            return False
+        return not has_live_page or any(pg.casefold() == "live" for pg in (p.pages or []))
+
+    def _check_mail_credentials(
+        em: str,
+        tok: str,
+        prof_name: str | None = None,
+    ) -> None:
         em = em.strip()
         tok = tok.strip()
         if not em:
@@ -1557,14 +1607,36 @@ def open_mail_pool_dialog(
             ok, otp_or_err, msgs = fetch_hotmail_messages(em, tok, top=5, timeout=10)
             if not ok:
                 mail_status[em_key] = ("error", f"✗ {otp_or_err[:45]}")
-            elif len(msgs) > 0:
-                otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
-                mail_status[em_key] = (
-                    "ok",
-                    f"✓ Thông tuyến (Inbox: {len(msgs)} thư{otp_tag})",
-                )
             else:
-                mail_status[em_key] = ("warn", "⏳ Inbox: 0 thư (Khởi tạo trễ)")
+                cp = detect_meta_checkpoint_mail(msgs)
+                if cp is not None:
+                    mail_status[em_key] = (
+                        "error",
+                        f"🚨 DÍNH CHECKPOINT META: {cp.get('subject', '')[:42]}",
+                    )
+                    if prof_name:
+                        hit_d = {
+                            "email": em,
+                            "subject": cp.get("subject", ""),
+                            "time": cp.get("time", ""),
+                            "preview": cp.get("preview", ""),
+                            "resolved": cp.get("resolved", "false"),
+                        }
+                        local_cp_hits[prof_name] = hit_d
+                        if on_record_scan is not None:
+                            on_record_scan({prof_name: hit_d}, set(), {prof_name}, False)
+                elif len(msgs) > 0:
+                    otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
+                    mail_status[em_key] = (
+                        "ok",
+                        f"✓ Thông tuyến · Không dính Checkpoint (Inbox: {len(msgs)} thư{otp_tag})",
+                    )
+                    if prof_name and prof_name in local_cp_hits:
+                        local_cp_hits.pop(prof_name, None)
+                        if on_record_scan is not None:
+                            on_record_scan({}, set(), {prof_name}, False)
+                else:
+                    mail_status[em_key] = ("warn", "⏳ Inbox: 0 thư (Khởi tạo trễ)")
             _rebuild()
             with contextlib.suppress(Exception):
                 page.update()
@@ -1577,53 +1649,142 @@ def open_mail_pool_dialog(
         tok = (parsed.get("mail_token") or "").strip()
         _check_mail_credentials(em, tok)
 
-    def _run_mail_batch(pairs: list[tuple[str, str]]) -> None:
-        valid_pairs = [(e.strip(), t.strip()) for e, t in pairs if e.strip()]
-        if not valid_pairs:
+    def _run_sequential_targets(
+        targets: list[tuple[str, str, str]],
+        *,
+        update_ts: bool = True,
+    ) -> None:
+        if scan_running[0]:
+            scan_stop_evt.set()
             return
-        for em, _ in valid_pairs:
-            mail_status[em.lower()] = ("checking", "⏳ Đang kiểm tra...")
+        if not targets:
+            return
+        scan_stop_evt.clear()
+        scan_running[0] = True
+        scanner_sub_text.value = get_string(
+            "mail_scanner_progress_fmt",
+            idx=0,
+            total=len(targets),
+            name=targets[0][0],
+            status="⏳ Đang bắt đầu...",
+        )
+        scanner_sub_text.color = COLORS["accent"]
         _rebuild()
         with contextlib.suppress(Exception):
             page.update()
 
-        def _batch_worker() -> None:
-            def _one(pair: tuple[str, str]) -> None:
-                em, tok = pair
-                em_key = em.lower()
-                ok, otp_or_err, msgs = fetch_hotmail_messages(em, tok, top=5, timeout=10)
-                if not ok:
-                    mail_status[em_key] = ("error", f"✗ {otp_or_err[:45]}")
-                elif len(msgs) > 0:
-                    otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
-                    mail_status[em_key] = (
-                        "ok",
-                        f"✓ Thông tuyến (Inbox: {len(msgs)} thư{otp_tag})",
-                    )
+        def _seq_worker() -> None:
+            def _progress(
+                idx: int,
+                total: int,
+                pname: str,
+                em_addr: str,
+                st_msg: str,
+                hit_data: dict[str, str] | None,
+            ) -> None:
+                em_k = em_addr.lower()
+                if hit_data is not None:
+                    local_cp_hits[pname] = hit_data
+                    mail_status[em_k] = ("error", st_msg)
+                elif st_msg.startswith("✓"):
+                    if pname in local_cp_hits:
+                        local_cp_hits.pop(pname, None)
+                    mail_status[em_k] = ("ok", st_msg)
+                elif st_msg.startswith("⏳"):
+                    mail_status[em_k] = ("warn", st_msg)
                 else:
-                    mail_status[em_key] = ("warn", "⏳ Inbox: 0 thư (Khởi tạo trễ)")
+                    mail_status[em_k] = ("error", st_msg)
+                scanner_sub_text.value = get_string(
+                    "mail_scanner_progress_fmt",
+                    idx=idx,
+                    total=total,
+                    name=pname,
+                    status=st_msg,
+                )
+                scanner_sub_text.color = (
+                    COLORS["error"] if hit_data is not None else COLORS["accent"]
+                )
+                _rebuild()
+                with contextlib.suppress(Exception):
+                    page.update()
 
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                list(ex.map(_one, valid_pairs))
+            res = run_safe_mail_checkpoint_scan(
+                targets,
+                delay_range=(2.0, 3.5),
+                top=4,
+                timeout=12,
+                max_consecutive_errors=3,
+                stop_event=scan_stop_evt,
+                on_progress=_progress,
+            )
+            scan_running[0] = False
+            if on_record_scan is not None:
+                on_record_scan(
+                    res["hits"],
+                    res["dead_tokens"],
+                    res["scanned_names"],
+                    update_ts and not res["stopped"] and not res["aborted"],
+                )
+            if res["aborted"]:
+                notice_text.value = get_string("mail_scanner_circuit_breaker")
+                notice_text.color = COLORS["warning"]
+                notice_text.visible = True
+            elif not res["stopped"]:
+                if res["hits"]:
+                    notice_text.value = get_string(
+                        "mail_scanner_done_hits",
+                        hits=len(res["hits"]),
+                        total=res["total"],
+                    )
+                    notice_text.color = COLORS["error"]
+                else:
+                    notice_text.value = get_string(
+                        "mail_scanner_done_clean",
+                        total=res["total"],
+                    )
+                    notice_text.color = COLORS["success"]
+                notice_text.visible = True
             _rebuild()
             with contextlib.suppress(Exception):
                 page.update()
 
-        threading.Thread(target=_batch_worker, daemon=True).start()
+        threading.Thread(target=_seq_worker, daemon=True).start()
+
+    def _scan_live_only(_: ft.ControlEvent) -> None:
+        tok_map = _pool_token_map()
+        profiles = get_profiles()
+        has_live_pg = any(
+            any(pg.casefold() == "live" for pg in (p.pages or [])) for p in profiles
+        )
+        targets: list[tuple[str, str, str]] = []
+        for p in profiles:
+            if not _is_active_live_profile(p, has_live_pg):
+                continue
+            em = (p.email or "").strip()
+            if not em:
+                continue
+            tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
+            if tok:
+                targets.append((p.name, em, tok))
+        _run_sequential_targets(targets, update_ts=True)
 
     def _check_all_mails(_: ft.ControlEvent) -> None:
         tok_map = _pool_token_map()
         seen: set[str] = set()
-        pairs: list[tuple[str, str]] = []
+        targets: list[tuple[str, str, str]] = []
         for sp in get_unassigned():
             parsed = parse_mail_credentials_line(sp)
             em = (parsed.get("email") or "").strip()
             tok = (parsed.get("mail_token") or "").strip()
-            if em and em.lower() not in seen:
+            if em and tok and em.lower() not in seen:
                 seen.add(em.lower())
-                pairs.append((em, tok))
-        for p in get_profiles():
-            if (p.group or "").strip().lower() == "disconnected" or p.banned_at:
+                targets.append((f"Kho:{em[:12]}", em, tok))
+        profiles = get_profiles()
+        has_live_pg = any(
+            any(pg.casefold() == "live" for pg in (p.pages or [])) for p in profiles
+        )
+        for p in profiles:
+            if not _is_active_live_profile(p, has_live_pg):
                 continue
             em = (p.email or "").strip()
             if not em or em.lower() in seen:
@@ -1631,19 +1792,191 @@ def open_mail_pool_dialog(
             tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
             if tok:
                 seen.add(em.lower())
-                pairs.append((em, tok))
-        _run_mail_batch(pairs)
+                targets.append((p.name, em, tok))
+        _run_sequential_targets(targets, update_ts=True)
 
     def _rebuild() -> None:
         profiles = get_profiles()
         unassigned_list = get_unassigned()
+        has_live_pg = any(
+            any(pg.casefold() == "live" for pg in (p.pages or [])) for p in profiles
+        )
         live_profiles = [
-            p
-            for p in profiles
-            if (p.group or "").strip().lower() != "disconnected" and not p.banned_at
+            p for p in profiles if _is_active_live_profile(p, has_live_pg)
         ]
         assigned_profiles = [p for p in live_profiles if (p.email or "").strip()]
         empty_profiles = [p for p in live_profiles if not (p.email or "").strip()]
+        tok_map = _pool_token_map()
+        oauth_live_count = sum(
+            1
+            for p in assigned_profiles
+            if (getattr(p, "mail_token", None) or "").strip()
+            or tok_map.get((p.email or "").strip().lower(), "")
+        )
+
+        if get_checkpoint_hits is not None and not scan_running[0]:
+            for k_hit, v_hit in get_checkpoint_hits().items():
+                if k_hit not in local_cp_hits:
+                    local_cp_hits[k_hit] = dict(v_hit)
+
+        live_name_set = {p.name for p in live_profiles}
+        active_cp_hits = {
+            pname: hdata
+            for pname, hdata in local_cp_hits.items()
+            if pname in live_name_set
+        }
+
+        if not scan_running[0]:
+            last_ts = get_last_scan_ts() if get_last_scan_ts is not None else 0.0
+            if last_ts > 0:
+                ts_str = dt.datetime.fromtimestamp(last_ts).strftime("%H:%M %d/%m/%Y")
+                clean_cnt = max(0, oauth_live_count - len(active_cp_hits))
+                scanner_sub_text.value = get_string(
+                    "mail_scanner_last_scan_fmt",
+                    ts=ts_str,
+                    count=oauth_live_count,
+                    clean=clean_cnt,
+                )
+            else:
+                scanner_sub_text.value = get_string(
+                    "mail_scanner_last_scan_never",
+                    count=oauth_live_count,
+                )
+            scanner_sub_text.color = (
+                COLORS["error"] if active_cp_hits else COLORS["text_sub"]
+            )
+
+        scanner_box.content = ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=12,
+            controls=[
+                ft.Column(
+                    spacing=2,
+                    tight=True,
+                    expand=True,
+                    controls=[
+                        ft.Text(
+                            get_string("mail_scanner_box_title"),
+                            size=12.5,
+                            font_family=FONT_SEMIBOLD,
+                            color=COLORS["text_main"],
+                        ),
+                        scanner_sub_text,
+                    ],
+                ),
+                ft.OutlinedButton(
+                    get_string("mail_scanner_stop_btn")
+                    if scan_running[0]
+                    else get_string("mail_scanner_scan_now_btn"),
+                    icon=ft.Icons.STOP_CIRCLE_OUTLINED
+                    if scan_running[0]
+                    else ft.Icons.SHIELD_OUTLINED,
+                    height=32,
+                    style=OUTLINE_STYLE,
+                    on_click=_scan_live_only,
+                ),
+            ],
+        )
+
+        if active_cp_hits:
+            hit_names_ordered = [
+                p.name for p in live_profiles if p.name in active_cp_hits
+            ]
+
+            def _do_quarantine(_: ft.ControlEvent) -> None:
+                if on_quarantine_checkpoints is None or not hit_names_ordered:
+                    return
+                moved_cnt = on_quarantine_checkpoints(hit_names_ordered)
+                for n_rem in hit_names_ordered:
+                    local_cp_hits.pop(n_rem, None)
+                notice_text.value = get_string(
+                    "mail_checkpoint_quarantined_log",
+                    count=moved_cnt or len(hit_names_ordered),
+                    names=", ".join(hit_names_ordered[:8]),
+                )
+                notice_text.color = COLORS["success"]
+                notice_text.visible = True
+                _rebuild()
+                with contextlib.suppress(Exception):
+                    page.update()
+
+            checkpoint_alert_box.visible = True
+            checkpoint_alert_box.content = ft.Column(
+                spacing=7,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Text(
+                                get_string(
+                                    "mail_checkpoint_alert_title",
+                                    count=len(hit_names_ordered),
+                                ),
+                                size=13,
+                                font_family=FONT_BOLD,
+                                color=COLORS["error"],
+                            ),
+                            *(
+                                [
+                                    ft.Button(
+                                        get_string(
+                                            "mail_checkpoint_quarantine_btn",
+                                            count=len(hit_names_ordered),
+                                        ),
+                                        icon=ft.Icons.GPP_BAD_OUTLINED,
+                                        height=32,
+                                        style=ft.ButtonStyle(
+                                            bgcolor=COLORS["error"],
+                                            color="#FFFFFF",
+                                            padding=ft.Padding.symmetric(horizontal=12),
+                                            shape=ft.RoundedRectangleBorder(radius=6),
+                                        ),
+                                        on_click=_do_quarantine,
+                                    )
+                                ]
+                                if on_quarantine_checkpoints is not None
+                                else []
+                            ),
+                        ],
+                    ),
+                    ft.Text(
+                        get_string("mail_checkpoint_alert_desc"),
+                        size=11.5,
+                        color=COLORS["text_sub"],
+                    ),
+                    ft.Row(
+                        wrap=True,
+                        spacing=6,
+                        run_spacing=6,
+                        controls=[
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                                border_radius=5,
+                                bgcolor=COLORS["card_bg"],
+                                border=ft.Border.all(1, COLORS["error"]),
+                                tooltip=(
+                                    f"{active_cp_hits[hn].get('email', '')}\n"
+                                    f"{active_cp_hits[hn].get('subject', '')}\n"
+                                    f"{active_cp_hits[hn].get('time', '')}"
+                                ).strip(),
+                                content=ft.Text(
+                                    f"🚨 {hn} · {active_cp_hits[hn].get('time', '')[:16]}",
+                                    size=11,
+                                    font_family=FONT_DATA,
+                                    color=COLORS["error"],
+                                ),
+                            )
+                            for hn in hit_names_ordered[:24]
+                        ],
+                    ),
+                ],
+            )
+        else:
+            checkpoint_alert_box.visible = False
 
         stats_text.value = get_string(
             "mail_pool_stats_full",
@@ -1940,6 +2273,9 @@ def open_mail_pool_dialog(
             )
             is_rep = replacing_prof[0] == prof.name
             prof_st_pair = mail_status.get(em_val.lower())
+            if prof_st_pair is None and prof.name in active_cp_hits:
+                cp_sub = active_cp_hits[prof.name].get("subject", "")[:42]
+                prof_st_pair = ("error", f"🚨 DÍNH CHECKPOINT META: {cp_sub}")
             prof_st_controls: list[ft.Control] = []
             if tok_val:
                 prof_st_controls.append(
@@ -2033,8 +2369,8 @@ def open_mail_pool_dialog(
                                     height=30,
                                     style=OUTLINE_STYLE,
                                     tooltip=get_string("mail_pool_check_one_tooltip"),
-                                    on_click=lambda _, e=em_val, t=tok_val: _check_mail_credentials(
-                                        e, t
+                                    on_click=lambda _, e=em_val, t=tok_val, pn=prof.name: _check_mail_credentials(
+                                        e, t, pn
                                     ),
                                 ),
                                 ft.OutlinedButton(
@@ -2095,12 +2431,21 @@ def open_mail_pool_dialog(
                     padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                     border_radius=8,
                     bgcolor=COLORS["input_bg"],
-                    border=ft.Border.all(1, COLORS["border"]),
+                    border=ft.Border.all(
+                        1,
+                        COLORS["error"]
+                        if prof.name in active_cp_hits
+                        else COLORS["border"],
+                    ),
                     content=ft.Column(spacing=6, tight=True, controls=row_children),
                 )
             )
 
     _rebuild()
+
+    def _on_close(_: ft.ControlEvent) -> None:
+        scan_stop_evt.set()
+        page.pop_dialog()
 
     dlg = ft.AlertDialog(
         modal=False,
@@ -2160,6 +2505,8 @@ def open_mail_pool_dialog(
                 tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[
+                    scanner_box,
+                    checkpoint_alert_box,
                     stats_text,
                     add_box,
                     notice_text,
@@ -2171,7 +2518,7 @@ def open_mail_pool_dialog(
             ft.TextButton(
                 get_string("close_btn"),
                 style=ft.ButtonStyle(color=COLORS["text_sub"]),
-                on_click=lambda _: page.pop_dialog(),
+                on_click=_on_close,
             ),
         ],
     )

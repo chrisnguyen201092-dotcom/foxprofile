@@ -58,6 +58,7 @@ def build_header_row(
     on_open_safe_schedule: Callable[[], None] | None = None,
     on_open_work_squad: Callable[[], None] | None = None,
     audit_alert: bool = False,
+    mail_alert: bool = False,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
         return ft.Text(
@@ -145,6 +146,7 @@ def build_header_row(
                 get_string("mail_pool_btn"),
                 get_string("mail_pool_title"),
                 on_open_mail_pool,
+                alert=mail_alert,
             )
         )
     if on_open_cooldown is not None and cooldown_chip_label:

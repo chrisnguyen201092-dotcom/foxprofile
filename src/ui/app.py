@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import threading
 import time
 
 import flet as ft
@@ -23,6 +24,7 @@ from ..services.monitor import (
     extract_proxy_endpoint,
     extract_proxy_port,
 )
+from ..utils.totp import parse_mail_credentials_line, run_safe_mail_checkpoint_scan
 from .components import (
     build_content_area,
     build_empty_state,
@@ -139,6 +141,7 @@ class App:
         )
         self._live_since: dict[str, str] = {}
         self._alerted_token_bursts: set[str] = set()
+        self._mail_auto_scan_running: bool = False
         self.monitor: MonitorService = c.monitor_service
         saved_sort = getattr(self.monitor, "sort_by", "custom")
         if isinstance(saved_sort, str) and saved_sort:
@@ -690,7 +693,11 @@ class App:
         else:
             snap = self.monitor.snapshot(everything, running | self.state.loading)
             self._last_monitor_snap = snap
-        alert_bar = build_monitor_bar(snap, len(everything))
+        alert_bar = build_monitor_bar(
+            snap,
+            len(everything),
+            on_open_mail_pool=self.h.on_open_mail_pool,
+        )
         self._monitor_bar_slot.content = alert_bar
         self._monitor_bar_slot.visible = alert_bar is not None
         new_bursts = [
@@ -776,6 +783,7 @@ class App:
                 on_open_safe_schedule=self.h.on_open_safe_schedule,
                 on_open_work_squad=self.h.on_open_work_squad,
                 audit_alert=bool(snap.audit_findings),
+                mail_alert=bool(snap.mail_checkpoint_hits),
             )
             if page_profiles
             else None
@@ -978,6 +986,69 @@ class App:
         except Exception as e:
             logger.error("Error updating UI: %s", e)
 
+    def _maybe_start_daily_mail_scan(self) -> None:
+        if (
+            self._mail_auto_scan_running
+            or not hasattr(self.monitor, "should_auto_scan_mail")
+            or not self.monitor.should_auto_scan_mail()
+        ):
+            return
+        pool_map: dict[str, str] = {}
+        if hasattr(self.pm, "list_mail_pool"):
+            for ln in self.pm.list_mail_pool():
+                p_item = parse_mail_credentials_line(ln)
+                em_k = (p_item.get("email") or "").strip().lower()
+                tk_v = (p_item.get("mail_token") or "").strip()
+                if em_k and tk_v:
+                    pool_map[em_k] = tk_v
+        targets = self.monitor.get_live_mail_scan_targets(
+            self.pm.list_profiles(),
+            pool_map,
+        )
+        if not targets:
+            return
+        self._mail_auto_scan_running = True
+        self._log(get_string("mail_auto_scan_started_log", count=len(targets)))
+
+        def _bg_worker() -> None:
+            try:
+                res = run_safe_mail_checkpoint_scan(
+                    targets,
+                    delay_range=(3.0, 5.0),
+                    top=4,
+                    timeout=12,
+                    max_consecutive_errors=3,
+                )
+                self.monitor.record_mail_scan(
+                    res["hits"],
+                    dead_tokens=res["dead_tokens"],
+                    scanned_names=res["scanned_names"],
+                    update_timestamp=not res["aborted"],
+                )
+                if res["hits"]:
+                    hit_names = list(res["hits"].keys())
+                    self._log(
+                        get_string(
+                            "mail_auto_scan_hits_log",
+                            count=len(hit_names),
+                            names=", ".join(hit_names[:8]),
+                        )
+                    )
+                elif not res["aborted"]:
+                    self._log(
+                        get_string(
+                            "mail_auto_scan_clean_log",
+                            count=len(res["scanned_names"]),
+                        )
+                    )
+            except Exception as exc:
+                logger.error("Error in daily mail auto-scan: %s", exc)
+            finally:
+                self._mail_auto_scan_running = False
+                self.state.schedule_refresh()
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
     async def _ui_reconcile_loop(self) -> None:
         last_minute_tick = time.monotonic()
         while self.page:
@@ -996,6 +1067,8 @@ class App:
                     and self.state.editing_proxy is None
                 )
                 if changed or self.state.consume_refresh() or minute_elapsed:
+                    if minute_elapsed:
+                        self._maybe_start_daily_mail_scan()
                     last_minute_tick = now_mono
                     self._refresh_profiles()
             except Exception as e:

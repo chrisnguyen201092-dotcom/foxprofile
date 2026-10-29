@@ -12,6 +12,7 @@ def build_monitor_bar(
     snap: MonitorSnapshot,
     total_profiles: int = 0,
     on_check_all_proxies: Callable[[], None] | None = None,
+    on_open_mail_pool: Callable[[], None] | None = None,
 ) -> ft.Container | None:
     """Compact alert strip that only appears when an active issue is detected."""
     _ = (total_profiles, on_check_all_proxies)
@@ -21,12 +22,15 @@ def build_monitor_bar(
         icon: ft.IconData,
         color: str,
         bg: str | None = None,
+        on_click: Callable[[], None] | None = None,
     ) -> ft.Container:
         return ft.Container(
             padding=ft.Padding.symmetric(horizontal=9, vertical=4),
             border_radius=6,
             bgcolor=bg or COLORS["card_bg"],
             border=ft.Border.all(1, color if bg else COLORS["card_border"]),
+            ink=on_click is not None,
+            on_click=(lambda _: on_click()) if on_click is not None else None,
             content=ft.Row(
                 spacing=5,
                 tight=True,
@@ -45,6 +49,24 @@ def build_monitor_bar(
 
     pills: list[ft.Control] = []
 
+    if snap.mail_checkpoint_hits:
+        hit_names = [n for n, _ in snap.mail_checkpoint_hits]
+        shown = ", ".join(hit_names[:6]) + (
+            f" (+{len(hit_names) - 6})" if len(hit_names) > 6 else ""
+        )
+        pills.append(
+            _pill(
+                get_string(
+                    "monitor_alert_mail_checkpoint",
+                    count=len(hit_names),
+                    names=shown,
+                ),
+                ft.Icons.MARK_EMAIL_UNREAD_OUTLINED,
+                COLORS["error"],
+                COLORS["input_bg"],
+                on_click=on_open_mail_pool,
+            )
+        )
     for port, members in snap.proxy_collisions:
         pills.append(
             _pill(

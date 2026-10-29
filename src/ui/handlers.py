@@ -383,6 +383,41 @@ class AppHandlers:
             get_exit_ips=_get_exit_ips,
         )
 
+    def quarantine_checkpoint_profiles(self, names: list[str]) -> int:
+        valid_names = [n for n in names if n in self._pm.profiles]
+        if not valid_names:
+            return 0
+        custom_pages = self._pm.list_custom_pages()
+        live_pg = next(
+            (pg for pg in custom_pages if pg.casefold() == "live"),
+            "Live",
+        )
+        disc_pg = next(
+            (pg for pg in custom_pages if pg.casefold() == "disconnected"),
+            "Disconnected",
+        )
+        if not any(pg.casefold() == "disconnected" for pg in custom_pages):
+            self._pm.save_custom_page(disc_pg, [])
+        if any(pg.casefold() == "live" for pg in custom_pages):
+            self._pm.remove_profiles_from_page(live_pg, valid_names)
+        self._pm.add_profiles_to_page(disc_pg, valid_names)
+        self._pm.bulk_update_group(valid_names, disc_pg)
+        self._pm.bulk_update_status(valid_names, "check")
+        if self._monitor is not None:
+            self._monitor.clear_mail_checkpoint_hits(valid_names)
+        self._log(
+            get_string(
+                "mail_checkpoint_quarantined_log",
+                count=len(valid_names),
+                names=", ".join(valid_names[:8]),
+            )
+        )
+        if self._get_refs() is not None:
+            self._refresh()
+        else:
+            self._state.schedule_refresh()
+        return len(valid_names)
+
     def on_open_mail_pool(self) -> None:
         page = self._get_page()
         if page is None:
@@ -416,6 +451,21 @@ class AppHandlers:
                 self._refresh()
             return ok
 
+        def _record_scan(
+            hits: dict[str, dict[str, str]],
+            dead_tokens: set[str],
+            scanned_names: set[str],
+            update_ts: bool,
+        ) -> None:
+            if self._monitor is not None:
+                self._monitor.record_mail_scan(
+                    hits,
+                    dead_tokens=dead_tokens,
+                    scanned_names=scanned_names,
+                    update_timestamp=update_ts,
+                )
+            self._state.schedule_refresh()
+
         open_mail_pool_dialog(
             page,
             self._pm.list_profiles,
@@ -424,6 +474,18 @@ class AppHandlers:
             on_remove_from_pool=_remove_from_pool,
             on_assign_to_profile=_assign_to_profile,
             get_all_pool=getattr(self._pm, "list_mail_pool", None),
+            get_last_scan_ts=(
+                (lambda: self._monitor.last_mail_scan_ts)
+                if self._monitor is not None
+                else None
+            ),
+            get_checkpoint_hits=(
+                (lambda: self._monitor.mail_checkpoint_hits)
+                if self._monitor is not None
+                else None
+            ),
+            on_record_scan=_record_scan,
+            on_quarantine_checkpoints=self.quarantine_checkpoint_profiles,
         )
 
     def on_clone(self, name: str) -> None:

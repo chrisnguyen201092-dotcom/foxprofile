@@ -220,33 +220,30 @@ class ProfileManager:
 
     def _infer_created_at(self, name: str) -> str:
         pdir = pathlib.Path(self._data_path(name))
-        if pdir.exists():
-            with contextlib.suppress(OSError, ValueError):
-                st = pdir.stat()
-                ts = (
-                    min(st.st_ctime, st.st_mtime)
-                    if st.st_ctime and st.st_mtime
-                    else (st.st_ctime or st.st_mtime)
-                )
-                if ts and ts > 0:
-                    return datetime.fromtimestamp(ts).date().isoformat()
+        with contextlib.suppress(OSError, ValueError):
+            st = pdir.stat()
+            ts = (
+                min(st.st_ctime, st.st_mtime)
+                if st.st_ctime and st.st_mtime
+                else (st.st_ctime or st.st_mtime)
+            )
+            if ts and ts > 0:
+                return datetime.fromtimestamp(ts).date().isoformat()
         return today_ymd()
 
     def _infer_banned_at(self, name: str) -> str:
         pdir = pathlib.Path(self._data_path(name))
-        if pdir.exists():
-            latest_ts = 0.0
-            for sub in ("prefs.js", "places.sqlite"):
-                f = pdir / sub
-                with contextlib.suppress(OSError):
-                    if f.exists():
-                        latest_ts = max(latest_ts, f.stat().st_mtime)
-            if latest_ts <= 0:
-                with contextlib.suppress(OSError):
-                    latest_ts = pdir.stat().st_mtime
-            if latest_ts > 0:
-                with contextlib.suppress(OSError, ValueError):
-                    return datetime.fromtimestamp(latest_ts).date().isoformat()
+        latest_ts = 0.0
+        for sub in ("prefs.js", "places.sqlite"):
+            f = pdir / sub
+            with contextlib.suppress(OSError):
+                latest_ts = max(latest_ts, f.stat().st_mtime)
+        if latest_ts <= 0:
+            with contextlib.suppress(OSError):
+                latest_ts = pdir.stat().st_mtime
+        if latest_ts > 0:
+            with contextlib.suppress(OSError, ValueError):
+                return datetime.fromtimestamp(latest_ts).date().isoformat()
         return today_ymd()
 
     @staticmethod

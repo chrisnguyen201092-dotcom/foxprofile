@@ -3991,6 +3991,336 @@ def test_sort_by_persistence_and_smart_instant_search(tmp_path):
     assert _search_match_rank(p_14, "sp") is not None
 
 
+def test_large_150_account_schedule_morning_priority_and_quad_brackets():
+    """Verify 150-account pool (100 GW + 50 usa10X) balances GW/usa10X per day, puts all non-conflicting pairs in Morning, and guarantees safe 4-account brackets."""
+    import datetime as dt
+
+    from src.services.monitor import MonitorSnapshot, ProfileMonitorInfo
+    from src.services.scheduler import (
+        _is_all_gw_pair,
+        build_safe_schedule,
+        is_gateway_ipv6_cluster,
+    )
+
+    now_dt = dt.datetime(2026, 10, 28, 17, 0, 0)
+    profiles: list[Profile] = []
+    snap = MonitorSnapshot()
+
+    # 1. Create 100 Gateway accounts on 209.141.40.174 (ports 5300..5399), including 41 created yesterday
+    for i in range(100):
+        name = f"GW_{i + 1}"
+        created = "2026-10-27" if i >= 59 else "2026-10-22"
+        rest_h = 29.0 if i >= 59 else 120.0 - (i * 0.5)
+        profiles.append(
+            Profile(
+                name=name,
+                email=f"gw{i + 1}@hotmail.com",
+                proxy=f"http://u:p@209.141.40.174:{5300 + i}",
+                timezone="America/Los_Angeles",
+                locale="en-US",
+                pages=["Live"],
+                created_at=created,
+            )
+        )
+        snap.profiles[name] = ProfileMonitorInfo(
+            name=name,
+            last_closed=now_dt - dt.timedelta(hours=rest_h),
+            cookie_count=10,
+        )
+
+    # 2. Create 50 usa10X accounts matching real cluster counts (10, 9, 8, 6, 5, 4, 3, 3, 2)
+    usa_specs = [
+        ("usa109", 10),
+        ("usa108", 9),
+        ("usa101", 8),
+        ("usa104", 6),
+        ("usa106", 5),
+        ("usa103", 4),
+        ("usa107", 3),
+        ("usa102", 3),
+        ("usa114", 2),
+    ]
+    u_idx = 0
+    for cl_name, cnt in usa_specs:
+        for j in range(cnt):
+            u_idx += 1
+            name = f"USA_{cl_name}_{j + 1}"
+            profiles.append(
+                Profile(
+                    name=name,
+                    email=f"u{u_idx}@hotmail.com",
+                    proxy=f"http://u:p@sp02-{cl_name}.proxysystem.net:{10100 + u_idx}",
+                    timezone="America/Detroit",
+                    locale="en-US",
+                    pages=["Live"],
+                    created_at="2026-10-18",
+                )
+            )
+            snap.profiles[name] = ProfileMonitorInfo(
+                name=name,
+                last_closed=now_dt - dt.timedelta(hours=160.0 - u_idx),
+                cookie_count=10,
+            )
+
+    plan = build_safe_schedule(profiles, snap, cycle_days=6, now=now_dt, shuffle_seed=20261028)
+    assert plan.total_live == 150
+    assert plan.collision_count == 0
+    assert plan.adjacent_overlap_count == 0
+
+    for d in plan.days:
+        # Every day has 8..9 usa10X accounts and 16..18 GW accounts
+        usa_in_day = [
+            a
+            for pr in d.all_pairs
+            for a in (pr.first, pr.second)
+            if a is not None and not is_gateway_ipv6_cluster(a.cluster)
+        ]
+        assert 8 <= len(usa_in_day) <= 9
+        # Clusters with <= 6 accounts total never appear twice on the same day
+        cl_counts: dict[str, int] = {}
+        for a in usa_in_day:
+            cl_counts[a.cluster] = cl_counts.get(a.cluster, 0) + 1
+        for small_cl in ("usa104", "usa106", "usa103", "usa107", "usa102", "usa114"):
+            assert cl_counts.get(small_cl, 0) <= 1
+
+        # Morning holds 10..11 pairs; Evening holds only 1..2 duplicate-/64 pairs
+        assert 10 <= len(d.morning_pairs) <= 11
+        assert 1 <= len(d.evening_pairs) <= 2
+
+        # Hướng B: Every 4-account bracket (C1+C2, C3+C4...) has <= 3 GW accounts (never 4x GW)
+        # and no two Pure-GW pairs ever run back-to-back
+        for plist in (d.morning_pairs, d.evening_pairs):
+            for idx_p in range(1, len(plist)):
+                prev_pr = (plist[idx_p - 1].first, plist[idx_p - 1].second)
+                curr_pr = (plist[idx_p].first, plist[idx_p].second)
+                assert not (_is_all_gw_pair(prev_pr) and _is_all_gw_pair(curr_pr))
+            for i_b in range(0, len(plist), 2):
+                bracket = plist[i_b : i_b + 2]
+                accs = [a for pr in bracket for a in (pr.first, pr.second) if a is not None]
+                gw_in_bracket = sum(1 for a in accs if is_gateway_ipv6_cluster(a.cluster))
+                assert gw_in_bracket <= 3
+                usa_clusters = [a.cluster for a in accs if not is_gateway_ipv6_cluster(a.cluster)]
+                assert len(usa_clusters) == len(set(usa_clusters))
+
+
+def test_detect_meta_checkpoint_mail_and_safe_sequential_scanner():
+    from src.utils.totp import (
+        THUNDERBIRD_USER_AGENT,
+        detect_meta_checkpoint_mail,
+        is_permanent_mail_token_error,
+        run_safe_mail_checkpoint_scan,
+    )
+
+    assert "Thunderbird/" in THUNDERBIRD_USER_AGENT
+    assert is_permanent_mail_token_error("Lỗi xác thực Token: invalid_grant") is True
+    assert is_permanent_mail_token_error("HTTP 503 Service Unavailable") is False
+
+    # 1. Clean OTP inbox -> None
+    clean_msgs = [
+        {
+            "subject": "Your Meta account Verification Code",
+            "sender": "Meta <registration@facebookmail.com>",
+            "time": "2026-10-20 06:24",
+            "preview": "Your verification code is 123456",
+        }
+    ]
+    assert detect_meta_checkpoint_mail(clean_msgs) is None
+
+    # 2. English checkpoint mail
+    en_cp = [
+        {
+            "subject": "Action needed on your Meta Account",
+            "sender": "Meta <security@facebookmail.com>",
+            "time": "2026-10-28 13:51",
+            "preview": "Confirm you're human to use your profile. Take action within 180 days.",
+        },
+        *clean_msgs,
+    ]
+    hit_en = detect_meta_checkpoint_mail(en_cp)
+    assert hit_en is not None
+    assert hit_en["subject"] == "Action needed on your Meta Account"
+    assert hit_en["resolved"] == "false"
+
+    # 3. Vietnamese checkpoint + resolved mail
+    vi_cp = [
+        {
+            "subject": "Tài khoản của bạn đang hoạt động",
+            "sender": "Meta <security@facebookmail.com>",
+            "time": "2026-10-29 01:07",
+            "preview": "Cảm ơn bạn đã phản hồi quyết định đình chỉ tài khoản mà chúng tôi đưa ra.",
+        },
+        {
+            "subject": "Cần hành động đối với Tài khoản Meta của bạn",
+            "sender": "Meta <security@facebookmail.com>",
+            "time": "2026-10-28 13:59",
+            "preview": "Xác nhận bạn là người thật để dùng trang cá nhân.",
+        },
+    ]
+    hit_vi = detect_meta_checkpoint_mail(vi_cp)
+    assert hit_vi is not None
+    assert hit_vi["subject"] == "Cần hành động đối với Tài khoản Meta của bạn"
+    assert hit_vi["resolved"] == "true"
+
+    # 4. Safe sequential scanner with dead token + clean + checkpoint
+    targets = [
+        ("AccClean", "clean@hotmail.com", "M.C501_FAKE_TOKEN"),
+        ("AccHit", "hit@hotmail.com", "M.C502_FAKE_TOKEN"),
+        ("AccDead", "dead@hotmail.com", "M.C503_FAKE_TOKEN"),
+    ]
+
+    def _fake_fetch(em, tok, top=4, timeout=12):
+        if em == "clean@hotmail.com":
+            return True, "", clean_msgs
+        if em == "hit@hotmail.com":
+            return True, "", en_cp
+        return False, "Lỗi xác thực Token: invalid_grant", []
+
+    res = run_safe_mail_checkpoint_scan(
+        targets,
+        delay_range=(0.0, 0.0),
+        fetch_fn=_fake_fetch,
+    )
+    assert res["aborted"] is False
+    assert "AccHit" in res["hits"]
+    assert "AccClean" in res["scanned_names"]
+    assert "dead@hotmail.com" in res["dead_tokens"]
+
+    # 5. Circuit breaker trips after 3 consecutive transient network errors
+    err_targets = [
+        (f"Net{i}", f"net{i}@hotmail.com", "M.C500_TOK") for i in range(5)
+    ]
+    calls = []
+
+    def _fail_fetch(em, tok, top=4, timeout=12):
+        calls.append(em)
+        return False, "HTTP 429 Too Many Requests", []
+
+    res_cb = run_safe_mail_checkpoint_scan(
+        err_targets,
+        delay_range=(0.0, 0.0),
+        max_consecutive_errors=3,
+        fetch_fn=_fail_fetch,
+    )
+    assert res_cb["aborted"] is True
+    assert len(calls) == 3
+
+
+def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_path):
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.services.monitor import MonitorService
+    from src.ui.app import App
+    from src.ui.components.content_area import build_monitor_bar
+
+    isolated_pm.save_custom_page("Live", [])
+    isolated_pm.save_custom_page("Disconnected", [])
+
+    isolated_pm.add_profile(
+        "Live1",
+        "http://u:p@1.2.3.4:10001",
+        "windows",
+        pages=["Live"],
+        email="live1@hotmail.com",
+    )
+    isolated_pm.update_profile_credentials("Live1", mail_token="M.C510_LIVE1$$9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+    isolated_pm.add_profile(
+        "Live2",
+        "http://u:p@1.2.3.4:10002",
+        "windows",
+        pages=["Live"],
+        email="live2@hotmail.com",
+    )
+    isolated_pm.update_profile_credentials("Live2", mail_token="M.C510_LIVE2$$9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+    isolated_pm.add_profile(
+        "Disc1",
+        "http://u:p@1.2.3.4:10003",
+        "windows",
+        group="Disconnected",
+        pages=["Disconnected"],
+        email="disc1@hotmail.com",
+    )
+    isolated_pm.update_profile_credentials("Disc1", mail_token="M.C510_DISC1$$9e5f94bc-e8a4-4e73-b8be-63364c29d753")
+
+    mon = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    assert mon.should_auto_scan_mail() is True
+
+    targets = mon.get_live_mail_scan_targets(isolated_pm.list_profiles())
+    assert [t[0] for t in targets] == ["Live1", "Live2"]
+
+    mon.record_mail_scan(
+        {
+            "Live2": {
+                "email": "live2@hotmail.com",
+                "subject": "Action needed on your Meta Account",
+                "time": "2026-10-29 08:00",
+                "preview": "Confirm you're human",
+                "resolved": "false",
+            }
+        },
+        dead_tokens={"dead@hotmail.com"},
+        scanned_names={"Live1", "Live2"},
+        update_timestamp=True,
+    )
+    assert mon.should_auto_scan_mail() is False
+
+    # Reload from monitor_settings.json and verify persistence
+    mon2 = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    assert mon2.last_mail_scan_ts > 0
+    assert "Live2" in mon2.mail_checkpoint_hits
+    assert "dead@hotmail.com" in mon2.mail_dead_tokens
+
+    snap = mon2.snapshot(isolated_pm.list_profiles(), set())
+    assert len(snap.mail_checkpoint_hits) == 1
+    assert snap.mail_checkpoint_hits[0][0] == "Live2"
+    assert snap.profiles["Live2"].has_meta_checkpoint is True
+
+    bar = build_monitor_bar(snap, 3)
+    assert bar is not None
+
+    # Test 1-click quarantine via AppHandlers
+    class FakeBL:
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def running_count(self):
+            return 0
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+    app = App(c)
+    app.monitor = mon2
+    app.h._monitor = mon2
+
+    moved = app.h.quarantine_checkpoint_profiles(["Live2"])
+    assert moved == 1
+    p_live2 = isolated_pm.profiles["Live2"]
+    assert p_live2.group == "Disconnected"
+    assert p_live2.status == "check"
+    assert "Disconnected" in p_live2.pages
+    assert "Live" not in p_live2.pages
+    assert "Live2" not in mon2.mail_checkpoint_hits
+
+
+
+
 
 
 

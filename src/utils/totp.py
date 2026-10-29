@@ -13,14 +13,18 @@ import hmac
 import html
 import imaplib
 import json
+import random
 import re
 import struct
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from email import message_from_bytes
 from email.header import decode_header
+from typing import Any
 
 _BASE32_CLEAN_RE = re.compile(r"[\s\-]+")
 _BASE32_VALID_RE = re.compile(r"^[A-Z2-7]+$")
@@ -376,6 +380,92 @@ def _decode_mime_header(raw_val: str | None) -> str:
         return str(raw_val).strip()
 
 
+THUNDERBIRD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Thunderbird/115.16.0"
+)
+
+_META_CHECKPOINT_PHRASES = (
+    "action needed on your meta account",
+    "cần hành động đối với tài khoản meta",
+    "confirm you're human",
+    "confirm you’re human",
+    "xác nhận bạn là người thật",
+    "xác nhận bạn là con người",
+    "we suspended your account",
+    "chúng tôi đã đình chỉ tài khoản",
+    "your account has been disabled",
+    "permanently disabled your account",
+    "vô hiệu hóa vĩnh viễn tài khoản",
+    "30 days to take action",
+    "30 ngày để hành động",
+    "180 days to take action",
+    "180 ngày để hành động",
+)
+
+_META_ACTIVE_AGAIN_SUBJECTS = (
+    "your account is now active",
+    "tài khoản của bạn đang hoạt động",
+)
+
+_PERMANENT_TOKEN_ERRORS = (
+    "invalid_grant",
+    "aadsts70000",
+    "aadsts50173",
+    "interaction_required",
+    "account has been locked",
+    "chưa có refresh token",
+)
+
+
+def is_permanent_mail_token_error(error_msg: str | None) -> bool:
+    """Return True if `error_msg` indicates an unrecoverable/revoked OAuth2 refresh token."""
+    low = (error_msg or "").strip().lower()
+    if not low:
+        return False
+    return any(tok in low for tok in _PERMANENT_TOKEN_ERRORS)
+
+
+def detect_meta_checkpoint_mail(
+    messages: list[dict[str, str]] | None,
+) -> dict[str, str] | None:
+    """Inspect recent inbox messages and return checkpoint details if a Meta human-check/suspension email is found."""
+    if not messages:
+        return None
+    has_active_again = False
+    active_again_msg: dict[str, str] | None = None
+    checkpoint_msg: dict[str, str] | None = None
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        subj = str(msg.get("subject") or "").strip()
+        prev = str(msg.get("preview") or "").strip()
+        combined = f"{subj}\n{prev}".lower()
+        subj_low = subj.lower()
+
+        if any(k in subj_low for k in _META_ACTIVE_AGAIN_SUBJECTS):
+            has_active_again = True
+            if active_again_msg is None and (
+                "suspended" in combined or "đình chỉ" in combined
+            ):
+                active_again_msg = msg
+            continue
+
+        if checkpoint_msg is None and any(p in combined for p in _META_CHECKPOINT_PHRASES):
+            checkpoint_msg = msg
+
+    target = checkpoint_msg or active_again_msg
+    if target is None:
+        return None
+    return {
+        "subject": str(target.get("subject") or "").strip(),
+        "time": str(target.get("time") or "").strip(),
+        "preview": str(target.get("preview") or "").strip()[:180],
+        "sender": str(target.get("sender") or "").strip(),
+        "resolved": "true" if has_active_again else "false",
+    }
+
+
 def _exchange_microsoft_oauth_token(
     refresh_token: str,
     client_id: str,
@@ -400,7 +490,7 @@ def _exchange_microsoft_oauth_token(
             data=data,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": THUNDERBIRD_USER_AGENT,
             },
         )
         try:
@@ -436,7 +526,7 @@ def _fetch_via_graph_api(
         headers={
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": THUNDERBIRD_USER_AGENT,
         },
     )
     try:
@@ -589,3 +679,106 @@ def fetch_hotmail_messages(
 
     first_otp = next((m["otp"] for m in msgs if m.get("otp")), "")
     return True, first_otp, msgs
+
+
+def run_safe_mail_checkpoint_scan(
+    targets: list[tuple[str, str, str]],
+    *,
+    delay_range: tuple[float, float] = (3.0, 5.0),
+    top: int = 4,
+    timeout: int = 12,
+    max_consecutive_errors: int = 3,
+    stop_event: threading.Event | None = None,
+    on_progress: Callable[[int, int, str, str, str, dict[str, str] | None], None] | None = None,
+    fetch_fn: Callable[..., tuple[bool, str, list[dict[str, str]]]] = fetch_hotmail_messages,
+) -> dict[str, Any]:
+    """Sequentially scan `targets` (`[(profile_name, email, mail_token), ...]`) with random jitter and a circuit breaker."""
+    hits: dict[str, dict[str, str]] = {}
+    dead_tokens: set[str] = set()
+    scanned_names: set[str] = set()
+    email_status: dict[str, tuple[str, str]] = {}
+    consecutive_errors = 0
+    aborted = False
+    total = len(targets)
+
+    for idx, (prof_name, email_addr, mail_token) in enumerate(targets, 1):
+        if stop_event is not None and stop_event.is_set():
+            break
+
+        em_clean = (email_addr or "").strip()
+        em_key = em_clean.lower()
+        ok, otp_or_err, msgs = fetch_fn(
+            em_clean,
+            mail_token,
+            top=top,
+            timeout=timeout,
+        )
+        if not ok:
+            if is_permanent_mail_token_error(otp_or_err):
+                if em_key:
+                    dead_tokens.add(em_key)
+                consecutive_errors = 0
+                st_msg = f"✗ Token hết hạn ({otp_or_err[:40]})"
+                if em_key:
+                    email_status[em_key] = ("error", st_msg)
+                if on_progress is not None:
+                    on_progress(idx, total, prof_name, em_clean, st_msg, None)
+            else:
+                consecutive_errors += 1
+                st_msg = f"⚠ Lỗi kết nối ({otp_or_err[:40]})"
+                if em_key:
+                    email_status[em_key] = ("error", st_msg)
+                if on_progress is not None:
+                    on_progress(idx, total, prof_name, em_clean, st_msg, None)
+                if consecutive_errors >= max_consecutive_errors:
+                    aborted = True
+                    break
+        else:
+            consecutive_errors = 0
+            scanned_names.add(prof_name)
+            cp = detect_meta_checkpoint_mail(msgs)
+            if cp is not None:
+                hit_data = {
+                    "email": em_clean,
+                    "subject": cp.get("subject", ""),
+                    "time": cp.get("time", ""),
+                    "preview": cp.get("preview", ""),
+                    "resolved": cp.get("resolved", "false"),
+                }
+                hits[prof_name] = hit_data
+                st_msg = f"🚨 DÍNH CHECKPOINT META: {cp.get('subject', '')[:42]}"
+                if em_key:
+                    email_status[em_key] = ("error", st_msg)
+                if on_progress is not None:
+                    on_progress(idx, total, prof_name, em_clean, st_msg, hit_data)
+            else:
+                otp_tag = f" · OTP: {otp_or_err}" if otp_or_err else ""
+                if len(msgs) > 0:
+                    st_msg = f"✓ An toàn — Không có thư Checkpoint ({len(msgs)} thư{otp_tag})"
+                    if em_key:
+                        email_status[em_key] = ("ok", st_msg)
+                else:
+                    st_msg = "⏳ Hòm thư trống (0 thư)"
+                    if em_key:
+                        email_status[em_key] = ("warn", st_msg)
+                if on_progress is not None:
+                    on_progress(idx, total, prof_name, em_clean, st_msg, None)
+
+        if idx < total and not aborted:
+            lo, hi = delay_range
+            wait_s = random.uniform(min(lo, hi), max(lo, hi)) if hi > 0 else 0.0
+            end_wait = time.monotonic() + wait_s
+            while time.monotonic() < end_wait:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                time.sleep(min(0.15, max(0.01, end_wait - time.monotonic())))
+
+    return {
+        "hits": hits,
+        "dead_tokens": dead_tokens,
+        "scanned_names": scanned_names,
+        "email_status": email_status,
+        "total": total,
+        "aborted": aborted,
+        "stopped": bool(stop_event is not None and stop_event.is_set()),
+    }

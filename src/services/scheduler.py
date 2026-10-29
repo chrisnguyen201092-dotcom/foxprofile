@@ -270,14 +270,22 @@ def _pair_day_accounts(
     if n == 0:
         return [(solo, None)] if solo else []
 
-    # Order pool so accounts from the largest cluster in this day are matched first (MRV heuristic)
+    # Order pool so the minority tier (non-gateway usa10X vs gateway) comes first and largest
+    # clusters are matched first (MRV heuristic), guaranteeing maximum cross-tier (GW + usa10X) pairs.
     cluster_counts: dict[str, int] = {}
+    gw_count = 0
+    non_gw_count = 0
     for a in pool:
         cluster_counts[a.cluster] = cluster_counts.get(a.cluster, 0) + 1
+        if is_gateway_ipv6_cluster(a.cluster):
+            gw_count += 1
+        else:
+            non_gw_count += 1
+    minority_is_non_gw = non_gw_count <= gw_count
     pool.sort(
         key=lambda a: (
+            0 if (not is_gateway_ipv6_cluster(a.cluster)) == minority_is_non_gw else 1,
             -cluster_counts.get(a.cluster, 0),
-            -int(is_gateway_ipv6_cluster(a.cluster)),
             _jitter_hash(a.name, seed_int),
         )
     )
@@ -294,8 +302,8 @@ def _pair_day_accounts(
             cost += 100_000.0
         elif a.cluster and a.cluster == b.cluster:
             # Two distinct /64 ports on the same IPv6 gateway (e.g. 209.141.40.174):
-            # zero /64 collision, but prefer pairing 1 gateway + 1 usa10X first whenever available.
-            cost += 800.0
+            # zero /64 collision, but strictly prefer pairing 1 gateway + 1 usa10X whenever available.
+            cost += 1_200.0
         key = (a.name, b.name) if a.name < b.name else (b.name, a.name)
         if key in prev_pair_set:
             cost += 500.0
@@ -303,7 +311,7 @@ def _pair_day_accounts(
         gw_a = is_gateway_ipv6_cluster(a.cluster)
         gw_b = is_gateway_ipv6_cluster(b.cluster)
         if gw_a == gw_b:
-            cost += 15.0
+            cost += 1_200.0 if not gw_a else 15.0
         # Slight tie-breaker jitter so pairings vary naturally across cycles
         cost += _jitter_hash(f"{a.name}+{b.name}", seed_int) * 2.0
         return cost
@@ -345,12 +353,55 @@ def _pair_day_accounts(
         used[first_idx] = False
 
     _dfs(0.0, frozenset())
+
+    # 2-opt pairwise swap refinement to guarantee global optimality even for large daily pools
+    def _total_pairs_cost(pairs_list: list[tuple[ScheduledAccount, ScheduledAccount]]) -> float:
+        total_c = 0.0
+        seen_cp: set[tuple[str, str]] = set()
+        for pa, pb in pairs_list:
+            cp = (pa.cluster, pb.cluster) if pa.cluster < pb.cluster else (pb.cluster, pa.cluster)
+            total_c += _pair_cost(pa, pb)
+            if cp in seen_cp:
+                total_c += 60.0
+            seen_cp.add(cp)
+        return total_c
+
+    if len(best_pairs) > 1:
+        curr_total = _total_pairs_cost(best_pairs)
+        for _ in range(4):
+            improved_2opt = False
+            for i in range(len(best_pairs) - 1):
+                for j in range(i + 1, len(best_pairs)):
+                    a1, b1 = best_pairs[i]
+                    a2, b2 = best_pairs[j]
+                    for cand_i, cand_j in (((a1, a2), (b1, b2)), ((a1, b2), (a2, b1))):
+                        best_pairs[i], best_pairs[j] = cand_i, cand_j
+                        new_total = _total_pairs_cost(best_pairs)
+                        if new_total + 1e-6 < curr_total:
+                            curr_total = new_total
+                            improved_2opt = True
+                            a1, b1 = best_pairs[i]
+                            a2, b2 = best_pairs[j]
+                        else:
+                            best_pairs[i], best_pairs[j] = (a1, b1), (a2, b2)
+            if not improved_2opt:
+                break
+
     out: list[tuple[ScheduledAccount, ScheduledAccount | None]] = [
         (a, b) for a, b in best_pairs
     ]
     if solo is not None:
         out.append((solo, None))
     return out
+
+
+def _is_all_gw_pair(pair: tuple[ScheduledAccount, ScheduledAccount | None]) -> bool:
+    a, b = pair
+    return bool(
+        b is not None
+        and is_gateway_ipv6_cluster(a.cluster)
+        and is_gateway_ipv6_cluster(b.cluster)
+    )
 
 
 def _order_shift_pairs(
@@ -361,15 +412,17 @@ def _order_shift_pairs(
     *,
     force_late_shared: bool = False,
 ) -> list[ScheduledPair]:
-    """Order pairs within a shift to eliminate back-to-back cluster overlap."""
+    """Order pairs within a shift to eliminate back-to-back cluster overlap and ensure safe 4-account brackets `(C1+C2, C3+C4...)`."""
     if not raw_pairs:
         return []
 
     def _perm_score(perm: tuple[tuple[ScheduledAccount, ScheduledAccount | None], ...]) -> float:
         score = 0.0
+        n_perm = len(perm)
         for idx, (a, b) in enumerate(perm):
             c_curr = {a.cluster} | ({b.cluster} if b else set())
             k_curr = _pair_subnet_keys(a, b)
+            curr_all_gw = _is_all_gw_pair((a, b))
             if idx > 0:
                 pa, pb = perm[idx - 1]
                 c_prev = {pa.cluster} | ({pb.cluster} if pb else set())
@@ -383,26 +436,42 @@ def _order_shift_pairs(
                 # Extra penalty if two IPv6 gateway pairs run back-to-back when a pure Detroit pair exists
                 if any(is_gateway_ipv6_cluster(c) for c in overlap):
                     score += 500.0
-                curr_all_gw = is_gateway_ipv6_cluster(a.cluster) and (
-                    b is not None and is_gateway_ipv6_cluster(b.cluster)
-                )
-                prev_all_gw = is_gateway_ipv6_cluster(pa.cluster) and (
-                    pb is not None and is_gateway_ipv6_cluster(pb.cluster)
-                )
+                prev_all_gw = _is_all_gw_pair((pa, pb))
                 if curr_all_gw and prev_all_gw:
-                    score += 1800.0
+                    score += 3500.0
+
+                # Hướng B — 4-account bracket `(C_{2k-1}, C_{2k})` rules (when `idx % 2 == 1`):
+                if idx % 2 == 1:
+                    # 1. Never allow two Pure Gateway pairs (4x 209.141.40.174) in the same 4-account bracket
+                    if curr_all_gw and prev_all_gw:
+                        score += 5000.0
+                    # 2. Inside a mixed bracket `[Mixed, PureGW]`, always put Mixed (`209+usa10X`) first (`C_{2k-1}`)
+                    # and PureGW (`209+209`) second (`C_{2k}`) so PureGW pairs never touch across bracket boundaries.
+                    elif prev_all_gw and not curr_all_gw:
+                        score += 800.0
+
+            # Hướng B — 4-account bracket `(C_{2k-1}, C_{2k})` rules:
+            # Odd pair numbers (`C1, C3, C5...`, i.e. `idx % 2 == 0`) must always be Mixed (`209+usa10X`)
+            # whenever available so PureGW (`209+209`) pairs only sit on even slots (`C2, C4, C6...`).
+            if idx % 2 == 0 and curr_all_gw:
+                score += 800.0
+
+            # Front-load [Mixed, Mixed] (2x GW + 2x usa10X) brackets at the start of the shift (C1+C2, C3+C4...)
+            if curr_all_gw:
+                score += (n_perm - idx) * 12.0
+
             # In evening shift, prefer East Coast (Detroit/NY) in earlier slot and West Coast (LA) in later slot
             has_la = "los_angeles" in (a.timezone or "").lower() or (
                 b is not None and "los_angeles" in (b.timezone or "").lower()
             )
-            if shift == "evening" and has_la and idx == 0 and len(perm) > 1:
+            if shift == "evening" and has_la and idx == 0 and n_perm > 1:
                 score += 25.0
             # Keep shared endpoint pair at the end of the shift for maximum cooldown
             has_shared = a.shared_endpoint or (b is not None and b.shared_endpoint)
-            if force_late_shared and has_shared and idx < len(perm) - 1:
+            if force_late_shared and has_shared and idx < n_perm - 1:
                 score += 200.0
             # Keep solo (if any) at the very end
-            if b is None and idx < len(perm) - 1:
+            if b is None and idx < n_perm - 1:
                 score += 800.0
             # Slight reward for alternating shift from previous cycle
             if last_shifts.get(a.name) == shift:
@@ -414,23 +483,51 @@ def _order_shift_pairs(
     if len(raw_pairs) <= 6:
         best_perm = min(itertools.permutations(raw_pairs), key=_perm_score)
     else:
-        # Fast greedy + pairwise 2-opt refinement for larger shifts (7..15 pairs)
-        remaining = list(raw_pairs)
+        # Build a bracket-aware initial ordering: place excess [Mixed, Mixed] brackets first,
+        # then interleave [Mixed, PureGW] brackets so no two PureGW pairs ever touch.
+        mixed_pool = [p for p in raw_pairs if not _is_all_gw_pair(p) and p[1] is not None]
+        pure_gw_pool = [p for p in raw_pairs if _is_all_gw_pair(p)]
+        solo_pool = [p for p in raw_pairs if p[1] is None]
+
         built: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
-        while remaining:
-            best_i = min(
-                range(len(remaining)),
-                key=lambda i: _perm_score((*built, remaining[i])),
-            )
-            built.append(remaining.pop(best_i))
+        while mixed_pool or pure_gw_pool:
+            if len(built) % 2 == 0:
+                # Odd pair slot (C1, C3, C5...): always pick a Mixed pair if available
+                if mixed_pool:
+                    best_i = min(
+                        range(len(mixed_pool)),
+                        key=lambda i: _perm_score((*built, mixed_pool[i])),
+                    )
+                    built.append(mixed_pool.pop(best_i))
+                else:
+                    built.append(pure_gw_pool.pop(0))
+            else:
+                # Even pair slot (C2, C4, C6...): pick Mixed while len(mixed_pool) > len(pure_gw_pool),
+                # then pair each remaining PureGW with the preceding Mixed pair in `[Mixed, PureGW]`.
+                if len(mixed_pool) > len(pure_gw_pool) and mixed_pool:
+                    best_i = min(
+                        range(len(mixed_pool)),
+                        key=lambda i: _perm_score((*built, mixed_pool[i])),
+                    )
+                    built.append(mixed_pool.pop(best_i))
+                elif pure_gw_pool:
+                    best_i = min(
+                        range(len(pure_gw_pool)),
+                        key=lambda i: _perm_score((*built, pure_gw_pool[i])),
+                    )
+                    built.append(pure_gw_pool.pop(best_i))
+                elif mixed_pool:
+                    built.append(mixed_pool.pop(0))
+        built.extend(solo_pool)
+
         best_sc = _perm_score(tuple(built))
-        for _ in range(3):
+        for _ in range(6):
             improved = False
             for i in range(len(built) - 1):
                 for j in range(i + 1, len(built)):
                     built[i], built[j] = built[j], built[i]
                     cand_sc = _perm_score(tuple(built))
-                    if cand_sc < best_sc:
+                    if cand_sc + 1e-6 < best_sc:
                         best_sc = cand_sc
                         improved = True
                     else:
@@ -477,8 +574,15 @@ def _split_and_order_day_shifts(
     if total_p == 1:
         return _order_shift_pairs(day_pairs, "morning", last_shifts, 1), []
 
-    # Order pairs so full pairs with distinct /64 clusters come first, while shared-endpoint (on Day 0)
-    # or trailing solo pairs are considered last so they naturally overflow to Evening if needed.
+    non_gw_freq: dict[str, int] = {}
+    for a, b in day_pairs:
+        for cl_k in ({a.cluster} | ({b.cluster} if b else set())):
+            if cl_k and not is_gateway_ipv6_cluster(cl_k):
+                non_gw_freq[cl_k] = non_gw_freq.get(cl_k, 0) + 1
+
+    # Order pairs so full pairs with non-gateway /64 clusters come first (prioritizing clusters that
+    # appear twice in the day so their 1st occurrence claims Morning and 2nd goes to Evening),
+    # followed by pure-gateway pairs, while Day-0 shared-endpoint or trailing solo pairs come last.
     ordered_candidates = sorted(
         day_pairs,
         key=lambda ab: (
@@ -489,6 +593,15 @@ def _split_and_order_day_shifts(
                 and (ab[0].shared_endpoint or (ab[1] is not None and ab[1].shared_endpoint))
             )
             else 0,
+            1 if _is_all_gw_pair(ab) else 0,
+            -max(
+                (
+                    non_gw_freq.get(c, 0)
+                    for c in ({ab[0].cluster} | ({ab[1].cluster} if ab[1] else set()))
+                    if c and not is_gateway_ipv6_cluster(c)
+                ),
+                default=0,
+            ),
             # Prefer pairs with only 1 non-gateway /64 cluster over pairs with 2 non-gateway clusters
             sum(
                 1
@@ -502,76 +615,17 @@ def _split_and_order_day_shifts(
     e_raw: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
     morning_non_gw: set[str] = set()
 
-    if total_p >= 6:
-        morning_cap = (total_p + 1) // 2
-        pure_gw_pairs: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
-        non_gw_pairs: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
-        for a, b in ordered_candidates:
-            has_shared_d0 = day_index == 0 and (
-                a.shared_endpoint or (b is not None and b.shared_endpoint)
-            )
-            is_pure_gw = (
-                b is not None
-                and is_gateway_ipv6_cluster(a.cluster)
-                and is_gateway_ipv6_cluster(b.cluster)
-            )
-            if is_pure_gw and not has_shared_d0:
-                pure_gw_pairs.append((a, b))
-            else:
-                non_gw_pairs.append((a, b))
-
-        non_gw_freq: dict[str, int] = {}
-        for a, b in non_gw_pairs:
-            for cl_k in ({a.cluster} | ({b.cluster} if b else set())):
-                if cl_k and not is_gateway_ipv6_cluster(cl_k):
-                    non_gw_freq[cl_k] = non_gw_freq.get(cl_k, 0) + 1
-        non_gw_pairs.sort(
-            key=lambda ab: -max(
-                (
-                    non_gw_freq.get(c, 0)
-                    for c in ({ab[0].cluster} | ({ab[1].cluster} if ab[1] else set()))
-                    if c and not is_gateway_ipv6_cluster(c)
-                ),
-                default=0,
-            )
+    for a, b in ordered_candidates:
+        non_gw = _pair_subnet_keys(a, b)
+        has_shared_d0 = day_index == 0 and (
+            a.shared_endpoint or (b is not None and b.shared_endpoint)
         )
-
-        m_gw_target = len(pure_gw_pairs) // 2
-        m_non_gw_cap = max(1, morning_cap - m_gw_target)
-        for a, b in non_gw_pairs:
-            non_gw = _pair_subnet_keys(a, b)
-            has_shared_d0 = day_index == 0 and (
-                a.shared_endpoint or (b is not None and b.shared_endpoint)
-            )
-            is_solo = b is None
-            if (
-                (non_gw & morning_non_gw)
-                or has_shared_d0
-                or (is_solo and len(m_raw) >= 1)
-                or len(m_raw) >= m_non_gw_cap
-            ):
-                e_raw.append((a, b))
-            else:
-                m_raw.append((a, b))
-                morning_non_gw.update(non_gw)
-
-        for a, b in pure_gw_pairs:
-            if len(m_raw) < morning_cap:
-                m_raw.append((a, b))
-            else:
-                e_raw.append((a, b))
-    else:
-        for a, b in ordered_candidates:
-            non_gw = _pair_subnet_keys(a, b)
-            has_shared_d0 = day_index == 0 and (
-                a.shared_endpoint or (b is not None and b.shared_endpoint)
-            )
-            is_solo = b is None
-            if (non_gw & morning_non_gw) or has_shared_d0 or (is_solo and len(m_raw) >= 1):
-                e_raw.append((a, b))
-            else:
-                m_raw.append((a, b))
-                morning_non_gw.update(non_gw)
+        is_solo = b is None
+        if (non_gw & morning_non_gw) or has_shared_d0 or (is_solo and len(m_raw) >= 1):
+            e_raw.append((a, b))
+        else:
+            m_raw.append((a, b))
+            morning_non_gw.update(non_gw)
 
     m_ordered = _order_shift_pairs(
         m_raw,
@@ -761,9 +815,31 @@ def build_safe_schedule(
     quotas_preview = _compute_even_day_quotas(len(sched_accounts), cycle_days)
     empty_day_capacity = sum(quotas_preview[d] for d in empty_days)
 
+    has_imbalanced_saved_tags = False
+    if len(sched_accounts) >= cycle_days * 4 and tagged_by_day_pair:
+        tot_by_cl_chk: dict[str, int] = {}
+        for a_item in sched_accounts:
+            if a_item.cluster:
+                tot_by_cl_chk[a_item.cluster] = tot_by_cl_chk.get(a_item.cluster, 0) + 1
+        for d_chk, pmap in tagged_by_day_pair.items():
+            if d_chk == 0:
+                continue
+            d_accs = [acc_i for grp_i in pmap.values() for acc_i in grp_i]
+            cl_cnts_chk: dict[str, int] = {}
+            for acc_i in d_accs:
+                if acc_i.cluster and not is_gateway_ipv6_cluster(acc_i.cluster):
+                    cl_cnts_chk[acc_i.cluster] = cl_cnts_chk.get(acc_i.cluster, 0) + 1
+            if any(
+                cnt > 1 and tot_by_cl_chk.get(cl_k, 0) <= cycle_days
+                for cl_k, cnt in cl_cnts_chk.items()
+            ):
+                has_imbalanced_saved_tags = True
+                break
+
     if (
         shuffle_seed is None
         and tagged_names
+        and not has_imbalanced_saved_tags
         and all_tag_wds.issubset(set(wd_to_day_idx.keys()))
         and (
             not untagged_non_today
@@ -858,12 +934,10 @@ def build_safe_schedule(
                     ):
                         a, b = b, a
                     non_gw = _pair_subnet_keys(a, b)
-                    explicit_sh = shift_by_name.get(a.name) or (
-                        shift_by_name.get(b.name) if b is not None else None
+                    has_shared_d0 = d_idx == 0 and (
+                        a.shared_endpoint or (b is not None and b.shared_endpoint)
                     )
-                    if explicit_sh:
-                        shift = explicit_sh
-                    elif non_gw & morning_non_gw:
+                    if (non_gw & morning_non_gw) or has_shared_d0 or (b is None and m_pairs):
                         shift = "evening"
                     else:
                         shift = "morning"
@@ -971,6 +1045,36 @@ def build_safe_schedule(
         for cl_k, cnt in total_by_cluster.items()
         if cl_k and not is_gateway_ipv6_cluster(cl_k)
     )
+    base_non_gw = total_non_gw // cycle_days if total_non_gw > 0 else 0
+    extra_non_gw = total_non_gw % cycle_days if total_non_gw > 0 else 0
+    non_gw_quotas = [
+        base_non_gw + (1 if d < extra_non_gw else 0)
+        for d in range(cycle_days)
+    ]
+    total_dup_non_gw = sum(
+        max(0, cnt - cycle_days)
+        for cl_k, cnt in total_by_cluster.items()
+        if cl_k and not is_gateway_ipv6_cluster(cl_k)
+    )
+    max_dup_non_gw_per_day = (
+        (total_dup_non_gw + cycle_days - 1) // cycle_days
+        if total_dup_non_gw > 0
+        else 0
+    )
+
+    def _day_non_gw_count(d: int) -> int:
+        return sum(
+            1
+            for a_item in day_buckets[d]
+            if a_item.cluster and not is_gateway_ipv6_cluster(a_item.cluster)
+        )
+
+    def _day_dup_non_gw_count(d: int) -> int:
+        return sum(
+            max(0, cnt - 1)
+            for cl_k, cnt in day_cluster_counts[d].items()
+            if cl_k and not is_gateway_ipv6_cluster(cl_k)
+        )
 
     def _cluster_cap_for_day(cluster: str, d_idx: int, *, relax: int = 0) -> int:
         p_cap = max_pairs_per_day[d_idx]
@@ -980,7 +1084,11 @@ def build_safe_schedule(
         even_c = (tot_c + cycle_days - 1) // cycle_days
         if is_gateway_ipv6_cluster(cluster):
             if total_non_gw >= cycle_days * 2:
-                return min(quotas[d_idx], even_c)
+                gw_target = quotas[d_idx] - non_gw_quotas[d_idx]
+                return min(
+                    quotas[d_idx],
+                    max(even_c, gw_target) if relax == 0 else max(even_c + 1, gw_target + 1),
+                )
             return quotas[d_idx]
         if relax > 0:
             # Each day has 2 shifts (Morning & Evening), so up to 2 accounts from a shared /64
@@ -1023,9 +1131,19 @@ def build_safe_schedule(
 
     unassigned: list[ScheduledAccount] = []
     for acc in ordered_for_bucketing:
+        if acc.completed_today and len(day_buckets[0]) < quotas[0]:
+            if acc.cluster:
+                rem_by_cluster[acc.cluster] = max(0, rem_by_cluster.get(acc.cluster, 1) - 1)
+            day_buckets[0].append(acc)
+            day_cluster_counts[0][acc.cluster] = day_cluster_counts[0].get(acc.cluster, 0) + 1
+            if acc.shared_endpoint and acc.endpoint:
+                endpoint_assigned_days.setdefault(acc.endpoint, []).append(0)
+            continue
+
         min_d = _effective_min_day(acc)
         if acc.cluster:
             rem_by_cluster[acc.cluster] = max(0, rem_by_cluster.get(acc.cluster, 1) - 1)
+        is_non_gw_acc = bool(acc.cluster and not is_gateway_ipv6_cluster(acc.cluster))
         placed = False
         for relax in (0, 1):
             for d_idx in range(min_d, cycle_days):
@@ -1041,6 +1159,11 @@ def build_safe_schedule(
                 curr_c = day_cluster_counts[d_idx].get(acc.cluster, 0)
                 if acc.cluster and curr_c >= _cluster_cap_for_day(acc.cluster, d_idx, relax=relax):
                     continue
+                if relax == 0 and is_non_gw_acc:
+                    if non_gw_quotas[d_idx] > 0 and _day_non_gw_count(d_idx) >= non_gw_quotas[d_idx]:
+                        continue
+                    if curr_c >= 1 and _day_dup_non_gw_count(d_idx) >= max_dup_non_gw_per_day:
+                        continue
 
                 day_buckets[d_idx].append(acc)
                 day_cluster_counts[d_idx][acc.cluster] = curr_c + 1
@@ -1056,10 +1179,10 @@ def build_safe_schedule(
     # Fallback placement for any overflow accounts (preserving min_d probation cool-off & shared_endpoint gap)
     min_gap = 2 if cycle_days >= 4 else 1
 
-    def _strict_day_max_for_cluster(cluster: str, d: int) -> int:
-        return _cluster_cap_for_day(cluster, d, relax=1)
+    def _strict_day_max_for_cluster(cluster: str, d: int, *, relax: int = 0) -> int:
+        return _cluster_cap_for_day(cluster, d, relax=relax)
 
-    def _can_place_in_day(a: ScheduledAccount, d: int, *, strict: bool = True) -> bool:
+    def _can_place_in_day(a: ScheduledAccount, d: int, *, strict: bool = True, relax: int = 0) -> bool:
         if d < _min_day_for_account(a):
             return False
         if (
@@ -1071,10 +1194,16 @@ def build_safe_schedule(
             )
         ):
             return False
-        return not (
-            strict
-            and day_cluster_counts[d].get(a.cluster, 0) >= _strict_day_max_for_cluster(a.cluster, d)
-        )
+        if strict:
+            curr_c = day_cluster_counts[d].get(a.cluster, 0)
+            if curr_c >= _strict_day_max_for_cluster(a.cluster, d, relax=relax):
+                return False
+            if relax == 0 and a.cluster and not is_gateway_ipv6_cluster(a.cluster):
+                if non_gw_quotas[d] > 0 and _day_non_gw_count(d) >= non_gw_quotas[d]:
+                    return False
+                if curr_c >= 1 and _day_dup_non_gw_count(d) >= max_dup_non_gw_per_day:
+                    return False
+        return True
 
     for acc in unassigned:
         min_d = _min_day_for_account(acc)
@@ -1083,8 +1212,9 @@ def build_safe_schedule(
         direct_d = next(
             (
                 d
+                for rel in (0, 1)
                 for d in range(min_d, cycle_days)
-                if len(day_buckets[d]) < quotas[d] and _can_place_in_day(acc, d, strict=True)
+                if len(day_buckets[d]) < quotas[d] and _can_place_in_day(acc, d, strict=True, relax=rel)
             ),
             None,
         )
@@ -1106,7 +1236,7 @@ def build_safe_schedule(
             ),
         )
         swapped = False
-        for strict_cap in (True, False):
+        for strict_cap, rel in ((True, 0), (True, 1), (False, 1)):
             # Search from latest day down to min_d so we never disturb Day 0 unless necessary
             for other_d in range(cycle_days - 1, min_d - 1, -1):
                 if other_d == target_d:
@@ -1120,14 +1250,18 @@ def build_safe_schedule(
                     )
                 ):
                     continue
-                # Sort candidates in other_d by closest rest_hours to acc
+                # Sort candidates in other_d by same-tier first, then closest rest_hours to acc
                 cand_indices = sorted(
                     range(len(day_buckets[other_d])),
-                    key=lambda idx: abs(day_buckets[other_d][idx].rest_hours - acc.rest_hours),
+                    key=lambda idx: (
+                        is_gateway_ipv6_cluster(day_buckets[other_d][idx].cluster)
+                        != is_gateway_ipv6_cluster(acc.cluster),
+                        abs(day_buckets[other_d][idx].rest_hours - acc.rest_hours),
+                    ),
                 )
                 for idx_cand in cand_indices:
                     cand = day_buckets[other_d][idx_cand]
-                    if cand.shared_endpoint or _min_day_for_account(cand) > target_d:
+                    if cand.shared_endpoint or cand.completed_today or _min_day_for_account(cand) > target_d:
                         continue
                     new_other_c = (
                         day_cluster_counts[other_d].get(acc.cluster, 0)
@@ -1136,8 +1270,8 @@ def build_safe_schedule(
                     )
                     new_target_c = day_cluster_counts[target_d].get(cand.cluster, 0) + 1
                     if strict_cap and (
-                        new_other_c > _strict_day_max_for_cluster(acc.cluster, other_d)
-                        or new_target_c > _strict_day_max_for_cluster(cand.cluster, target_d)
+                        new_other_c > _strict_day_max_for_cluster(acc.cluster, other_d, relax=rel)
+                        or new_target_c > _strict_day_max_for_cluster(cand.cluster, target_d, relax=rel)
                     ):
                         continue
                     day_buckets[other_d][idx_cand] = acc
@@ -1165,65 +1299,154 @@ def build_safe_schedule(
             if acc.shared_endpoint and acc.endpoint:
                 endpoint_assigned_days.setdefault(acc.endpoint, []).append(target_d)
 
-    # 4b. Rebalance any non-gateway /64 cluster (e.g. usa109) that exceeded its 2-shift daily cap
-    # (`relax=1`, <= 2 per day) by swapping with an earlier/other day that has room.
-    for d_over in range(cycle_days - 1, -1, -1):
-        for c_over in list(day_cluster_counts[d_over].keys()):
-            if not c_over or is_gateway_ipv6_cluster(c_over):
-                continue
-            cap_over = _cluster_cap_for_day(c_over, d_over, relax=1)
-            while day_cluster_counts[d_over].get(c_over, 0) > cap_over:
-                swapped_c = False
-                over_indices = [
-                    i
-                    for i, a in enumerate(day_buckets[d_over])
-                    if a.cluster == c_over and not a.shared_endpoint and not a.completed_today
-                ]
-                over_indices.sort(key=lambda i: -day_buckets[d_over][i].rest_hours)
-                for idx_a in over_indices:
-                    acc_over = day_buckets[d_over][idx_a]
-                    for d_under in range(cycle_days - 1, -1, -1):
-                        if d_under == d_over:
-                            continue
-                        if day_cluster_counts[d_under].get(c_over, 0) >= _cluster_cap_for_day(
-                            c_over, d_under, relax=1
+    # 4b. Rebalance any non-gateway /64 cluster that exceeded its ideal daily cap (`relax=0` first, then `relax=1`)
+    # while respecting probation `_min_day_for_account` so clusters with `tot_c <= cycle_days` stay <= 1/day.
+    for rel_lvl in (0, 1):
+        for d_over in range(cycle_days - 1, -1, -1):
+            for c_over in list(day_cluster_counts[d_over].keys()):
+                if not c_over or is_gateway_ipv6_cluster(c_over):
+                    continue
+                cap_over = _cluster_cap_for_day(c_over, d_over, relax=rel_lvl)
+                while day_cluster_counts[d_over].get(c_over, 0) > cap_over:
+                    swapped_c = False
+                    over_indices = [
+                        i
+                        for i, a in enumerate(day_buckets[d_over])
+                        if a.cluster == c_over and not a.shared_endpoint and not a.completed_today
+                    ]
+                    over_indices.sort(key=lambda i: -day_buckets[d_over][i].rest_hours)
+                    for idx_a in over_indices:
+                        acc_over = day_buckets[d_over][idx_a]
+                        for d_under in range(cycle_days - 1, -1, -1):
+                            if d_under == d_over or d_under < _min_day_for_account(acc_over):
+                                continue
+                            if day_cluster_counts[d_under].get(c_over, 0) >= _cluster_cap_for_day(
+                                c_over, d_under, relax=rel_lvl
+                            ):
+                                continue
+                            cand_indices = [
+                                j
+                                for j, b in enumerate(day_buckets[d_under])
+                                if b.cluster != c_over
+                                and not b.shared_endpoint
+                                and not b.completed_today
+                                and d_over >= _min_day_for_account(b)
+                                and day_cluster_counts[d_over].get(b.cluster, 0)
+                                < _cluster_cap_for_day(b.cluster, d_over, relax=rel_lvl)
+                            ]
+                            cand_indices.sort(
+                                key=lambda j: (
+                                    is_gateway_ipv6_cluster(day_buckets[d_under][j].cluster)
+                                    != is_gateway_ipv6_cluster(c_over),
+                                    day_buckets[d_under][j].rest_hours
+                                    if d_under < d_over
+                                    else -day_buckets[d_under][j].rest_hours,
+                                )
+                            )
+                            if cand_indices:
+                                idx_b = cand_indices[0]
+                                acc_under = day_buckets[d_under][idx_b]
+                                day_buckets[d_over][idx_a] = acc_under
+                                day_buckets[d_under][idx_b] = acc_over
+                                day_cluster_counts[d_over][c_over] -= 1
+                                day_cluster_counts[d_over][acc_under.cluster] = (
+                                    day_cluster_counts[d_over].get(acc_under.cluster, 0) + 1
+                                )
+                                day_cluster_counts[d_under][acc_under.cluster] -= 1
+                                day_cluster_counts[d_under][c_over] = (
+                                    day_cluster_counts[d_under].get(c_over, 0) + 1
+                                )
+                                swapped_c = True
+                                break
+                        if swapped_c:
+                            break
+                    if not swapped_c:
+                        break
+
+    # 4b-ii. Rebalance daily non-gateway vs gateway counts so every day matches `non_gw_quotas[d]`
+    # whenever probation `_min_day_for_account` allows.
+    for d_over in range(cycle_days):
+        while non_gw_quotas[d_over] > 0 and _day_non_gw_count(d_over) > non_gw_quotas[d_over]:
+            swapped_tier = False
+            for d_under in range(cycle_days - 1, -1, -1):
+                if d_under == d_over or _day_non_gw_count(d_under) >= non_gw_quotas[d_under]:
+                    continue
+                for i_ng, a_ng in enumerate(day_buckets[d_over]):
+                    if (
+                        not a_ng.cluster
+                        or is_gateway_ipv6_cluster(a_ng.cluster)
+                        or a_ng.shared_endpoint
+                        or a_ng.completed_today
+                        or d_under < _min_day_for_account(a_ng)
+                    ):
+                        continue
+                    if day_cluster_counts[d_under].get(a_ng.cluster, 0) >= _cluster_cap_for_day(
+                        a_ng.cluster, d_under, relax=0
+                    ):
+                        continue
+                    for i_gw, a_gw in enumerate(day_buckets[d_under]):
+                        if (
+                            not is_gateway_ipv6_cluster(a_gw.cluster)
+                            or a_gw.shared_endpoint
+                            or a_gw.completed_today
                         ):
                             continue
-                        cand_indices = [
-                            j
-                            for j, b in enumerate(day_buckets[d_under])
-                            if b.cluster != c_over
-                            and not b.shared_endpoint
-                            and not b.completed_today
-                            and day_cluster_counts[d_over].get(b.cluster, 0)
-                            < _cluster_cap_for_day(b.cluster, d_over, relax=1)
-                        ]
-                        cand_indices.sort(
-                            key=lambda j: (
-                                day_buckets[d_under][j].rest_hours
-                                if d_under < d_over
-                                else -day_buckets[d_under][j].rest_hours
+                        if d_over >= _min_day_for_account(a_gw):
+                            day_buckets[d_over][i_ng] = a_gw
+                            day_buckets[d_under][i_gw] = a_ng
+                            day_cluster_counts[d_over][a_ng.cluster] -= 1
+                            day_cluster_counts[d_over][a_gw.cluster] = (
+                                day_cluster_counts[d_over].get(a_gw.cluster, 0) + 1
                             )
-                        )
-                        if cand_indices:
-                            idx_b = cand_indices[0]
-                            acc_under = day_buckets[d_under][idx_b]
-                            day_buckets[d_over][idx_a] = acc_under
-                            day_buckets[d_under][idx_b] = acc_over
-                            day_cluster_counts[d_over][c_over] -= 1
-                            day_cluster_counts[d_over][acc_under.cluster] = (
-                                day_cluster_counts[d_over].get(acc_under.cluster, 0) + 1
+                            day_cluster_counts[d_under][a_gw.cluster] -= 1
+                            day_cluster_counts[d_under][a_ng.cluster] = (
+                                day_cluster_counts[d_under].get(a_ng.cluster, 0) + 1
                             )
-                            day_cluster_counts[d_under][acc_under.cluster] -= 1
-                            day_cluster_counts[d_under][c_over] = (
-                                day_cluster_counts[d_under].get(c_over, 0) + 1
-                            )
-                            swapped_c = True
+                            swapped_tier = True
                             break
-                    if swapped_c:
+                        # 2-hop relay via an intermediate day `d_mid` when `a_gw` is in probation
+                        min_gw_d = _min_day_for_account(a_gw)
+                        for d_mid in range(min_gw_d, cycle_days):
+                            if d_mid in (d_over, d_under):
+                                continue
+                            i_mid = next(
+                                (
+                                    idx_m
+                                    for idx_m, a_m in enumerate(day_buckets[d_mid])
+                                    if is_gateway_ipv6_cluster(a_m.cluster)
+                                    and not a_m.shared_endpoint
+                                    and not a_m.completed_today
+                                    and d_over >= _min_day_for_account(a_m)
+                                ),
+                                None,
+                            )
+                            if i_mid is not None:
+                                a_mid = day_buckets[d_mid][i_mid]
+                                day_buckets[d_over][i_ng] = a_mid
+                                day_buckets[d_mid][i_mid] = a_gw
+                                day_buckets[d_under][i_gw] = a_ng
+                                day_cluster_counts[d_over][a_ng.cluster] -= 1
+                                day_cluster_counts[d_over][a_mid.cluster] = (
+                                    day_cluster_counts[d_over].get(a_mid.cluster, 0) + 1
+                                )
+                                day_cluster_counts[d_mid][a_mid.cluster] -= 1
+                                day_cluster_counts[d_mid][a_gw.cluster] = (
+                                    day_cluster_counts[d_mid].get(a_gw.cluster, 0) + 1
+                                )
+                                day_cluster_counts[d_under][a_gw.cluster] -= 1
+                                day_cluster_counts[d_under][a_ng.cluster] = (
+                                    day_cluster_counts[d_under].get(a_ng.cluster, 0) + 1
+                                )
+                                swapped_tier = True
+                                break
+                        if swapped_tier:
+                            break
+                    if swapped_tier:
                         break
-                if not swapped_c:
+                if swapped_tier:
                     break
+            if not swapped_tier:
+                break
 
     # 4c. Intra-cluster monotonic rest order: within every cluster, ensure accounts with longer
     # rest_hours are always scheduled in earlier days and accounts with shorter rest_hours in later days.
@@ -1241,8 +1464,9 @@ def build_safe_schedule(
             for (d_idx, s_idx), a_sorted in zip(positions, c_accs, strict=False):
                 day_buckets[d_idx][s_idx] = a_sorted
 
-    # 4d. Cross-cluster monotonic rest refinement: if an account in a later day has rested significantly
-    # longer than an account in an earlier day, swap them whenever cluster caps and min_day allow.
+    # 4d. Cross-cluster monotonic rest refinement (within the same tier so Gateway/Non-Gateway daily
+    # balance is preserved): if an account in a later day has rested significantly longer than an
+    # account in an earlier day, swap them whenever strict cluster caps (`relax=0`) and `min_day` allow.
     for _pass in range(3):
         any_swapped = False
         for d_early in range(cycle_days - 1):
@@ -1253,6 +1477,10 @@ def build_safe_schedule(
                     for i_l, a_l in enumerate(day_buckets[d_late]):
                         if a_l.completed_today or a_l.shared_endpoint:
                             continue
+                        if is_gateway_ipv6_cluster(a_e.cluster) != is_gateway_ipv6_cluster(
+                            a_l.cluster
+                        ):
+                            continue
                         if a_l.rest_hours <= a_e.rest_hours + 4.0:
                             continue
                         if d_early < _min_day_for_account(a_l) or d_late < _min_day_for_account(a_e):
@@ -1260,10 +1488,24 @@ def build_safe_schedule(
                         if a_e.cluster != a_l.cluster:
                             c_l_in_early = day_cluster_counts[d_early].get(a_l.cluster, 0) + 1
                             c_e_in_late = day_cluster_counts[d_late].get(a_e.cluster, 0) + 1
-                            if c_l_in_early > _cluster_cap_for_day(a_l.cluster, d_early, relax=1):
+                            if c_l_in_early > _cluster_cap_for_day(a_l.cluster, d_early, relax=0):
                                 continue
-                            if c_e_in_late > _cluster_cap_for_day(a_e.cluster, d_late, relax=1):
+                            if c_e_in_late > _cluster_cap_for_day(a_e.cluster, d_late, relax=0):
                                 continue
+                            if not is_gateway_ipv6_cluster(a_l.cluster):
+                                early_dup_delta = (1 if c_l_in_early >= 2 else 0) - (
+                                    1 if day_cluster_counts[d_early].get(a_e.cluster, 0) >= 2 else 0
+                                )
+                                late_dup_delta = (1 if c_e_in_late >= 2 else 0) - (
+                                    1 if day_cluster_counts[d_late].get(a_l.cluster, 0) >= 2 else 0
+                                )
+                                if (
+                                    _day_dup_non_gw_count(d_early) + early_dup_delta
+                                    > max_dup_non_gw_per_day
+                                    or _day_dup_non_gw_count(d_late) + late_dup_delta
+                                    > max_dup_non_gw_per_day
+                                ):
+                                    continue
                             day_cluster_counts[d_early][a_e.cluster] -= 1
                             day_cluster_counts[d_early][a_l.cluster] = c_l_in_early
                             day_cluster_counts[d_late][a_l.cluster] -= 1
