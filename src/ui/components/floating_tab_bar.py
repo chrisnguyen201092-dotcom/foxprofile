@@ -219,9 +219,15 @@ class FloatingProfileTabBar:
             "start_root_x": 0,
             "start_root_y": 0,
             "moved": False,
+            "dragging": False,
             "custom_pos": False,
             "win_x": 0,
             "win_y": 0,
+            "scr_w": 1920,
+            "scr_h": 1080,
+            "cur_w": 200,
+            "cur_h": 44,
+            "top_hwnd": 0,
             "dock_right": False,
             "right_x": 0,
             "orientation": "horizontal",
@@ -459,6 +465,13 @@ class FloatingProfileTabBar:
             _apply_win32_toolwindow(pop.winfo_id())
             pop.bind("<FocusOut>", lambda _e: _close_popup_menu())
 
+        win32_user32 = None
+        if sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                import ctypes
+
+                win32_user32 = ctypes.windll.user32
+
         def _start_drag(event: object) -> None:
             _close_popup_menu()
             rx = int(getattr(event, "x_root", 0))
@@ -466,59 +479,53 @@ class FloatingProfileTabBar:
             drag_state["start_root_x"] = rx
             drag_state["start_root_y"] = ry
             drag_state["moved"] = False
+            drag_state["dragging"] = True
+            drag_state["scr_w"] = root.winfo_screenwidth()
+            drag_state["scr_h"] = root.winfo_screenheight()
+            drag_state["cur_w"] = max(40, root.winfo_width())
+            drag_state["cur_h"] = max(28, root.winfo_height())
             drag_state["x"] = rx - root.winfo_x()
             drag_state["y"] = ry - root.winfo_y()
+            if win32_user32 is not None:
+                with contextlib.suppress(Exception):
+                    hwnd = root.winfo_id()
+                    drag_state["top_hwnd"] = int(win32_user32.GetParent(hwnd) or hwnd)
 
         def _on_drag(event: object) -> None:
             rx = int(getattr(event, "x_root", 0))
             ry = int(getattr(event, "y_root", 0))
             if (
-                abs(rx - int(drag_state["start_root_x"]))
+                not drag_state["moved"]
+                and abs(rx - int(drag_state["start_root_x"]))
                 + abs(ry - int(drag_state["start_root_y"]))
-                > 4
+                > 3
             ):
                 drag_state["moved"] = True
-            scr_w = root.winfo_screenwidth()
-            scr_h = root.winfo_screenheight()
-            cur_w = max(40, root.winfo_width())
-            cur_h = max(28, root.winfo_height())
+            scr_w = int(drag_state["scr_w"])
+            scr_h = int(drag_state["scr_h"])
+            cur_w = int(drag_state["cur_w"])
+            cur_h = int(drag_state["cur_h"])
             nx = max(0, min(rx - int(drag_state["x"]), scr_w - cur_w))
             ny = max(0, min(ry - int(drag_state["y"]), scr_h - cur_h))
             drag_state["custom_pos"] = True
             drag_state["win_x"] = nx
             drag_state["win_y"] = ny
-            probe_x = rx if (rx <= 240 or rx >= scr_w - 240) else nx
-            new_orient = _compute_orientation(probe_x, ny, scr_w, scr_h, True)
-            drag_state["dock_right"] = bool(
-                new_orient == "vertical" and (rx >= scr_w // 2 or nx + cur_w >= scr_w - 240)
-            )
-            if drag_state["dock_right"]:
-                drag_state["right_x"] = min(scr_w - 4, max(nx + cur_w, rx + 16))
-            root.geometry(f"+{nx}+{ny}")
+            top_hwnd = int(drag_state["top_hwnd"])
+            if win32_user32 is not None and top_hwnd:
+                # SWP_NOSIZE (0x0001) | SWP_NOACTIVATE (0x0010) | SWP_NOOWNERZORDER (0x0200)
+                win32_user32.SetWindowPos(top_hwnd, -1, nx, ny, 0, 0, 0x0211)
+            else:
+                root.geometry(f"+{nx}+{ny}")
 
-        def _end_drag(event: object, *, click_toggle_home: bool = False) -> None:
+        def _end_drag(_event: object, *, click_toggle_home: bool = False) -> None:
+            drag_state["dragging"] = False
             if not drag_state["moved"]:
                 if click_toggle_home:
                     self._on_focus_foxprofile()
                 return
-            scr_w = root.winfo_screenwidth()
-            scr_h = root.winfo_screenheight()
-            rx = int(getattr(event, "x_root", drag_state["win_x"]))
+            nx = int(drag_state["win_x"])
             ny = int(drag_state["win_y"])
-            probe_x = rx if (rx <= 240 or rx >= scr_w - 240) else int(drag_state["win_x"])
-            new_orient = _compute_orientation(probe_x, ny, scr_w, scr_h, True)
-            if new_orient == "vertical" and rx >= scr_w // 2:
-                drag_state["dock_right"] = True
-                drag_state["right_x"] = min(scr_w - 4, max(rx + 20, scr_w - 8))
-                drag_state["win_x"] = max(4, int(drag_state["right_x"]) - 120)
-            elif new_orient == "vertical":
-                drag_state["dock_right"] = False
-                drag_state["win_x"] = min(int(drag_state["win_x"]), rx)
-            else:
-                drag_state["dock_right"] = False
-            if new_orient != drag_state["orientation"]:
-                drag_state["orientation"] = new_orient
-                last_rendered[0] = None
+            root.geometry(f"+{nx}+{ny}")
 
         def _bind_drag(widget: object, *, click_toggle_home: bool = False) -> None:
             widget.bind("<ButtonPress-1>", _start_drag)  # type: ignore[attr-defined]
@@ -733,13 +740,7 @@ class FloatingProfileTabBar:
 
             scr_w = root.winfo_screenwidth()
             scr_h = root.winfo_screenheight()
-            orient = _compute_orientation(
-                int(drag_state["win_x"]),
-                int(drag_state["win_y"]),
-                scr_w,
-                scr_h,
-                bool(drag_state["custom_pos"]),
-            )
+            orient = "horizontal"
             drag_state["orientation"] = orient
             eff_active = active_tab if active_tab in running else (running[0] if running else None)
 
@@ -835,6 +836,10 @@ class FloatingProfileTabBar:
                 root.after(150, _poll)
                 return
 
+            if drag_state["dragging"]:
+                root.after(80, _poll)
+                return
+
             poll_tick[0] += 1
             eff_cur = active_tab if active_tab in running else (running[0] if running else None)
             if (
@@ -845,15 +850,7 @@ class FloatingProfileTabBar:
             ):
                 _notify_avatar_updated()
 
-            scr_w = root.winfo_screenwidth()
-            scr_h = root.winfo_screenheight()
-            cur_orient = _compute_orientation(
-                int(drag_state["win_x"]),
-                int(drag_state["win_y"]),
-                scr_w,
-                scr_h,
-                bool(drag_state["custom_pos"]),
-            )
+            cur_orient = "horizontal"
             av_sig = tuple(avatar_version(n) for n in running)
             render_key = (
                 running,
