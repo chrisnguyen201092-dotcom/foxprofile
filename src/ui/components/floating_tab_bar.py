@@ -183,6 +183,14 @@ class FloatingProfileTabBar:
             root.attributes("-topmost", True)
             root.configure(bg=_BG_BAR)
 
+        logo_img = None
+        logo_path = os.path.join(_ASSETS_DIR, "logo.png")
+        if os.path.isfile(logo_path):
+            with contextlib.suppress(Exception):
+                raw_logo = tk.PhotoImage(file=logo_path)
+                factor = max(1, raw_logo.width() // 22)
+                logo_img = raw_logo.subsample(factor, factor)
+
         outer = tk.Frame(
             root,
             bg=_BG_BAR,
@@ -521,16 +529,28 @@ class FloatingProfileTabBar:
                 highlightbackground=_BORDER_INACTIVE,
                 highlightthickness=1,
             )
-            lbl = tk.Label(
-                chip,
-                text="✦ FOX",
-                bg=_BG_INACTIVE,
-                fg="#FFFFFF",
-                font=("Segoe UI Bold", 8),
-                padx=7,
-                pady=3,
-                cursor="fleur",
-            )
+            if logo_img is not None:
+                lbl = tk.Label(
+                    chip,
+                    image=logo_img,
+                    bg=_BG_INACTIVE,
+                    bd=0,
+                    padx=5,
+                    pady=2,
+                    cursor="fleur",
+                )
+                lbl.image = logo_img  # type: ignore[attr-defined]
+            else:
+                lbl = tk.Label(
+                    chip,
+                    text="🦊",
+                    bg=_BG_INACTIVE,
+                    fg="#FFFFFF",
+                    font=("Segoe UI", 10),
+                    padx=6,
+                    pady=2,
+                    cursor="fleur",
+                )
             lbl.pack()
             _bind_drag(chip, click_toggle_home=True)
             _bind_drag(lbl, click_toggle_home=True)
