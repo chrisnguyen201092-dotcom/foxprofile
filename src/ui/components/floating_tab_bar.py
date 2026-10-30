@@ -809,6 +809,7 @@ class FloatingProfileTabBar:
             if (
                 eff_cur
                 and poll_tick[0] % 10 == 0
+                and get_avatar_path(eff_cur, 22) is None
                 and auto_capture_muse_avatar_from_active_window(eff_cur)
             ):
                 _notify_avatar_updated()
