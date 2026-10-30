@@ -12,6 +12,7 @@ import contextlib
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 
 from ...core.strings import get_string
@@ -230,6 +231,7 @@ class FloatingProfileTabBar:
         photo_cache: dict[tuple[str, float], object] = {}
         active_menu: list[object] = [None]
         poll_tick: list[int] = [0]
+        last_av_click: dict[str, object] = {"name": "", "ts": 0.0}
 
         def _close_popup_menu() -> None:
             if active_menu[0] is not None:
@@ -644,9 +646,26 @@ class FloatingProfileTabBar:
                     pady=2,
                     cursor="hand2",
                 )
+            def _on_avatar_click(event: object, n: str = pname) -> None:
+                now = time.monotonic()
+                prev_ts = float(last_av_click.get("ts", 0.0))  # type: ignore[arg-type]
+                if last_av_click.get("name") == n and (now - prev_ts) <= 0.45:
+                    last_av_click["ts"] = 0.0
+                    _open_avatar_menu(event, n)
+                    return
+                last_av_click["name"] = n
+                last_av_click["ts"] = now
+                _close_popup_menu()
+                self._on_select_tab(n)
+
+            def _on_avatar_double_click(event: object, n: str = pname) -> None:
+                last_av_click["ts"] = 0.0
+                if active_menu[0] is None:
+                    _open_avatar_menu(event, n)
+
             av_lbl.pack(side="left", padx=(2, 2))
-            av_lbl.bind("<Button-1>", lambda e, n=pname: _open_avatar_menu(e, n))
-            av_lbl.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
+            av_lbl.bind("<Button-1>", _on_avatar_click)
+            av_lbl.bind("<Double-Button-1>", _on_avatar_double_click)
 
             btn_select = tk.Label(
                 tab_frame,
@@ -663,10 +682,6 @@ class FloatingProfileTabBar:
             btn_select.bind(
                 "<Button-1>",
                 lambda _e, n=pname: (_close_popup_menu(), self._on_select_tab(n)),
-            )
-            btn_select.bind(
-                "<Button-3>",
-                lambda e, n=pname: _open_avatar_menu(e, n),
             )
 
             btn_close = tk.Label(
