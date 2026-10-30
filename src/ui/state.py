@@ -34,6 +34,9 @@ class AppState:
         self.editing_proxy: str | None = None
         # profile_name -> ("checking" | "ok" | "fail", short_label)
         self.proxy_status: dict[str, tuple[str, str]] = {}
+        self.active_browser_tab: str | None = None
+        self.single_stage_mode: bool = True
+        self.floating_tab_bar: bool = True
 
     @property
     def loading(self) -> set[str]:

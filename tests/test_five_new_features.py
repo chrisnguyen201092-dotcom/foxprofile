@@ -4618,6 +4618,123 @@ def test_session_expiry_warning_colors_at_14d_7d_3d():
     assert chip_3.content.color == COLORS["error"]
 
 
+def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_pm) -> None:
+    """Verify Option 1: Top Running Profile Tab Bar + Floating Mini-Tab Bar + Single-Stage switcher."""
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.services.monitor import MonitorService
+    from src.ui.app import App
+    from src.ui.components.content_area import build_running_tabs_bar
+    from src.ui.components.floating_tab_bar import FloatingProfileTabBar
+
+    # 1. Empty running list returns None
+    assert (
+        build_running_tabs_bar(
+            [],
+            set(),
+            None,
+            True,
+            True,
+            lambda _n: None,
+            lambda _n: None,
+            lambda: None,
+            lambda: None,
+        )
+        is None
+    )
+
+    # 2. Non-empty running list builds interactive tab bar
+    selected: list[str] = []
+    closed: list[str] = []
+    toggled_stage: list[bool] = []
+    toggled_float: list[bool] = []
+
+    bar = build_running_tabs_bar(
+        ["#1  Monica", "#2  Sienna", "#3  Kenji"],
+        {"#3  Kenji"},
+        "#2  Sienna",
+        True,
+        True,
+        lambda n: selected.append(n),
+        lambda n: closed.append(n),
+        lambda: toggled_stage.append(True),
+        lambda: toggled_float.append(True),
+    )
+    assert bar is not None
+
+    # 3. FloatingProfileTabBar thread-safe sync & close
+    fbar = FloatingProfileTabBar(
+        on_select_tab=lambda n: selected.append(n),
+        on_close_tab=lambda n: closed.append(n),
+        on_toggle_single_stage=lambda: toggled_stage.append(True),
+        on_focus_foxprofile=lambda: None,
+    )
+    fbar.sync(["#1  Monica", "#2  Sienna"], set(), "#2  Sienna", True, True)
+    assert fbar._state[0] == ("#1  Monica", "#2  Sienna")
+    assert fbar._state[2] == "#2  Sienna"
+    fbar.close()
+    assert fbar._stop_flag is True
+
+    # 4. App integration: Alt+1 / Alt+2 shortcut & single-stage switching
+    isolated_pm.add_profile("#1  Monica", "http://u:p@1.2.3.4:10001", "windows")
+    isolated_pm.add_profile("#2  Sienna", "http://u:p@1.2.3.4:10002", "windows")
+
+    switched_calls: list[tuple[str, bool]] = []
+
+    class FakeBL:
+        def __init__(self) -> None:
+            self.running = {"#1  Monica", "#2  Sienna"}
+
+        def is_running(self, name: str) -> bool:
+            return name in self.running
+
+        def running_profile_names(self) -> set[str]:
+            return set(self.running)
+
+        def running_count(self) -> int:
+            return len(self.running)
+
+        def stop_profile(self, name: str, timeout: int = 2) -> bool:
+            self.running.discard(name)
+            return True
+
+        def focus_profile(self, name: str) -> bool:
+            return True
+
+        def switch_profile(self, name: str, *, single_stage: bool = True) -> bool:
+            switched_calls.append((name, single_stage))
+            return True
+
+        def arrange_windows(self, names=None) -> int:
+            return len(self.running)
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str: str, timeout: int = 10):
+            return True, "IP: 1.2.3.4 (US)"
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+
+    app = App(c)
+    app.monitor = MonitorService(
+        data_dir=str(tmp_path / "camoufox_data"),
+        log_dir=str(tmp_path / "logs"),
+    )
+    app.h._monitor = app.monitor
+
+    assert app._ordered_running_names() == ["#1  Monica", "#2  Sienna"]
+    app._on_select_browser_tab("#2  Sienna")
+    assert app.state.active_browser_tab == "#2  Sienna"
+    assert switched_calls[-1] == ("#2  Sienna", True)
+
+    app._on_toggle_single_stage()
+    assert app.state.single_stage_mode is False
+    app._on_select_browser_tab("#1  Monica")
+    assert switched_calls[-1] == ("#1  Monica", False)
+
 
 
 

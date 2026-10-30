@@ -13,7 +13,7 @@ from ...core.strings import get_string
 from ...models.profile import Profile
 from .control import TOKEN_HEADER
 from .process import spawn_browser, terminate, wait_for_exit
-from .window_title import arrange_browser_windows, focus_browser_window
+from .window_title import arrange_browser_windows, focus_browser_window, switch_browser_window
 
 logger = get_logger("browser.launcher")
 
@@ -256,6 +256,15 @@ class BrowserLauncher:
             proc = self._active_sessions.get(profile_name)
             pid = proc.pid if proc is not None and proc.poll() is None else None
         return focus_browser_window(profile_name, pid)
+
+    def switch_profile(self, profile_name: str, *, single_stage: bool = True) -> bool:
+        with self._lock:
+            pairs = [
+                (n, p.pid if p.poll() is None else None)
+                for n, p in self._active_sessions.items()
+                if p.poll() is None
+            ]
+        return switch_browser_window(profile_name, pairs, single_stage=single_stage)
 
     def arrange_windows(self, profile_names: list[str] | None = None) -> int:
         with self._lock:

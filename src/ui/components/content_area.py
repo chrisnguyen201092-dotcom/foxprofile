@@ -323,6 +323,192 @@ def build_pages_bar(
     )
 
 
+def build_running_tabs_bar(
+    running_names: list[str],
+    loading_names: set[str],
+    active_tab: str | None,
+    single_stage_mode: bool,
+    floating_bar_enabled: bool,
+    on_select_tab: Callable[[str], None],
+    on_close_tab: Callable[[str], None],
+    on_toggle_single_stage: Callable[[], None],
+    on_toggle_floating_bar: Callable[[], None],
+) -> ft.Container | None:
+    """Horizontal active profile tab bar placed at the top of FoxProfile."""
+    if not running_names:
+        return None
+
+    eff_active = active_tab if active_tab in running_names else running_names[0]
+    tab_controls: list[ft.Control] = []
+
+    for idx, pname in enumerate(running_names):
+        is_active = pname == eff_active
+        is_loading = pname in loading_names
+        shortcut = f"Alt+{idx + 1}" if idx < 9 else ""
+        dot_color = (
+            COLORS["warning"]
+            if is_loading
+            else ("#FFFFFF" if is_active else COLORS["live"])
+        )
+        tab_bg = COLORS["live"] if is_active else COLORS["card_bg"]
+        tab_border = COLORS["live"] if is_active else COLORS["rule_strong"]
+        text_col = "#FFFFFF" if is_active else COLORS["text_main"]
+        sub_col = "#E2E8F0" if is_active else COLORS["text_dim"]
+
+        label_items: list[ft.Control] = [
+            ft.Container(
+                width=7,
+                height=7,
+                border_radius=4,
+                bgcolor=dot_color,
+            ),
+            ft.Text(
+                pname,
+                size=12.5,
+                font_family=FONT_SEMIBOLD if is_active else FONT_MEDIUM,
+                color=text_col,
+            ),
+        ]
+        if shortcut:
+            label_items.append(
+                ft.Text(
+                    f"({shortcut})",
+                    size=10.5,
+                    font_family=FONT_DATA,
+                    color=sub_col,
+                )
+            )
+
+        tab_controls.append(
+            ft.Container(
+                height=32,
+                border_radius=7,
+                bgcolor=tab_bg,
+                border=ft.Border.all(1, tab_border),
+                content=ft.Row(
+                    spacing=0,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            padding=ft.Padding.only(left=10, right=6, top=5, bottom=5),
+                            ink=True,
+                            tooltip=get_string("running_tabs_tooltip"),
+                            on_click=lambda _, n=pname: on_select_tab(n),
+                            content=ft.Row(
+                                spacing=6,
+                                tight=True,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=label_items,
+                            ),
+                        ),
+                        ft.Container(
+                            padding=ft.Padding.only(left=4, right=8, top=5, bottom=5),
+                            ink=True,
+                            tooltip=get_string("running_tab_close_tooltip", name=pname),
+                            on_click=lambda _, n=pname: on_close_tab(n),
+                            content=ft.Icon(
+                                ft.Icons.CLOSE_ROUNDED,
+                                size=13,
+                                color=sub_col,
+                            ),
+                        ),
+                    ],
+                ),
+            )
+        )
+
+    def _toggle_chip(
+        label: str,
+        active: bool,
+        tooltip: str,
+        on_click: Callable[[], None],
+    ) -> ft.Container:
+        return ft.Container(
+            height=30,
+            padding=ft.Padding.symmetric(horizontal=9, vertical=4),
+            border_radius=6,
+            bgcolor=COLORS["sidebar"] if active else COLORS["input_bg"],
+            border=ft.Border.all(
+                1,
+                COLORS["sidebar"] if active else COLORS["rule_strong"],
+            ),
+            ink=True,
+            tooltip=tooltip,
+            on_click=lambda _: on_click(),
+            content=ft.Text(
+                label,
+                size=11.5,
+                font_family=FONT_SEMIBOLD if active else FONT_MEDIUM,
+                color=COLORS["cover_ink"] if active else COLORS["text_sub"],
+            ),
+        )
+
+    return ft.Container(
+        padding=ft.Padding.only(bottom=10),
+        content=ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            border_radius=9,
+            bgcolor=COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["card_border"]),
+            content=ft.Row(
+                spacing=8,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Row(
+                        spacing=6,
+                        expand=True,
+                        scroll=ft.ScrollMode.AUTO,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                height=30,
+                                padding=ft.Padding.symmetric(horizontal=9, vertical=4),
+                                border_radius=6,
+                                bgcolor=COLORS["sidebar"],
+                                alignment=ft.Alignment(0, 0),
+                                content=ft.Text(
+                                    get_string("running_tabs_badge", count=len(running_names)),
+                                    size=11.5,
+                                    font_family=FONT_SEMIBOLD,
+                                    color=COLORS["cover_ink"],
+                                ),
+                            ),
+                            *tab_controls,
+                        ],
+                    ),
+                    ft.Row(
+                        spacing=6,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            _toggle_chip(
+                                get_string(
+                                    "single_stage_on" if single_stage_mode else "single_stage_off"
+                                ),
+                                single_stage_mode,
+                                get_string("single_stage_tooltip"),
+                                on_toggle_single_stage,
+                            ),
+                            _toggle_chip(
+                                get_string(
+                                    "floating_bar_on"
+                                    if floating_bar_enabled
+                                    else "floating_bar_off"
+                                ),
+                                floating_bar_enabled,
+                                get_string("floating_bar_tooltip"),
+                                on_toggle_floating_bar,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ),
+    )
+
+
 def build_content_area(
     subtitle: ft.Text,
     profile_list: ft.Column,
@@ -338,6 +524,7 @@ def build_content_area(
     check_proxy_btn: ft.Control | None = None,
     cooldown_btn: ft.Control | None = None,
     arrange_btn: ft.Control | None = None,
+    running_tabs_bar: ft.Control | None = None,
 ) -> ft.Container:
     """Main content: title, search, custom pages bar, then the profile sheet."""
     _ = (prev_btn, next_btn, page_label)
@@ -400,6 +587,7 @@ def build_content_area(
                     ],
                 ),
                 ft.Container(height=14),
+                *([] if running_tabs_bar is None else [running_tabs_bar]),
                 *([] if monitor_bar is None else [monitor_bar]),
                 *([] if pages_bar is None else [pages_bar, ft.Container(height=10)]),
                 sheet,

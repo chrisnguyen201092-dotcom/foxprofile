@@ -131,10 +131,39 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
         return []
 
 
+def _lock_window_size_win32(hwnd: int) -> None:
+    """Disable Win32 Maximize box and System Menu Size/Maximize without altering frame size."""
+    if sys.platform != "win32" or hwnd <= 0:
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        gwl_style = -16
+        ws_maximizebox = 0x00010000
+        sc_size = 0xF000
+        sc_maximize = 0xF030
+        mf_bycommand = 0x0000
+
+        get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        cur_style = int(get_long(wintypes.HWND(hwnd), gwl_style))
+        if cur_style & ws_maximizebox:
+            set_long(wintypes.HWND(hwnd), gwl_style, cur_style & ~ws_maximizebox)
+
+        hmenu = user32.GetSystemMenu(wintypes.HWND(hwnd), False)
+        if hmenu:
+            user32.DeleteMenu(hmenu, sc_maximize, mf_bycommand)
+            user32.DeleteMenu(hmenu, sc_size, mf_bycommand)
+
+
 def _raise_and_move_hwnd_win32(
     hwnd: int,
     x: int | None = None,
     y: int | None = None,
+    *,
+    lock_size: bool = True,
 ) -> None:
     """Bring `hwnd` in front of the Flet GUI window using SWP_NOSIZE (never alters viewport)."""
     import ctypes
@@ -152,6 +181,8 @@ def _raise_and_move_hwnd_win32(
 
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, sw_restore)
+    if lock_size:
+        _lock_window_size_win32(hwnd)
 
     fg_hwnd = user32.GetForegroundWindow()
     fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
@@ -190,6 +221,132 @@ def focus_browser_window(profile_name: str, root_pid: int | None = None) -> bool
     try:
         for hwnd in reversed(hwnds):
             _raise_and_move_hwnd_win32(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def switch_browser_window(
+    target_name: str,
+    profile_pids: list[tuple[str, int | None]],
+    *,
+    single_stage: bool = True,
+    top_margin: int = 42,
+) -> bool:
+    """Switch to `target_name`'s browser window in Single-Stage mode using SWP_NOSIZE.
+
+    When `single_stage=True`, centers `target_name`'s window in the desktop work area
+    (preserving its exact width and height via `SWP_NOSIZE`) and minimizes the windows
+    of all other running profiles so only one browser window is shown on screen.
+    """
+    if sys.platform != "win32":
+        return False
+    target_pid = next((pid for pname, pid in profile_pids if pname == target_name), None)
+    if not single_stage:
+        return focus_browser_window(target_name, target_pid)
+
+    target_hwnds = _find_profile_hwnds_win32(target_name, target_pid)
+    if not target_hwnds:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        spi_getworkarea = 0x0030
+        sw_restore = 9
+        sw_showminnoactive = 7
+        sw_forceminimize = 11
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        work = RECT()
+        if not user32.SystemParametersInfoW(spi_getworkarea, 0, ctypes.byref(work), 0):
+            work.left, work.top, work.right, work.bottom = 0, 0, 1920, 1040
+
+        stage_top = int(work.top) + max(0, int(top_margin))
+        work_w = max(800, int(work.right - work.left))
+        work_h = max(600, int(work.bottom) - stage_top)
+
+        target_set = set(target_hwnds)
+        # 1. Minimize all other running profile browser windows FIRST so windows never stack
+        for pname, pid in profile_pids:
+            if pname == target_name:
+                continue
+            for other_hwnd in _find_profile_hwnds_win32(pname, pid):
+                _lock_window_size_win32(other_hwnd)
+                if other_hwnd not in target_set and not user32.IsIconic(other_hwnd):
+                    user32.ShowWindowAsync(wintypes.HWND(other_hwnd), sw_showminnoactive)
+                    user32.ShowWindow(wintypes.HWND(other_hwnd), sw_forceminimize)
+
+        # 2. Restore, center (preserving exact SWP_NOSIZE viewport), and focus target window
+        for hwnd in reversed(target_hwnds):
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(wintypes.HWND(hwnd), sw_restore)
+            win_rect = RECT()
+            user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(win_rect))
+            win_w = max(400, int(win_rect.right - win_rect.left))
+            win_h = max(300, int(win_rect.bottom - win_rect.top))
+
+            x = int(work.left) + max(0, (work_w - win_w) // 2)
+            y = stage_top + max(0, (work_h - win_h) // 2)
+            max_x = max(int(work.left), int(work.right) - min(win_w, work_w))
+            max_y = max(stage_top, int(work.bottom) - min(win_h, work_h))
+            x = max(int(work.left), min(x, max_x))
+            y = max(stage_top, min(y, max_y))
+            _raise_and_move_hwnd_win32(hwnd, x=x, y=y)
+
+        return True
+    except Exception:
+        return False
+
+
+def focus_foxprofile_window(window_title: str = "FoxProfile") -> bool:
+    """Bring the main FoxProfile desktop window to the foreground using SWP_NOSIZE."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        pids = _child_pids_win32(os.getpid())
+        matches: list[int] = []
+
+        enum_windows_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+
+        def _callback(hwnd: int, _lparam: int) -> bool:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = (buf.value or "").strip()
+            if not title or title.startswith("["):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if title == window_title or (pid.value in pids and window_title.lower() in title.lower()):
+                matches.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(enum_windows_proc(_callback), 0)
+        if not matches:
+            return False
+        for hwnd in reversed(matches):
+            _raise_and_move_hwnd_win32(hwnd, lock_size=False)
         return True
     except Exception:
         return False

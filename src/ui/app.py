@@ -21,6 +21,7 @@ from ..models.profile import (
     schedule_sort_key,
 )
 from ..services.browser import fingerprint
+from ..services.browser.window_title import focus_foxprofile_window
 from ..services.monitor import (
     MonitorService,
     MonitorSnapshot,
@@ -37,7 +38,8 @@ from .components import (
     build_ui_refs,
     rebuild_bulk_bar,
 )
-from .components.content_area import build_monitor_bar
+from .components.content_area import build_monitor_bar, build_running_tabs_bar
+from .components.floating_tab_bar import FloatingProfileTabBar
 from .components.profile_card import build_header_row
 from .components.sidebar import build_filter_buttons
 from .dialogs import (
@@ -143,6 +145,7 @@ class App:
             init_pages[0] if getattr(self.pm, "all_page_index", 0) > 0 and init_pages else "__all__"
         )
         self._live_since: dict[str, str] = {}
+        self._staged_launches: set[str] = set()
         self._alerted_token_bursts: set[str] = set()
         self._mail_auto_scan_running: bool = False
         self.monitor: MonitorService = c.monitor_service
@@ -154,6 +157,13 @@ class App:
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
+        self._running_tabs_slot = ft.Container()
+        self._floating_tab_bar = FloatingProfileTabBar(
+            on_select_tab=self._on_select_browser_tab,
+            on_close_tab=self._on_close_browser_tab,
+            on_toggle_single_stage=self._on_toggle_single_stage,
+            on_focus_foxprofile=self._on_focus_foxprofile,
+        )
         self._trash_btn = ft.Container(
             width=34,
             height=34,
@@ -226,7 +236,15 @@ class App:
             return
         key = (e.key or "").strip().lower()
         ctrl = bool(e.ctrl) and not bool(e.alt) and not bool(e.meta)
+        alt_only = bool(e.alt) and not bool(e.ctrl) and not bool(e.meta)
         no_mod = not bool(e.ctrl) and not bool(e.alt) and not bool(e.meta)
+        digit = key.removeprefix("digit")
+        if alt_only and len(digit) == 1 and digit in "123456789":
+            idx = int(digit) - 1
+            running_ordered = self._ordered_running_names()
+            if 0 <= idx < len(running_ordered):
+                self._on_select_browser_tab(running_ordered[idx])
+            return
         if ctrl and key == "f":
             if (
                 self.refs is not None
@@ -257,6 +275,38 @@ class App:
                         self.refs.search_field.suffix.visible = False
                 self._refresh_profiles(reuse_snapshot=True)
 
+    def _ordered_running_names(self) -> list[str]:
+        running_set = self.bl.running_profile_names() | self.state.loading
+        if not running_set:
+            return []
+        ordered = [p.name for p in self.pm.list_profiles() if p.name in running_set]
+        seen = set(ordered)
+        for extra in sorted(running_set):
+            if extra not in seen:
+                ordered.append(extra)
+        return ordered
+
+    def _on_select_browser_tab(self, name: str) -> None:
+        self.h.on_focus_window(name)
+
+    def _on_close_browser_tab(self, name: str) -> None:
+        if self.bl.is_running(name):
+            self.h.on_launch(name)
+
+    def _on_toggle_single_stage(self) -> None:
+        self.state.single_stage_mode = not self.state.single_stage_mode
+        if self.state.single_stage_mode and self.state.active_browser_tab:
+            self.h.on_focus_window(self.state.active_browser_tab)
+        else:
+            self.state.schedule_refresh()
+
+    def _on_toggle_floating_bar(self) -> None:
+        self.state.floating_tab_bar = not self.state.floating_tab_bar
+        self.state.schedule_refresh()
+
+    def _on_focus_foxprofile(self) -> None:
+        focus_foxprofile_window(get_string("window_title"))
+
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
         assert self.page is not None
@@ -273,6 +323,7 @@ class App:
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
         self._monitor_bar_slot = ft.Container()
+        self._running_tabs_slot = ft.Container()
         self._trash_btn = ft.Container(
             width=34,
             height=34,
@@ -360,6 +411,7 @@ class App:
             pages_bar=self._pages_bar_slot,
             monitor_bar=self._monitor_bar_slot,
             arrange_btn=self._arrange_btn,
+            running_tabs_bar=self._running_tabs_slot,
         )
         return ft.Row(
             expand=True,
@@ -695,13 +747,40 @@ class App:
             self.state.toggle_selection(stale)
 
         running = self.bl.running_profile_names()
+        active_or_loading = running | self.state.loading
+        self._staged_launches.intersection_update(active_or_loading)
+        for name in active_or_loading - self._staged_launches:
+            self._staged_launches.add(name)
+            self.state.active_browser_tab = name
+            if hasattr(self.bl, "switch_profile") and "PYTEST_CURRENT_TEST" not in os.environ:
+
+                def _auto_stage_on_appear(target: str = name) -> None:
+                    for _ in range(90):
+                        if target not in self._staged_launches:
+                            return
+                        cur = self.state.active_browser_tab or target
+                        if self.bl.switch_profile(cur, single_stage=self.state.single_stage_mode):
+                            time.sleep(0.6)
+                            self.bl.switch_profile(
+                                self.state.active_browser_tab or cur,
+                                single_stage=self.state.single_stage_mode,
+                            )
+                            return
+                        time.sleep(0.3)
+
+                threading.Thread(target=_auto_stage_on_appear, daemon=True).start()
+
         # A failure mark lasts until the profile runs again or is gone.
         self.state.failed.intersection_update(all_names - running)
         ready_running = running - self.state.loading
-        for name in ready_running - set(self._live_since):
+        newly_ready = ready_running - set(self._live_since)
+        for name in newly_ready:
             self._live_since[name] = time.strftime("%H:%M")
             p_live = self.pm.profiles.get(name)
             self.monitor.record_started(name, p_live.proxy if p_live else None)
+            if hasattr(self.bl, "switch_profile"):
+                cur_tab = self.state.active_browser_tab or name
+                self.bl.switch_profile(cur_tab, single_stage=self.state.single_stage_mode)
         stopped_scheduled: list[str] = []
         for name in set(self._live_since) - running:
             del self._live_since[name]
@@ -722,6 +801,34 @@ class App:
         else:
             snap = self.monitor.snapshot(everything, running | self.state.loading)
             self._last_monitor_snap = snap
+        ordered_running = self._ordered_running_names()
+        if ordered_running:
+            if self.state.active_browser_tab not in ordered_running:
+                self.state.active_browser_tab = ordered_running[0]
+        else:
+            self.state.active_browser_tab = None
+
+        tabs_bar = build_running_tabs_bar(
+            ordered_running,
+            self.state.loading,
+            self.state.active_browser_tab,
+            self.state.single_stage_mode,
+            self.state.floating_tab_bar,
+            self._on_select_browser_tab,
+            self._on_close_browser_tab,
+            self._on_toggle_single_stage,
+            self._on_toggle_floating_bar,
+        )
+        self._running_tabs_slot.content = tabs_bar
+        self._running_tabs_slot.visible = tabs_bar is not None
+        self._floating_tab_bar.sync(
+            ordered_running,
+            self.state.loading,
+            self.state.active_browser_tab,
+            self.state.single_stage_mode,
+            self.state.floating_tab_bar,
+        )
+
         alert_bar = build_monitor_bar(
             snap,
             len(everything),
