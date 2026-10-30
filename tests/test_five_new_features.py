@@ -4759,6 +4759,32 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     p22 = get_avatar_path("#1  Monica", 22, avatars_dir=av_dir)
     assert p22 is not None and p22.endswith("_22.png")
     assert avatar_version("#1  Monica", avatars_dir=av_dir) > 0.0
+
+    # Verify Profile Row (build_profile_card) displays circular Muse Avatar when present
+    import flet as ft
+    import src.services.avatar_store as av_mod
+    from src.ui.components.profile_card import build_profile_card
+
+    orig_av_dir = av_mod.AVATARS_DIR
+    try:
+        av_mod.AVATARS_DIR = av_dir
+        prof_obj = isolated_pm.profiles["#1  Monica"]
+        card_ctrl = build_profile_card(
+            prof_obj,
+            False,
+            False,
+            lambda _n: None,
+            lambda _n: None,
+            lambda _n: None,
+            on_status_click=lambda _n: None,
+        )
+        name_cell = card_ctrl.content.controls[1]
+        lead_ring = name_cell.content.controls[0]
+        assert lead_ring.width == 36 and lead_ring.height == 36
+        assert isinstance(lead_ring.content.content, ft.Image)
+    finally:
+        av_mod.AVATARS_DIR = orig_av_dir
+
     assert remove_avatar("#1  Monica", avatars_dir=av_dir) is True
     assert get_avatar_path("#1  Monica", 22, avatars_dir=av_dir) is None
 

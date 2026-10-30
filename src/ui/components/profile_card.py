@@ -11,6 +11,7 @@ from ...models.profile import (
     format_date_dmy,
     resolve_status_display,
 )
+from ...services.avatar_store import get_avatar_path
 from ...services.monitor import ProfileMonitorInfo
 from ...utils.proxy_parser import mask_proxy
 from ...utils.totp import generate_totp
@@ -566,7 +567,43 @@ def build_profile_card(
 
     name_parts: list[ft.Control] = []
     dot_color = profile.color or (status_disp[1] if status_disp is not None else None)
-    if dot_color or on_status_click is not None:
+    avatar_path = get_avatar_path(profile.name, 64)
+    if avatar_path:
+        ring_color = dot_color or COLORS["rule_strong"]
+        name_parts.append(
+            ft.Container(
+                width=36,
+                height=36,
+                border_radius=18,
+                padding=1.5,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1.5, ring_color),
+                ink=on_status_click is not None,
+                tooltip=(
+                    get_string("tooltip_click_status")
+                    if on_status_click is not None
+                    else profile.name
+                ),
+                on_click=(
+                    (lambda _, n=profile.name: on_status_click(n))
+                    if on_status_click is not None
+                    else None
+                ),
+                content=ft.Container(
+                    width=33,
+                    height=33,
+                    border_radius=17,
+                    clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                    content=ft.Image(
+                        src=avatar_path,
+                        width=33,
+                        height=33,
+                        gapless_playback=True,
+                    ),
+                ),
+            )
+        )
+    elif dot_color or on_status_click is not None:
         name_parts.append(
             ft.Container(
                 width=10,
@@ -586,7 +623,7 @@ def build_profile_card(
     if name_parts:
         name_parts.append(ft.Container(expand=True, content=text_block))
         name_cell_content: ft.Control = ft.Row(
-            spacing=6,
+            spacing=8 if avatar_path else 6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             controls=name_parts,
         )
