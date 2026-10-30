@@ -418,19 +418,6 @@ class FloatingProfileTabBar:
                     )
                     pill.pack(side="top", fill="x", pady=1)  # type: ignore[attr-defined]
 
-                stage_label = get_string(
-                    "single_stage_on" if single_stage else "single_stage_off"
-                )
-                btn_stage = _make_action_pill(
-                    outer,
-                    stage_label,
-                    bg="#ECFDF5" if single_stage else "#F8FAFC",
-                    fg="#047857" if single_stage else "#64748B",
-                    border="#6EE7B7" if single_stage else "#CBD5E1",
-                    on_click=self._on_toggle_single_stage,
-                )
-                btn_stage.pack(side="top", fill="x", pady=(3, 1))  # type: ignore[attr-defined]
-
                 btn_home = _make_action_pill(
                     outer,
                     get_string("floating_bar_home_btn"),
@@ -439,7 +426,7 @@ class FloatingProfileTabBar:
                     border="#CBD5E1",
                     on_click=self._on_focus_foxprofile,
                 )
-                btn_home.pack(side="top", fill="x", pady=(1, 0))  # type: ignore[attr-defined]
+                btn_home.pack(side="top", fill="x", pady=(3, 0))  # type: ignore[attr-defined]
             else:
                 # Horizontal layout (top or bottom of screen -> expands horizontally)
                 logo_lbl = _make_logo(outer)
@@ -455,19 +442,6 @@ class FloatingProfileTabBar:
                     )
                     pill.pack(side="left", padx=2)  # type: ignore[attr-defined]
 
-                stage_label = get_string(
-                    "single_stage_on" if single_stage else "single_stage_off"
-                )
-                btn_stage = _make_action_pill(
-                    outer,
-                    stage_label,
-                    bg="#ECFDF5" if single_stage else "#F8FAFC",
-                    fg="#047857" if single_stage else "#64748B",
-                    border="#6EE7B7" if single_stage else "#CBD5E1",
-                    on_click=self._on_toggle_single_stage,
-                )
-                btn_stage.pack(side="left", padx=(5, 2))  # type: ignore[attr-defined]
-
                 btn_home = _make_action_pill(
                     outer,
                     get_string("floating_bar_home_btn"),
@@ -476,7 +450,7 @@ class FloatingProfileTabBar:
                     border="#CBD5E1",
                     on_click=self._on_focus_foxprofile,
                 )
-                btn_home.pack(side="left", padx=2)  # type: ignore[attr-defined]
+                btn_home.pack(side="left", padx=(5, 2))  # type: ignore[attr-defined]
 
                 fold_btn = _make_fold_btn(outer)
                 fold_btn.pack(side="left", padx=(2, 0))  # type: ignore[attr-defined]
