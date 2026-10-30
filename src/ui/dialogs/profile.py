@@ -1406,6 +1406,7 @@ def open_mail_credentials_dialog(
             _switch_tab("inbox", auto_fetch=False)
         em_addr = (email_field.value or "").strip()
         tok_str = (mail_token_field.value or "").strip()
+        pw_str = (password_field.value or "").strip()
         feedback_text.value = get_string("mail_reading_inbox")
         feedback_text.color = COLORS["accent"]
         feedback_text.visible = True
@@ -1413,7 +1414,13 @@ def open_mail_credentials_dialog(
         page.update()
 
         def _worker() -> None:
-            ok, otp_or_err, msgs = fetch_hotmail_messages(em_addr, tok_str, top=8, timeout=12)
+            ok, otp_or_err, msgs = fetch_hotmail_messages(
+                em_addr,
+                tok_str,
+                top=8,
+                timeout=12,
+                password=pw_str,
+            )
             refresh_inbox_btn.disabled = False
             if not ok:
                 feedback_text.value = otp_or_err

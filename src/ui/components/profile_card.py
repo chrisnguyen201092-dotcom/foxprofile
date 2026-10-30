@@ -988,13 +988,38 @@ def _geo_score_badge(
     f_score = getattr(monitor_info, "ip_fraud_score", None)
     ip_part = f" · IP Risk {f_score}/100" if f_score is not None and f_score >= 0 else ""
 
+    days_val = (
+        max(0, int(sess_days))
+        if sess_days is not None
+        else max(0, int(round(datr_d)))
+    )
+    text_val = f"{days_val}d"
+
+    # 3-stage expiry warning colors: <= 3d (Red urgent), <= 7d (1 week Orange), <= 14d (2 weeks Amber)
+    fg_col = COLORS["text_sub"]
+    bg_col = COLORS["input_bg"]
+    bd_col = COLORS["rule_strong"]
+    bd_width: float = 1.0
+    if not is_banned and sess_days is not None:
+        if sess_days <= 3:
+            fg_col = COLORS["error"]
+            bg_col = ft.Colors.with_opacity(0.16, COLORS["error"])
+            bd_col = COLORS["error"]
+            bd_width = 1.5
+        elif sess_days <= 7:
+            fg_col = "#EA580C"
+            bg_col = ft.Colors.with_opacity(0.14, "#EA580C")
+            bd_col = "#EA580C"
+            bd_width = 1.2
+        elif sess_days <= 14:
+            fg_col = "#B45309"
+            bg_col = ft.Colors.with_opacity(0.12, "#D97706")
+            bd_col = "#D97706"
+            bd_width = 1.0
+
     if is_banned:
-        col = COLORS["error"]
-        text_val = "✕ Ban"
-        tip = f"✕ Tài khoản đã bị khóa / Disconnected{ip_part}"
+        tip = f"Tài khoản đã bị khóa / Disconnected{ip_part}"
     elif tainted_codes:
-        col = "#D97706"
-        text_val = f"⚠️ {sess_days}d" if (sess_days is not None and sess_days >= 0) else "⚠️"
         reasons: list[str] = []
         if "burned_proxy" in tainted_codes:
             reasons.append("Trùng cổng Proxy từng có acc Ban")
@@ -1006,36 +1031,38 @@ def _geo_score_badge(
             reasons.append("Chung dải mạng /64 với acc Ban")
         reason_str = " + ".join(reasons)
         sess_tip = f" · Phiên Muse còn {sess_days}d" if (sess_days is not None and sess_days >= 0) else ""
-        tip = f"⚠️ Liên đới lịch sử ({reason_str}) — Cách ly, không gộp chung đội mở song song{sess_tip}{ip_part}"
+        tip = f"Liên đới lịch sử ({reason_str}) — Cách ly, không gộp chung đội mở song song{sess_tip}{ip_part}"
     elif sess_days is not None:
         if sess_days < 0:
-            col = COLORS["error"]
-            text_val = "✕ Hết hạn"
-            tip = f"✕ Phiên Muse (hatch_sess) đã hết hạn — Cần đăng nhập lại{ip_part}"
-        elif sess_days < 10:
-            col = "#B45309"
-            text_val = f"⏳ {sess_days}d"
+            tip = f"🚨 Phiên Muse (hatch_sess) đã hết hạn — Cần đăng nhập lại{ip_part}"
+        elif sess_days <= 3:
             tip = (
-                f"⏳ Phiên Muse (hatch_sess) còn {sess_days} ngày — "
-                f"Hãy mở muse.ai 1 lần để tự động trượt hạn thêm +30 ngày · datr {datr_d:.1f}d{ip_part}"
+                f"🚨 KHẨN CẤP (≤ 3 ngày): Phiên Muse chỉ còn {sess_days} ngày — "
+                f"Hãy mở muse.ai NGAY để trượt hạn +30 ngày (tránh phải login lại Meta)! · datr {datr_d:.1f}d{ip_part}"
+            )
+        elif sess_days <= 7:
+            tip = (
+                f"⚠️ CẢNH BÁO 1 TUẦN (≤ 7 ngày): Phiên Muse còn {sess_days} ngày — "
+                f"Hãy mở muse.ai sớm để tự động trượt hạn thêm +30 ngày · datr {datr_d:.1f}d{ip_part}"
+            )
+        elif sess_days <= 14:
+            tip = (
+                f"⏳ NHẮC NHỞ 2 TUẦN (≤ 14 ngày): Phiên Muse còn {sess_days} ngày — "
+                f"Nên xếp lịch mở muse.ai để trượt hạn lại +30 ngày · datr {datr_d:.1f}d{ip_part}"
             )
         else:
-            col = "#15803D"
-            text_val = f"✓ {sess_days}d"
             tip = (
-                f"✓ Sạch (Độc lập IP & Phôi) · Hạn phiên Muse (hatch_sess): còn {sess_days} ngày "
+                f"Sạch (Độc lập IP & Phôi) · Hạn phiên Muse (hatch_sess): còn {sess_days} ngày "
                 f"· datr {datr_d:.1f}d{ip_part}"
             )
     else:
-        col = "#15803D"
-        text_val = "✓ Sạch"
-        tip = f"✓ Sạch (Độc lập IP & Phôi) · datr {datr_d:.1f}d{ip_part}"
+        tip = f"Sạch (Độc lập IP & Phôi) · datr {datr_d:.1f}d{ip_part}"
 
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=5, vertical=1),
         border_radius=4,
-        bgcolor=ft.Colors.with_opacity(0.11, col),
-        border=ft.Border.all(1, ft.Colors.with_opacity(0.55, col)),
+        bgcolor=bg_col,
+        border=ft.Border.all(bd_width, bd_col),
         ink=on_click is not None,
         on_click=(lambda _: on_click()) if on_click is not None else None,
         tooltip=tip,
@@ -1043,8 +1070,8 @@ def _geo_score_badge(
             text_val,
             size=10,
             font_family=FONT_DATA,
-            weight=ft.FontWeight.W_700,
-            color=col,
+            weight=ft.FontWeight.W_700 if (sess_days is not None and sess_days <= 14) else ft.FontWeight.W_600,
+            color=fg_col,
             no_wrap=True,
         ),
     )

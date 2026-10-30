@@ -239,6 +239,10 @@ _BAN_KEYWORDS = frozenset(
         "disconnect",
         "disconnected",
         "disabled",
+        "archived",
+        "archive",
+        "lưu trữ",
+        "luu tru",
     }
 )
 _DAYS_RE = re.compile(r"^(\d{1,4})\s*(?:d|days?|ngay|ngày)?$", re.IGNORECASE)
@@ -324,6 +328,15 @@ def is_ban_page(page_name: str | None) -> bool:
 
 def has_ban_page(pages: list[str] | None) -> bool:
     return any(is_ban_page(pg) for pg in (pages or []))
+
+
+def is_archived_profile(p: object) -> bool:
+    """Return True if `p` is in the Archived/Disconnected section and should be hidden from 'All'."""
+    if is_ban_page(getattr(p, "group", None)):
+        return True
+    if has_ban_page(getattr(p, "pages", None)):
+        return True
+    return is_ban_status(getattr(p, "status", None))
 
 
 @dataclass

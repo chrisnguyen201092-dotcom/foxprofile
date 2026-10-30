@@ -17,6 +17,7 @@ FILTERS = (
     ("warnings", "filter_warnings"),
     ("direct", "filter_direct"),
     ("chrome", "filter_chrome"),
+    ("archived", "filter_archived"),
 )
 _ALWAYS_VISIBLE_FILTERS = {"all", "running", "ready_launch"}
 

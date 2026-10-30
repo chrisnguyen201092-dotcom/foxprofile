@@ -34,7 +34,11 @@ from ..models.profile import (
     is_ban_page,
     is_ban_status,
 )
-from ..utils.totp import split_mail_token
+from ..utils.totp import (
+    is_gmail_address,
+    normalize_gmail_app_password,
+    split_mail_token,
+)
 from .proxy.geo_check import classify_isp_type, compute_meta_ip_fraud_score
 
 PORT_COOLDOWN_MINUTES = 15
@@ -1452,6 +1456,8 @@ class MonitorService:
             tok = (getattr(p, "mail_token", None) or "").strip() or tok_lookup.get(
                 em.lower(), ""
             )
+            if not tok and is_gmail_address(em):
+                tok = normalize_gmail_app_password(getattr(p, "password", None))
             rt, _ = split_mail_token(tok)
             if not rt:
                 continue

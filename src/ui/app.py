@@ -13,6 +13,9 @@ from ..core.strings import current_language, get_string, set_language
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..models.profile import (
     compute_days_since,
+    is_archived_profile,
+    is_ban_page,
+    is_ban_status,
     natural_name_key,
     parse_schedule_tag,
     schedule_sort_key,
@@ -387,6 +390,8 @@ class App:
 
     def _on_select_custom_page(self, page_id: str) -> None:
         self.active_page = page_id
+        if self.filter == "archived":
+            self.filter = "all"
         self.state.current_page = 1
         self._refresh_profiles()
 
@@ -469,7 +474,19 @@ class App:
         if self.pm.reorder_profiles(full_order):
             self._refresh_profiles()
 
+    def _is_archive_view(self) -> bool:
+        if self.filter == "archived" or is_ban_page(self.active_page):
+            return True
+        if self.filter.startswith("group:") and is_ban_page(self.filter.removeprefix("group:")):
+            return True
+        return bool(
+            self.filter.startswith("status:")
+            and is_ban_status(self.filter.removeprefix("status:"))
+        )
+
     def _on_filter(self, fid: str) -> None:
+        if fid == "all" and is_ban_page(self.active_page):
+            self.active_page = "__all__"
         self.filter = fid
         self.state.current_page = 1
         self._refresh_profiles()
@@ -479,6 +496,7 @@ class App:
         cd_target = self.monitor.cooldown_minutes
         return {
             "all": lambda p: True,
+            "archived": is_archived_profile,
             "pinned": lambda p: bool(getattr(p, "pinned", False)),
             "running": lambda p: self.bl.is_running(p.name),
             "ready_launch": lambda p: bool(
@@ -515,35 +533,41 @@ class App:
 
     def _get_page_profiles(self) -> tuple[list, list, int]:
         all_profiles = self.pm.list_profiles()
-        if self.active_page != "__all__":
-            custom_pages = self.pm.list_custom_pages()
-            if not any(pg.casefold() == self.active_page.casefold() for pg in custom_pages):
-                self.active_page = "__all__"
-            else:
-                target_pg = self.active_page.casefold()
-                all_profiles = [
-                    p for p in all_profiles if any(pg.casefold() == target_pg for pg in p.pages)
-                ]
-        if self.filter.startswith("group:"):
-            target_group = self.filter.removeprefix("group:")
-            all_profiles = [p for p in all_profiles if p.group == target_group]
-        elif self.filter.startswith("status:"):
-            target_status = self.filter.removeprefix("status:").casefold()
-
-            def _matches_status(prof: object) -> bool:
-                raw_st = (getattr(prof, "status", None) or "").strip()
-                if raw_st.casefold() == target_status:
-                    return True
-                parsed_st = parse_schedule_tag(raw_st)
-                return parsed_st is not None and parsed_st[0].casefold() == target_status
-
-            if not any(_matches_status(p) for p in all_profiles):
-                self.filter = "all"
-            else:
-                all_profiles = [p for p in all_profiles if _matches_status(p)]
+        in_archive = self._is_archive_view()
+        if self.filter == "archived":
+            all_profiles = [p for p in all_profiles if is_archived_profile(p)]
         else:
-            test = self._filter_tests().get(self.filter, lambda p: True)
-            all_profiles = [p for p in all_profiles if test(p)]
+            if not in_archive:
+                all_profiles = [p for p in all_profiles if not is_archived_profile(p)]
+            if self.active_page != "__all__":
+                custom_pages = self.pm.list_custom_pages()
+                if not any(pg.casefold() == self.active_page.casefold() for pg in custom_pages):
+                    self.active_page = "__all__"
+                else:
+                    target_pg = self.active_page.casefold()
+                    all_profiles = [
+                        p for p in all_profiles if any(pg.casefold() == target_pg for pg in p.pages)
+                    ]
+            if self.filter.startswith("group:"):
+                target_group = self.filter.removeprefix("group:")
+                all_profiles = [p for p in all_profiles if p.group == target_group]
+            elif self.filter.startswith("status:"):
+                target_status = self.filter.removeprefix("status:").casefold()
+
+                def _matches_status(prof: object) -> bool:
+                    raw_st = (getattr(prof, "status", None) or "").strip()
+                    if raw_st.casefold() == target_status:
+                        return True
+                    parsed_st = parse_schedule_tag(raw_st)
+                    return parsed_st is not None and parsed_st[0].casefold() == target_status
+
+                if not any(_matches_status(p) for p in all_profiles):
+                    self.filter = "all"
+                else:
+                    all_profiles = [p for p in all_profiles if _matches_status(p)]
+            else:
+                test = self._filter_tests().get(self.filter, lambda p: True)
+                all_profiles = [p for p in all_profiles if test(p)]
         if q := self.state.search_query:
             ranked = [
                 (rank, p)
@@ -551,9 +575,14 @@ class App:
                 if (rank := _search_match_rank(p, q)) is not None
             ]
             if not ranked and (self.active_page != "__all__" or self.filter != "all"):
+                fallback_pool = [
+                    p
+                    for p in self.pm.list_profiles()
+                    if (is_archived_profile(p) if in_archive else not is_archived_profile(p))
+                ]
                 ranked = [
                     (rank, p)
-                    for p in self.pm.list_profiles()
+                    for p in fallback_pool
                     if (rank := _search_match_rank(p, q)) is not None
                 ]
             ranked.sort(key=lambda item: item[0])
@@ -721,6 +750,9 @@ class App:
             )
 
         all_profiles, page_profiles, total_pages = self._get_page_profiles()
+        in_archive = self._is_archive_view()
+        active_everything = [p for p in everything if not is_archived_profile(p)]
+        archived_everything = [p for p in everything if is_archived_profile(p)]
 
         custom_pages = self.pm.list_custom_pages()
         page_counts = [
@@ -734,9 +766,10 @@ class App:
             )
             for pg in custom_pages
         ]
+        effective_active_page = "__archived__" if in_archive else self.active_page
         self._pages_bar_slot.content = build_pages_bar(
-            self.active_page,
-            len(everything),
+            effective_active_page,
+            len(active_everything),
             page_counts,
             self._on_select_custom_page,
             self._on_add_custom_page,
@@ -746,9 +779,10 @@ class App:
         )
 
         tests = self._filter_tests()
+        sidebar_pool = archived_everything if in_archive else active_everything
         group_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
-        for p in everything:
+        for p in sidebar_pool:
             if p.group:
                 group_counts[p.group] = group_counts.get(p.group, 0) + 1
             if p.status:
@@ -759,9 +793,21 @@ class App:
         status_counts = dict(
             sorted(status_counts.items(), key=lambda kv: (schedule_sort_key(kv[0]), kv[0].casefold()))
         )
+        filter_counts = {
+            fid: (
+                len(archived_everything)
+                if fid == "archived"
+                else (
+                    len(active_everything)
+                    if fid == "all"
+                    else sum(1 for p in sidebar_pool if test(p))
+                )
+            )
+            for fid, test in tests.items()
+        }
         self._filter_column.controls = build_filter_buttons(
-            self.filter,
-            {fid: sum(1 for p in everything if test(p)) for fid, test in tests.items()},
+            "archived" if in_archive and self.filter == "all" else self.filter,
+            filter_counts,
             self._on_filter,
             group_counts=group_counts,
             status_counts=status_counts,

@@ -4424,6 +4424,201 @@ def test_hatch_sess_30d_expiry_and_historical_taint_audit(tmp_path):
     assert snap2.profiles["Clean7d"].proxy_port_changed is True
 
 
+def test_archived_section_hides_disconnected_from_all(isolated_pm, tmp_path):
+    from src.core.container import Container
+    from src.core.events import EventBus
+    from src.ui.app import App
+
+    isolated_pm.save_custom_page("Live", [])
+    isolated_pm.save_custom_page("Disconnected", [])
+    isolated_pm.add_profile("Active1", "http://1.2.3.4:8001", "windows", pages=["Live"])
+    isolated_pm.add_profile("Active2", "http://1.2.3.4:8002", "windows", pages=["Live"])
+    isolated_pm.add_profile(
+        "Dead1",
+        "http://1.2.3.4:8003",
+        "windows",
+        group="Disconnected",
+        pages=["Disconnected"],
+    )
+
+    class FakeBL:
+        def is_running(self, name):
+            return False
+
+        def running_profile_names(self):
+            return set()
+
+        def running_count(self):
+            return 0
+
+    class FakePS:
+        def check_proxy_sync(self, proxy_str, timeout=10):
+            return True, "IP: 8.8.8.8 (US)"
+
+    c = Container()
+    c._instances["pm"] = isolated_pm
+    c._instances["bl"] = FakeBL()
+    c._instances["ps"] = FakePS()
+    c._instances["eb"] = EventBus()
+    app = App(c)
+
+    # 1. 'All' (__all__) only shows active profiles, hiding Disconnected/Archived
+    app.active_page = "__all__"
+    app.filter = "all"
+    all_p, _, _ = app._get_page_profiles()
+    assert [p.name for p in all_p] == ["Active1", "Active2"]
+
+    # 2. Selecting 'archived' filter or 'Disconnected' page shows only the archived profile
+    app.filter = "archived"
+    arch_p, _, _ = app._get_page_profiles()
+    assert [p.name for p in arch_p] == ["Dead1"]
+
+    app.filter = "all"
+    app.active_page = "Disconnected"
+    page_arch_p, _, _ = app._get_page_profiles()
+    assert [p.name for p in page_arch_p] == ["Dead1"]
+
+
+def test_gmail_app_password_parsing_and_imap_fetch(tmp_path, monkeypatch):
+    import imaplib
+
+    from src.utils.totp import (
+        fetch_hotmail_messages,
+        is_gmail_address,
+        normalize_gmail_app_password,
+        parse_mail_credentials_line,
+    )
+
+    assert is_gmail_address("monica@gmail.com") is True
+    assert is_gmail_address("user@hotmail.com") is False
+    assert normalize_gmail_app_password("abcd efgh ijkl mnop") == "abcdefghijklmnop"
+    assert normalize_gmail_app_password("abcdefghijklmnop") == "abcdefghijklmnop"
+
+    # Quick-paste with spaced 16-char Google App Password puts it in mail_token (not two_fa)
+    parsed = parse_mail_credentials_line("monica@gmail.com|MainPass123|abcd efgh ijkl mnop|rec@gmail.com")
+    assert parsed["email"] == "monica@gmail.com"
+    assert parsed["password"] == "MainPass123"
+    assert parsed["mail_token"] == "abcdefghijklmnop"
+    assert parsed["two_fa"] == ""
+    assert parsed["recovery_email"] == "rec@gmail.com"
+
+    # Fake IMAP4_SSL for Gmail
+    class FakeGmailIMAP:
+        def __init__(self, host, port, timeout=12):
+            assert host == "imap.gmail.com"
+            assert port == 993
+            self.logged_in = None
+
+        def login(self, user, pw):
+            self.logged_in = (user, pw)
+            return "OK", [b"Logged in"]
+
+        def select(self, folder, readonly=True):
+            assert readonly is True
+            if folder == "INBOX":
+                return "OK", [b"1"]
+            return "NO", []
+
+        def search(self, charset, criterion):
+            return "OK", [b"1"]
+
+        def fetch(self, mid, parts):
+            raw_msg = (
+                b"Subject: Action needed on your Meta Account\r\n"
+                b"From: Meta <security@facebookmail.com>\r\n"
+                b"Date: Wed, 28 Oct 2026 13:51:00 +0000\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                b"Your verification code is 739104. Confirm you're human."
+            )
+            return "OK", [(b"1 (RFC822 {200})", raw_msg)]
+
+        def logout(self):
+            return "BYE", []
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", FakeGmailIMAP)
+    ok, otp, msgs = fetch_hotmail_messages("monica@gmail.com", "abcd efgh ijkl mnop")
+    assert ok is True
+    assert otp == "739104"
+    assert len(msgs) == 1
+    assert "Action needed" in msgs[0]["subject"]
+
+
+def test_session_expiry_warning_colors_at_14d_7d_3d():
+    from src.services.monitor import ProfileMonitorInfo
+    from src.ui.components.profile_card import _geo_score_badge
+    from src.ui.dialogs.batch_and_backup import _build_trust_score_chip
+    from src.ui.theme import COLORS
+
+    # 1. > 14 days (e.g. 26d): neutral badge on profile card, green chip in monitor
+    info_26 = ProfileMonitorInfo(
+        name="P26",
+        has_muse_auth=True,
+        has_proxy=True,
+        has_geo_pin=True,
+        sess_exp_days=26,
+    )
+    badge_26 = _geo_score_badge(info_26)
+    assert badge_26 is not None
+    assert badge_26.content.value == "26d"
+    assert badge_26.content.color == COLORS["text_sub"]
+
+    chip_26 = _build_trust_score_chip(info_26)
+    assert chip_26.content.value == "✓ 26d"
+    assert chip_26.content.color == "#15803D"
+
+    # 2. <= 14 days (2 weeks, e.g. 14d): Amber warning (#B45309)
+    info_14 = ProfileMonitorInfo(
+        name="P14",
+        has_muse_auth=True,
+        has_proxy=True,
+        has_geo_pin=True,
+        sess_exp_days=14,
+    )
+    badge_14 = _geo_score_badge(info_14)
+    assert badge_14 is not None
+    assert badge_14.content.value == "14d"
+    assert badge_14.content.color == "#B45309"
+
+    chip_14 = _build_trust_score_chip(info_14)
+    assert chip_14.content.value == "⏳ 14d"
+    assert chip_14.content.color == "#B45309"
+
+    # 3. <= 7 days (1 week, e.g. 7d): Deep Orange warning (#EA580C)
+    info_7 = ProfileMonitorInfo(
+        name="P7",
+        has_muse_auth=True,
+        has_proxy=True,
+        has_geo_pin=True,
+        sess_exp_days=7,
+    )
+    badge_7 = _geo_score_badge(info_7)
+    assert badge_7 is not None
+    assert badge_7.content.value == "7d"
+    assert badge_7.content.color == "#EA580C"
+
+    chip_7 = _build_trust_score_chip(info_7)
+    assert chip_7.content.value == "⚠️ 7d"
+    assert chip_7.content.color == "#EA580C"
+
+    # 4. <= 3 days (3 days, e.g. 3d): Urgent Red alert (COLORS["error"])
+    info_3 = ProfileMonitorInfo(
+        name="P3",
+        has_muse_auth=True,
+        has_proxy=True,
+        has_geo_pin=True,
+        sess_exp_days=3,
+    )
+    badge_3 = _geo_score_badge(info_3)
+    assert badge_3 is not None
+    assert badge_3.content.value == "3d"
+    assert badge_3.content.color == COLORS["error"]
+
+    chip_3 = _build_trust_score_chip(info_3)
+    assert chip_3.content.value == "🚨 3d"
+    assert chip_3.content.color == COLORS["error"]
+
+
+
 
 
 

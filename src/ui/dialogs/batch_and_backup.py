@@ -38,6 +38,8 @@ from ...utils.proxy_parser import mask_proxy
 from ...utils.totp import (
     detect_meta_checkpoint_mail,
     fetch_hotmail_messages,
+    is_gmail_address,
+    normalize_gmail_app_password,
     parse_mail_credentials_line,
     run_safe_mail_checkpoint_scan,
 )
@@ -1760,6 +1762,13 @@ def open_mail_pool_dialog(
 
         threading.Thread(target=_seq_worker, daemon=True).start()
 
+    def _resolve_prof_token(p: Profile, tok_map: dict[str, str]) -> str:
+        em = (p.email or "").strip()
+        tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
+        if not tok and is_gmail_address(em):
+            tok = normalize_gmail_app_password(getattr(p, "password", None))
+        return tok
+
     def _scan_live_only(_: ft.ControlEvent) -> None:
         tok_map = _pool_token_map()
         profiles = get_profiles()
@@ -1773,7 +1782,7 @@ def open_mail_pool_dialog(
             em = (p.email or "").strip()
             if not em:
                 continue
-            tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
+            tok = _resolve_prof_token(p, tok_map)
             if tok:
                 targets.append((p.name, em, tok))
         _run_sequential_targets(targets, update_ts=True)
@@ -1786,6 +1795,8 @@ def open_mail_pool_dialog(
             parsed = parse_mail_credentials_line(sp)
             em = (parsed.get("email") or "").strip()
             tok = (parsed.get("mail_token") or "").strip()
+            if not tok and is_gmail_address(em):
+                tok = normalize_gmail_app_password(parsed.get("password"))
             if em and tok and em.lower() not in seen:
                 seen.add(em.lower())
                 targets.append((f"Kho:{em[:12]}", em, tok))
@@ -1799,7 +1810,7 @@ def open_mail_pool_dialog(
             em = (p.email or "").strip()
             if not em or em.lower() in seen:
                 continue
-            tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
+            tok = _resolve_prof_token(p, tok_map)
             if tok:
                 seen.add(em.lower())
                 targets.append((p.name, em, tok))
@@ -1820,8 +1831,7 @@ def open_mail_pool_dialog(
         oauth_live_count = sum(
             1
             for p in assigned_profiles
-            if (getattr(p, "mail_token", None) or "").strip()
-            or tok_map.get((p.email or "").strip().lower(), "")
+            if _resolve_prof_token(p, tok_map)
         )
 
         if get_checkpoint_hits is not None and not scan_running[0]:
@@ -2278,18 +2288,22 @@ def open_mail_pool_dialog(
         )
         for prof in sorted_assigned:
             em_val = (prof.email or "").strip()
-            tok_val = (getattr(prof, "mail_token", None) or "").strip() or tok_map.get(
-                em_val.lower(), ""
+            tok_val = _resolve_prof_token(prof, tok_map) or (
+                (getattr(prof, "password", None) or "").strip()
+                if is_gmail_address(em_val)
+                else ""
             )
+            has_verified_tok = bool(_resolve_prof_token(prof, tok_map))
             is_rep = replacing_prof[0] == prof.name
             prof_st_pair = mail_status.get(em_val.lower())
             if prof_st_pair is None and prof.name in active_cp_hits:
                 cp_sub = active_cp_hits[prof.name].get("subject", "")[:42]
                 prof_st_pair = ("error", f"🚨 DÍNH CHECKPOINT META: {cp_sub}")
             prof_st_controls: list[ft.Control] = []
-            if tok_val:
+            if has_verified_tok:
+                tok_badge_lbl = "AppPass ✓" if is_gmail_address(em_val) else "OAuth2 ✓"
                 prof_st_controls.append(
-                    ft.Text("OAuth2 ✓", size=11, font_family=FONT_DATA, color=COLORS["text_sub"])
+                    ft.Text(tok_badge_lbl, size=11, font_family=FONT_DATA, color=COLORS["text_sub"])
                 )
             if prof_st_pair is not None:
                 p_kind, p_msg = prof_st_pair
@@ -2636,7 +2650,12 @@ def _build_trust_score_chip(
         label = "✕ Ban"
         clean_desc = "✕ Đã bị khóa / Disconnected"
     elif is_tainted:
-        col = "#D97706"
+        if info.sess_exp_days is not None and info.sess_exp_days <= 3:
+            col = COLORS["error"]
+        elif info.sess_exp_days is not None and info.sess_exp_days <= 7:
+            col = "#EA580C"
+        else:
+            col = "#D97706"
         label = (
             f"⚠️ {info.sess_exp_days}d"
             if (info.sess_exp_days is not None and info.sess_exp_days >= 0)
@@ -2647,7 +2666,13 @@ def _build_trust_score_chip(
         if info.sess_exp_days < 0:
             col = COLORS["error"]
             label = "✕ Hết hạn"
-        elif info.sess_exp_days < 10:
+        elif info.sess_exp_days <= 3:
+            col = COLORS["error"]
+            label = f"🚨 {info.sess_exp_days}d"
+        elif info.sess_exp_days <= 7:
+            col = "#EA580C"
+            label = f"⚠️ {info.sess_exp_days}d"
+        elif info.sess_exp_days <= 14:
             col = "#B45309"
             label = f"⏳ {info.sess_exp_days}d"
         else:
@@ -3962,6 +3987,7 @@ def open_trust_monitor_dialog(
             if not i.is_banned and any(c in i.audit_codes for c in taint_codes)
         )
         c_banned = sum(1 for _, i in infos if i.is_banned)
+        c_active = len(infos) - c_banned
 
         fixable_audit = any(
             f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
@@ -3970,7 +3996,7 @@ def open_trust_monitor_dialog(
         left_toolbar: list[ft.Control] = [
             _seg_btn(
                 "scores",
-                f"Độ Sạch & Hạn Phiên ({len(profiles)})",
+                f"Độ Sạch & Hạn Phiên ({c_active})",
                 ft.Icons.VERIFIED_USER_OUTLINED,
             ),
             _seg_btn(
@@ -3989,11 +4015,11 @@ def open_trust_monitor_dialog(
                         bgcolor=COLORS["rule_strong"],
                         margin=ft.Margin.symmetric(horizontal=2),
                     ),
-                    _fchip("all", get_string("trust_filter_all", count=len(infos))),
+                    _fchip("all", get_string("trust_filter_all", count=c_active)),
                     _fchip("clean", f"✓ Sạch & An toàn ({c_clean})"),
                     _fchip("expiring", f"⏳ Hạn phiên <15d ({c_expiring})"),
                     _fchip("tainted", f"⚠️ Liên đới lịch sử ({c_tainted})"),
-                    _fchip("banned", f"✕ Đã khóa ({c_banned})"),
+                    _fchip("banned", f"📦 Archived ({c_banned})"),
                 ]
             )
 
@@ -4136,7 +4162,9 @@ def open_trust_monitor_dialog(
         )
 
         flt = active_filter[0]
-        if flt == "clean":
+        if flt == "all":
+            infos = [(p, i) for p, i in infos if not i.is_banned]
+        elif flt == "clean":
             infos = [
                 (p, i)
                 for p, i in infos

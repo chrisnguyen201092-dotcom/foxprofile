@@ -281,7 +281,12 @@ def build_pages_bar(
             ),
         )
 
-    custom_tabs = [_tab(pg, pg, cnt, editable=True) for pg, cnt in page_counts]
+    normal_pages = [
+        (pg, cnt)
+        for pg, cnt in page_counts
+        if pg.strip().casefold() not in ("disconnected", "archived", "archive", "lưu trữ")
+    ]
+    custom_tabs = [_tab(pg, pg, cnt, editable=True) for pg, cnt in normal_pages]
     idx = max(0, min(all_tab_index, len(custom_tabs)))
     custom_tabs.insert(idx, _tab("__all__", get_string("page_all"), total_count, editable=False))
     tabs: list[ft.Control] = [

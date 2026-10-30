@@ -50,6 +50,13 @@ _NO_OTP_SUBJECT_HINTS = (
     "new app(s) connected",
     "security info was added",
     "welcome to your new outlook.com",
+    "security alert",
+    "cảnh báo bảo mật",
+    "2-step verification turned on",
+    "đã bật xác minh 2 bước",
+    "app password created",
+    "did you just remove your email",
+    "có phải bạn vừa gỡ địa chỉ email",
 )
 
 
@@ -128,13 +135,44 @@ def generate_totp(
     return f"{code_int:0{digits}d}", rem
 
 
+_GMAIL_DOMAINS = ("@gmail.com", "@googlemail.com")
+_GMAIL_SPACED_APP_PW_RE = re.compile(r"^[a-zA-Z]{4}(?:\s+[a-zA-Z]{4}){3}$")
+
+
+def is_gmail_address(email_addr: str | None) -> bool:
+    """Return True if `email_addr` is a Gmail / Googlemail address."""
+    em = (email_addr or "").strip().lower()
+    return bool(em and em.endswith(_GMAIL_DOMAINS))
+
+
+def normalize_gmail_app_password(raw: str | None) -> str:
+    """Normalize a 16-letter Google App Password (`xxxx xxxx xxxx xxxx` -> `xxxxxxxxxxxxxxxx`), or `""`."""
+    s = (raw or "").strip()
+    if not s or "@" in s or "|" in s or s.lower().startswith("otpauth://"):
+        return ""
+    if _GMAIL_SPACED_APP_PW_RE.match(s):
+        return re.sub(r"\s+", "", s)
+    if " " not in s and len(s) == 16 and s.isalpha():
+        return s
+    return ""
+
+
+def _looks_like_gmail_app_password(token: str, email_addr: str = "") -> bool:
+    s = (token or "").strip()
+    if not s:
+        return False
+    if _GMAIL_SPACED_APP_PW_RE.match(s):
+        return True
+    return bool(is_gmail_address(email_addr) and len(s) == 16 and s.isalpha() and s.islower())
+
+
 def _looks_like_totp_token(token: str) -> bool:
     s = (token or "").strip()
     if not s:
         return False
     if s.lower().startswith("otpauth://"):
         return bool(normalize_totp_secret(s))
-    if _UUID_RE.match(s):
+    if _UUID_RE.match(s) or _GMAIL_SPACED_APP_PW_RE.match(s):
         return False
     compact = _BASE32_CLEAN_RE.sub("", s).rstrip("=")
     if len(compact) < 12 or len(compact) > 64 or "@" in s:
@@ -245,6 +283,8 @@ def parse_mail_credentials_line(raw: str | None) -> dict[str, str]:
             out["client_id"] = tok
         elif _looks_like_oauth_refresh_token(tok) and not out["refresh_token"]:
             out["refresh_token"] = tok
+        elif _looks_like_gmail_app_password(tok, out["email"]) and not out["refresh_token"]:
+            out["refresh_token"] = normalize_gmail_app_password(tok)
         elif _looks_like_totp_token(tok) and not out["two_fa"]:
             out["two_fa"] = normalize_totp_secret(tok)
         elif len(tok) <= 64 and " " not in tok:
@@ -414,6 +454,10 @@ _PERMANENT_TOKEN_ERRORS = (
     "interaction_required",
     "account has been locked",
     "chưa có refresh token",
+    "chưa có mật khẩu ứng dụng",
+    "application-specific password",
+    "invalid credentials",
+    "authenticationfailed",
 )
 
 
@@ -567,6 +611,45 @@ def _fetch_via_graph_api(
     return messages
 
 
+def _parse_rfc822_bytes(raw_bytes: bytes) -> dict[str, str]:
+    msg = message_from_bytes(raw_bytes)
+    subj = _decode_mime_header(msg.get("Subject"))
+    sender = _decode_mime_header(msg.get("From"))
+    date_str = _decode_mime_header(msg.get("Date"))[:22]
+    body_parts: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype in ("text/plain", "text/html"):
+                payload_b = part.get_payload(decode=True)
+                if isinstance(payload_b, bytes):
+                    body_parts.append(
+                        payload_b.decode(
+                            part.get_content_charset() or "utf-8",
+                            errors="replace",
+                        )
+                    )
+    else:
+        payload_b = msg.get_payload(decode=True)
+        if isinstance(payload_b, bytes):
+            body_parts.append(
+                payload_b.decode(
+                    msg.get_content_charset() or "utf-8",
+                    errors="replace",
+                )
+            )
+    joined_body = "\n".join(body_parts)
+    clean_prev = _strip_html_to_text(joined_body)[:220]
+    otp = extract_otp_from_text(subj, joined_body)
+    return {
+        "subject": subj or "(Không tiêu đề)",
+        "sender": sender,
+        "time": date_str,
+        "preview": clean_prev,
+        "otp": otp,
+    }
+
+
 def _fetch_via_imap_xoauth2(
     email_addr: str,
     access_token: str,
@@ -603,44 +686,7 @@ def _fetch_via_imap_xoauth2(
                     )
                     if not raw_bytes:
                         continue
-                    msg = message_from_bytes(raw_bytes)
-                    subj = _decode_mime_header(msg.get("Subject"))
-                    sender = _decode_mime_header(msg.get("From"))
-                    date_str = _decode_mime_header(msg.get("Date"))[:22]
-                    body_parts: list[str] = []
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            ctype = part.get_content_type()
-                            if ctype in ("text/plain", "text/html"):
-                                payload_b = part.get_payload(decode=True)
-                                if isinstance(payload_b, bytes):
-                                    body_parts.append(
-                                        payload_b.decode(
-                                            part.get_content_charset() or "utf-8",
-                                            errors="replace",
-                                        )
-                                    )
-                    else:
-                        payload_b = msg.get_payload(decode=True)
-                        if isinstance(payload_b, bytes):
-                            body_parts.append(
-                                payload_b.decode(
-                                    msg.get_content_charset() or "utf-8",
-                                    errors="replace",
-                                )
-                            )
-                    joined_body = "\n".join(body_parts)
-                    clean_prev = _strip_html_to_text(joined_body)[:220]
-                    otp = extract_otp_from_text(subj, joined_body)
-                    messages.append(
-                        {
-                            "subject": subj or "(Không tiêu đề)",
-                            "sender": sender,
-                            "time": date_str,
-                            "preview": clean_prev,
-                            "otp": otp,
-                        }
-                    )
+                    messages.append(_parse_rfc822_bytes(raw_bytes))
                     if len(messages) >= top:
                         break
         finally:
@@ -651,13 +697,78 @@ def _fetch_via_imap_xoauth2(
     return messages
 
 
+def _fetch_via_gmail_imap(
+    email_addr: str,
+    app_password: str,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest Gmail messages via `imap.gmail.com:993` using a 16-character Google App Password."""
+    clean_em = (email_addr or "").strip()
+    clean_pw = re.sub(r"\s+", "", (app_password or "").strip())
+    if not clean_em or not clean_pw:
+        return False, "Chưa có Mật khẩu ứng dụng (App Password 16 ký tự) cho Gmail", []
+    messages: list[dict[str, str]] = []
+    try:
+        imap = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=timeout)
+        try:
+            imap.login(clean_em, clean_pw)
+            for folder in ("INBOX", '"[Gmail]/Spam"'):
+                typ, _ = imap.select(folder, readonly=True)
+                if typ != "OK":
+                    continue
+                typ, data = imap.search(None, "ALL")
+                if typ != "OK" or not data or not data[0]:
+                    continue
+                msg_ids = data[0].split()[-top:]
+                for mid in reversed(msg_ids):
+                    t_fetch, msg_data = imap.fetch(mid, "(RFC822)")
+                    if t_fetch != "OK" or not msg_data:
+                        continue
+                    raw_bytes = next(
+                        (
+                            part[1]
+                            for part in msg_data
+                            if isinstance(part, tuple) and isinstance(part[1], bytes)
+                        ),
+                        b"",
+                    )
+                    if not raw_bytes:
+                        continue
+                    messages.append(_parse_rfc822_bytes(raw_bytes))
+                    if len(messages) >= top:
+                        break
+                if len(messages) >= top:
+                    break
+        finally:
+            with contextlib.suppress(Exception):
+                imap.logout()
+    except imaplib.IMAP4.error as e:
+        err_str = str(e).strip()[:160]
+        return False, f"Lỗi xác thực App Password Gmail: {err_str}", []
+    except Exception as e:
+        return False, f"Lỗi kết nối IMAP Gmail: {str(e)[:140]}", []
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
 def fetch_hotmail_messages(
     email_addr: str | None,
     mail_token: str | None,
     top: int = 8,
     timeout: int = 12,
+    *,
+    password: str | None = None,
 ) -> tuple[bool, str, list[dict[str, str]]]:
-    """Read latest emails and extract OTP codes directly via Microsoft OAuth2 (Graph API + IMAP)."""
+    """Read latest emails and extract OTP codes via Microsoft OAuth2 (Hotmail) or Google App Password (Gmail)."""
+    clean_em = (email_addr or "").strip()
+    if is_gmail_address(clean_em):
+        app_pw = (mail_token or "").strip() or (password or "").strip()
+        if "|" in app_pw:
+            app_pw = app_pw.split("|", 1)[0].strip()
+        return _fetch_via_gmail_imap(clean_em, app_pw, top=top, timeout=timeout)
+
     rt, cid = split_mail_token(mail_token)
     if not rt:
         return False, "Chưa có Refresh Token OAuth2", []
@@ -669,7 +780,7 @@ def fetch_hotmail_messages(
     msgs = _fetch_via_graph_api(access_token, top=top, timeout=timeout)
     if msgs is None:
         msgs = _fetch_via_imap_xoauth2(
-            (email_addr or "").strip(),
+            clean_em,
             access_token,
             top=top,
             timeout=timeout,

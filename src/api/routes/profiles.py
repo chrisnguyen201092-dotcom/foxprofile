@@ -460,6 +460,7 @@ def fetch_profile_mail_otp(
         getattr(profile, "email", None),
         getattr(profile, "mail_token", None),
         top=top,
+        password=getattr(profile, "password", None),
     )
     if not ok:
         return {
