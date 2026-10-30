@@ -131,8 +131,11 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
         return []
 
 
+_locked_hwnd_sizes: dict[int, tuple[int, int]] = {}
+
+
 def _lock_window_size_win32(hwnd: int) -> None:
-    """Disable Win32 Maximize box and System Menu Size/Maximize without altering frame size."""
+    """Disable Win32 Maximize box, System Menu Size/Maximize, and enforce initial window size."""
     if sys.platform != "win32" or hwnd <= 0:
         return
     with contextlib.suppress(Exception):
@@ -145,9 +148,21 @@ def _lock_window_size_win32(hwnd: int) -> None:
         sc_size = 0xF000
         sc_maximize = 0xF030
         mf_bycommand = 0x0000
+        sw_restore = 9
+        swp_nomove = 0x0002
+        swp_nozorder = 0x0004
+        swp_noactivate = 0x0010
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
 
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-        set_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
         cur_style = int(get_long(wintypes.HWND(hwnd), gwl_style))
         if cur_style & ws_maximizebox:
             set_long(wintypes.HWND(hwnd), gwl_style, cur_style & ~ws_maximizebox)
@@ -156,6 +171,30 @@ def _lock_window_size_win32(hwnd: int) -> None:
         if hmenu:
             user32.DeleteMenu(hmenu, sc_maximize, mf_bycommand)
             user32.DeleteMenu(hmenu, sc_size, mf_bycommand)
+
+        if user32.IsIconic(wintypes.HWND(hwnd)):
+            return
+        if user32.IsZoomed(wintypes.HWND(hwnd)):
+            user32.ShowWindow(wintypes.HWND(hwnd), sw_restore)
+
+        rect = RECT()
+        if user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if w >= 300 and h >= 200:
+                locked = _locked_hwnd_sizes.get(int(hwnd))
+                if locked is None:
+                    _locked_hwnd_sizes[int(hwnd)] = (w, h)
+                elif (w, h) != locked:
+                    user32.SetWindowPos(
+                        wintypes.HWND(hwnd),
+                        wintypes.HWND(0),
+                        0,
+                        0,
+                        locked[0],
+                        locked[1],
+                        swp_nomove | swp_nozorder | swp_noactivate,
+                    )
 
 
 def _raise_and_move_hwnd_win32(
@@ -509,6 +548,7 @@ def _prefix_child_windows_win32(root_pid: int, prefix: str) -> None:
             title = buf.value
             if title and not title.startswith(prefix):
                 user32.SetWindowTextW(hwnd, f"{prefix}{title}")
+            _lock_window_size_win32(int(hwnd))
             return True
 
         user32.EnumWindows(enum_windows_proc(_callback), 0)
