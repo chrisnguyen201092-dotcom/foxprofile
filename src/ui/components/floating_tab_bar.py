@@ -194,12 +194,12 @@ class FloatingProfileTabBar:
         logo_path = os.path.join(_ASSETS_DIR, "logo.png")
         if os.path.isfile(logo_path):
             with contextlib.suppress(Exception):
-                smooth_path = get_smooth_fox_logo_path(logo_path, size=22, bg_rgb=(23, 51, 46))
+                smooth_path = get_smooth_fox_logo_path(logo_path, size=26, bg_rgb=(23, 51, 46))
                 if smooth_path and os.path.isfile(smooth_path):
                     logo_img = tk.PhotoImage(file=smooth_path)
                 else:
                     raw_logo = tk.PhotoImage(file=logo_path)
-                    factor = max(1, raw_logo.width() // 22)
+                    factor = max(1, raw_logo.width() // 26)
                     logo_img = raw_logo.subsample(factor, factor)
 
         outer = tk.Frame(
@@ -537,8 +537,8 @@ class FloatingProfileTabBar:
             rail = tk.Frame(
                 parent,
                 bg=_BG_RAIL,
-                padx=9,
-                pady=5,
+                padx=12,
+                pady=8,
                 cursor="fleur",
             )
             if logo_img is not None:
@@ -552,7 +552,7 @@ class FloatingProfileTabBar:
                     cursor="fleur",
                 )
                 ic.image = logo_img  # type: ignore[attr-defined]
-                ic.pack(side="left", padx=(0, 6))
+                ic.pack(side="left", padx=(0, 7))
                 _bind_drag(ic, click_toggle_home=True)
 
             title_lbl = tk.Label(
@@ -560,9 +560,9 @@ class FloatingProfileTabBar:
                 text="FoxProfile",
                 bg=_BG_RAIL,
                 fg=_FG_RAIL,
-                font=("Segoe UI Bold", 9),
+                font=("Segoe UI Bold", 10),
                 padx=0,
-                pady=0,
+                pady=1,
                 cursor="fleur",
             )
             title_lbl.pack(side="left")
@@ -586,9 +586,9 @@ class FloatingProfileTabBar:
                 text="+" if collapsed["value"] else "—",
                 bg=bg_norm,
                 fg=fg_norm,
-                font=("Segoe UI Bold", 8),
-                padx=7,
-                pady=2,
+                font=("Segoe UI Bold", 9),
+                padx=9,
+                pady=4,
                 cursor="hand2",
             )
             btn_fold.pack()
@@ -615,8 +615,8 @@ class FloatingProfileTabBar:
                 bg=tab_bg,
                 highlightbackground=tab_border,
                 highlightthickness=1,
-                padx=3,
-                pady=1,
+                padx=5,
+                pady=3,
             )
 
             # Left Circular Muse Avatar (or subtle avatar placeholder)
@@ -627,8 +627,8 @@ class FloatingProfileTabBar:
                     image=avatar_img,
                     bg=tab_bg,
                     bd=0,
-                    padx=2,
-                    pady=1,
+                    padx=3,
+                    pady=2,
                     cursor="hand2",
                 )
                 av_lbl.image = avatar_img  # type: ignore[attr-defined]
@@ -639,12 +639,12 @@ class FloatingProfileTabBar:
                     text=badge_txt,
                     bg=tab_bg,
                     fg=_FG_ACTIVE if is_active else "#5E6B64",
-                    font=("Segoe UI Semibold", 9),
-                    padx=4,
-                    pady=1,
+                    font=("Segoe UI Semibold", 10),
+                    padx=5,
+                    pady=2,
                     cursor="hand2",
                 )
-            av_lbl.pack(side="left", padx=(2, 1))
+            av_lbl.pack(side="left", padx=(2, 2))
             av_lbl.bind("<Button-1>", lambda e, n=pname: _open_avatar_menu(e, n))
             av_lbl.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
 
@@ -654,8 +654,8 @@ class FloatingProfileTabBar:
                 bg=tab_bg,
                 fg=tab_fg,
                 font=("Segoe UI Semibold" if is_active else "Segoe UI", 9),
-                padx=6,
-                pady=2,
+                padx=7,
+                pady=4,
                 anchor="w" if vertical else "center",
                 cursor="hand2",
             )
@@ -674,9 +674,9 @@ class FloatingProfileTabBar:
                 text="✕",
                 bg=tab_bg,
                 fg=close_fg,
-                font=("Segoe UI", 8),
-                padx=5,
-                pady=2,
+                font=("Segoe UI", 9),
+                padx=6,
+                pady=4,
                 cursor="hand2",
             )
             btn_close.pack(side="right" if vertical else "left")
@@ -733,13 +733,13 @@ class FloatingProfileTabBar:
                 logo_lbl.pack(side="left", fill="y")  # type: ignore[attr-defined]
                 sep = tk.Frame(outer, bg=_BORDER_INACTIVE, width=1)
                 sep.pack(side="left", fill="y")
-                body = tk.Frame(outer, bg=_BG_BAR, padx=5, pady=4)
+                body = tk.Frame(outer, bg=_BG_BAR, padx=7, pady=6)
                 body.pack(side="left", fill="both", expand=True)
                 _bind_drag(body, click_toggle_home=False)
                 fold_btn = _make_fold_btn(body, on_rail=False)
                 fold_btn.pack(side="left")  # type: ignore[attr-defined]
             elif orient == "vertical":
-                header_row = tk.Frame(outer, bg=_BG_RAIL, padx=4, pady=3)
+                header_row = tk.Frame(outer, bg=_BG_RAIL, padx=5, pady=4)
                 header_row.pack(side="top", fill="x")
                 _bind_drag(header_row, click_toggle_home=False)
 
@@ -751,7 +751,7 @@ class FloatingProfileTabBar:
                 sep = tk.Frame(outer, bg=_BORDER_INACTIVE, height=1)
                 sep.pack(side="top", fill="x")
 
-                body = tk.Frame(outer, bg=_BG_BAR, padx=6, pady=5)
+                body = tk.Frame(outer, bg=_BG_BAR, padx=7, pady=6)
                 body.pack(side="top", fill="both", expand=True)
                 _bind_drag(body, click_toggle_home=False)
 
@@ -763,7 +763,7 @@ class FloatingProfileTabBar:
                         pname in loading,
                         vertical=True,
                     )
-                    pill.pack(side="top", fill="x", pady=2)  # type: ignore[attr-defined]
+                    pill.pack(side="top", fill="x", pady=3)  # type: ignore[attr-defined]
             else:
                 logo_lbl = _make_logo(outer)
                 logo_lbl.pack(side="left", fill="y")  # type: ignore[attr-defined]
@@ -771,7 +771,7 @@ class FloatingProfileTabBar:
                 sep = tk.Frame(outer, bg=_BORDER_INACTIVE, width=1)
                 sep.pack(side="left", fill="y")
 
-                body = tk.Frame(outer, bg=_BG_BAR, padx=6, pady=4)
+                body = tk.Frame(outer, bg=_BG_BAR, padx=8, pady=6)
                 body.pack(side="left", fill="both", expand=True)
                 _bind_drag(body, click_toggle_home=False)
 
@@ -783,10 +783,10 @@ class FloatingProfileTabBar:
                         pname in loading,
                         vertical=False,
                     )
-                    pill.pack(side="left", padx=2)  # type: ignore[attr-defined]
+                    pill.pack(side="left", padx=3)  # type: ignore[attr-defined]
 
                 fold_btn = _make_fold_btn(body, on_rail=False)
-                fold_btn.pack(side="left", padx=(4, 0))  # type: ignore[attr-defined]
+                fold_btn.pack(side="left", padx=(5, 0))  # type: ignore[attr-defined]
 
             root.update_idletasks()
             req_w = outer.winfo_reqwidth()
