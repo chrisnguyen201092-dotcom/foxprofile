@@ -307,8 +307,16 @@ def switch_browser_window(
         return False
 
 
-def focus_foxprofile_window(window_title: str = "FoxProfile") -> bool:
-    """Bring the main FoxProfile desktop window to the foreground using SWP_NOSIZE."""
+def focus_foxprofile_window(
+    window_title: str = "FoxProfile",
+    *,
+    toggle: bool = False,
+) -> bool:
+    """Bring the main FoxProfile desktop window to the foreground using SWP_NOSIZE.
+
+    When `toggle=True`, minimizes (hides) the FoxProfile window if it is already
+    visible and in front of running browser windows.
+    """
     if sys.platform != "win32":
         return False
     try:
@@ -316,8 +324,24 @@ def focus_foxprofile_window(window_title: str = "FoxProfile") -> bool:
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
+        gwl_exstyle = -20
+        ws_ex_topmost = 0x00000008
+        ws_ex_toolwindow = 0x00000080
+        sw_showminnoactive = 7
+        sw_forceminimize = 11
+        get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
         pids = _child_pids_win32(os.getpid())
         matches: list[int] = []
+        covered_by_other = False
 
         enum_windows_proc = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
@@ -326,6 +350,7 @@ def focus_foxprofile_window(window_title: str = "FoxProfile") -> bool:
         )
 
         def _callback(hwnd: int, _lparam: int) -> bool:
+            nonlocal covered_by_other
             if not user32.IsWindowVisible(hwnd):
                 return True
             length = user32.GetWindowTextLengthW(hwnd)
@@ -334,17 +359,36 @@ def focus_foxprofile_window(window_title: str = "FoxProfile") -> bool:
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = (buf.value or "").strip()
-            if not title or title.startswith("["):
+            if not title:
                 return True
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if title == window_title or (pid.value in pids and window_title.lower() in title.lower()):
-                matches.append(int(hwnd))
+            if not title.startswith("["):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if title == window_title or (
+                    pid.value in pids and window_title.lower() in title.lower()
+                ):
+                    matches.append(int(hwnd))
+                    return True
+            if not matches and not user32.IsIconic(hwnd):
+                exstyle = int(get_long(wintypes.HWND(hwnd), gwl_exstyle))
+                if not (exstyle & (ws_ex_topmost | ws_ex_toolwindow)):
+                    rect = RECT()
+                    user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect))
+                    if (rect.right - rect.left) >= 300 and (rect.bottom - rect.top) >= 200:
+                        covered_by_other = True
             return True
 
         user32.EnumWindows(enum_windows_proc(_callback), 0)
         if not matches:
             return False
+
+        is_minimized = any(bool(user32.IsIconic(wintypes.HWND(h))) for h in matches)
+        if toggle and not is_minimized and not covered_by_other:
+            for hwnd in matches:
+                user32.ShowWindowAsync(wintypes.HWND(hwnd), sw_showminnoactive)
+                user32.ShowWindow(wintypes.HWND(hwnd), sw_forceminimize)
+            return True
+
         for hwnd in reversed(matches):
             _raise_and_move_hwnd_win32(hwnd, lock_size=False)
         return True

@@ -485,14 +485,6 @@ def build_running_tabs_bar(
                         controls=[
                             _toggle_chip(
                                 get_string(
-                                    "single_stage_on" if single_stage_mode else "single_stage_off"
-                                ),
-                                single_stage_mode,
-                                get_string("single_stage_tooltip"),
-                                on_toggle_single_stage,
-                            ),
-                            _toggle_chip(
-                                get_string(
                                     "floating_bar_on"
                                     if floating_bar_enabled
                                     else "floating_bar_off"

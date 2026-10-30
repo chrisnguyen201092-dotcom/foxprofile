@@ -38,7 +38,7 @@ from .components import (
     build_ui_refs,
     rebuild_bulk_bar,
 )
-from .components.content_area import build_monitor_bar, build_running_tabs_bar
+from .components.content_area import build_monitor_bar
 from .components.floating_tab_bar import FloatingProfileTabBar
 from .components.profile_card import build_header_row
 from .components.sidebar import build_filter_buttons
@@ -294,8 +294,8 @@ class App:
             self.h.on_launch(name)
 
     def _on_toggle_single_stage(self) -> None:
-        self.state.single_stage_mode = not self.state.single_stage_mode
-        if self.state.single_stage_mode and self.state.active_browser_tab:
+        self.state.single_stage_mode = True
+        if self.state.active_browser_tab:
             self.h.on_focus_window(self.state.active_browser_tab)
         else:
             self.state.schedule_refresh()
@@ -305,7 +305,7 @@ class App:
         self.state.schedule_refresh()
 
     def _on_focus_foxprofile(self) -> None:
-        focus_foxprofile_window(get_string("window_title"))
+        focus_foxprofile_window(get_string("window_title"), toggle=True)
 
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
@@ -411,7 +411,6 @@ class App:
             pages_bar=self._pages_bar_slot,
             monitor_bar=self._monitor_bar_slot,
             arrange_btn=self._arrange_btn,
-            running_tabs_bar=self._running_tabs_slot,
         )
         return ft.Row(
             expand=True,
@@ -759,11 +758,11 @@ class App:
                         if target not in self._staged_launches:
                             return
                         cur = self.state.active_browser_tab or target
-                        if self.bl.switch_profile(cur, single_stage=self.state.single_stage_mode):
+                        if self.bl.switch_profile(cur, single_stage=True):
                             time.sleep(0.6)
                             self.bl.switch_profile(
                                 self.state.active_browser_tab or cur,
-                                single_stage=self.state.single_stage_mode,
+                                single_stage=True,
                             )
                             return
                         time.sleep(0.3)
@@ -780,7 +779,7 @@ class App:
             self.monitor.record_started(name, p_live.proxy if p_live else None)
             if hasattr(self.bl, "switch_profile"):
                 cur_tab = self.state.active_browser_tab or name
-                self.bl.switch_profile(cur_tab, single_stage=self.state.single_stage_mode)
+                self.bl.switch_profile(cur_tab, single_stage=True)
         stopped_scheduled: list[str] = []
         for name in set(self._live_since) - running:
             del self._live_since[name]
@@ -808,19 +807,8 @@ class App:
         else:
             self.state.active_browser_tab = None
 
-        tabs_bar = build_running_tabs_bar(
-            ordered_running,
-            self.state.loading,
-            self.state.active_browser_tab,
-            self.state.single_stage_mode,
-            self.state.floating_tab_bar,
-            self._on_select_browser_tab,
-            self._on_close_browser_tab,
-            self._on_toggle_single_stage,
-            self._on_toggle_floating_bar,
-        )
-        self._running_tabs_slot.content = tabs_bar
-        self._running_tabs_slot.visible = tabs_bar is not None
+        self._running_tabs_slot.content = None
+        self._running_tabs_slot.visible = False
         self._floating_tab_bar.sync(
             ordered_running,
             self.state.loading,

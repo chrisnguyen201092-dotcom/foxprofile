@@ -4625,7 +4625,14 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     from src.services.monitor import MonitorService
     from src.ui.app import App
     from src.ui.components.content_area import build_running_tabs_bar
-    from src.ui.components.floating_tab_bar import FloatingProfileTabBar
+    from src.ui.components.floating_tab_bar import FloatingProfileTabBar, _compute_orientation
+
+    # 0. Orientation detection (top/bottom -> horizontal, left/right -> vertical)
+    assert _compute_orientation(500, 0, 1920, 1080, False) == "horizontal"
+    assert _compute_orientation(600, 15, 1920, 1080, True) == "horizontal"
+    assert _compute_orientation(600, 1020, 1920, 1080, True) == "horizontal"
+    assert _compute_orientation(15, 400, 1920, 1080, True) == "vertical"
+    assert _compute_orientation(1820, 400, 1920, 1080, True) == "vertical"
 
     # 1. Empty running list returns None
     assert (
@@ -4731,9 +4738,9 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     assert switched_calls[-1] == ("#2  Sienna", True)
 
     app._on_toggle_single_stage()
-    assert app.state.single_stage_mode is False
+    assert app.state.single_stage_mode is True
     app._on_select_browser_tab("#1  Monica")
-    assert switched_calls[-1] == ("#1  Monica", False)
+    assert switched_calls[-1] == ("#1  Monica", True)
 
 
 

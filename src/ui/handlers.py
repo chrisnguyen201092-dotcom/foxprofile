@@ -128,7 +128,7 @@ class AppHandlers:
     def on_focus_window(self, name: str) -> None:
         self._state.active_browser_tab = name
         if hasattr(self._bl, "switch_profile"):
-            self._bl.switch_profile(name, single_stage=self._state.single_stage_mode)
+            self._bl.switch_profile(name, single_stage=True)
         elif hasattr(self._bl, "focus_profile"):
             self._bl.focus_profile(name)
         self._state.schedule_refresh()
