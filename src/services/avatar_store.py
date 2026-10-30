@@ -577,3 +577,152 @@ def auto_capture_muse_avatar_from_active_window(
         )
     except Exception:
         return False
+
+
+def get_smooth_fox_logo_path(
+    logo_src_path: str,
+    size: int = 24,
+    bg_rgb: tuple[int, int, int] = (23, 51, 46),
+    *,
+    avatars_dir: str | None = None,
+) -> str | None:
+    """Render `logo.png` downscaled with GDI+ HighQualityBicubic onto `bg_rgb` for crisp Tk rendering."""
+    if sys.platform != "win32" or not os.path.isfile(logo_src_path):
+        return None
+    base = pathlib.Path(avatars_dir or AVATARS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    r_bg, g_bg, b_bg = bg_rgb
+    out_path = base / f"_fox_logo_hq_{size}_{r_bg:02x}{g_bg:02x}{b_bg:02x}.png"
+    if out_path.is_file():
+        return str(out_path)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        gdiplus = ctypes.windll.gdiplus
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+
+        class GdiplusStartupInput(ctypes.Structure):
+            _fields_ = [
+                ("GdiplusVersion", wintypes.UINT),
+                ("DebugEventCallback", ctypes.c_void_p),
+                ("SuppressBackgroundThread", wintypes.BOOL),
+                ("SuppressExternalCodecs", wintypes.BOOL),
+            ]
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        token = ctypes.c_ulonglong(0)
+        startup_in = GdiplusStartupInput(1, None, False, False)
+        if gdiplus.GdiplusStartup(ctypes.byref(token), ctypes.byref(startup_in), None) != 0:
+            return None
+
+        gp_bitmap = ctypes.c_void_p(0)
+        try:
+            if (
+                gdiplus.GdipCreateBitmapFromFile(
+                    ctypes.c_wchar_p(os.path.abspath(logo_src_path)),
+                    ctypes.byref(gp_bitmap),
+                )
+                != 0
+                or not gp_bitmap.value
+            ):
+                return None
+
+            w_u = wintypes.UINT(0)
+            h_u = wintypes.UINT(0)
+            gdiplus.GdipGetImageWidth(gp_bitmap, ctypes.byref(w_u))
+            gdiplus.GdipGetImageHeight(gp_bitmap, ctypes.byref(h_u))
+            src_w = max(1, int(w_u.value))
+            src_h = max(1, int(h_u.value))
+
+            screen_dc = user32.GetDC(0)
+            dst_dc = gdi32.CreateCompatibleDC(screen_dc)
+
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth = size
+            bmi.biHeight = -size
+            bmi.biPlanes = 1
+            bmi.biBitCount = 32
+            bmi.biCompression = 0
+
+            bits_ptr = ctypes.c_void_p()
+            dib = gdi32.CreateDIBSection(
+                dst_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
+            )
+            if not dib or not bits_ptr.value:
+                gdi32.DeleteDC(dst_dc)
+                user32.ReleaseDC(0, screen_dc)
+                return None
+
+            old_dst = gdi32.SelectObject(dst_dc, dib)
+            graphics = ctypes.c_void_p(0)
+            try:
+                if gdiplus.GdipCreateFromHDC(dst_dc, ctypes.byref(graphics)) != 0:
+                    return None
+                argb_bg = (0xFF << 24) | (r_bg << 16) | (g_bg << 8) | b_bg
+                gdiplus.GdipGraphicsClear(graphics, wintypes.DWORD(argb_bg))
+                # InterpolationModeHighQualityBicubic = 7, SmoothingModeAntiAlias = 4, PixelOffsetModeHalf = 4
+                gdiplus.GdipSetInterpolationMode(graphics, 7)
+                gdiplus.GdipSetSmoothingMode(graphics, 4)
+                gdiplus.GdipSetPixelOffsetMode(graphics, 4)
+                # Crop 10% outer transparent margin of logo.png so the fox head fills the icon nicely
+                crop_x = int(src_w * 0.10)
+                crop_y = int(src_h * 0.08)
+                crop_w = int(src_w * 0.80)
+                crop_h = int(src_h * 0.84)
+                gdiplus.GdipDrawImageRectRectI(
+                    graphics,
+                    gp_bitmap,
+                    0,
+                    0,
+                    size,
+                    size,
+                    crop_x,
+                    crop_y,
+                    crop_w,
+                    crop_h,
+                    2,  # UnitPixel = 2
+                    None,
+                    None,
+                    None,
+                )
+                gdiplus.GdipFlush(graphics, 1)
+                raw_bgra = ctypes.string_at(bits_ptr.value, size * size * 4)
+            finally:
+                if graphics.value:
+                    gdiplus.GdipDeleteGraphics(graphics)
+                gdi32.SelectObject(dst_dc, old_dst)
+                gdi32.DeleteObject(dib)
+                gdi32.DeleteDC(dst_dc)
+                user32.ReleaseDC(0, screen_dc)
+
+            rgba = bytearray(size * size * 4)
+            for idx in range(0, size * size * 4, 4):
+                rgba[idx] = raw_bgra[idx + 2]
+                rgba[idx + 1] = raw_bgra[idx + 1]
+                rgba[idx + 2] = raw_bgra[idx]
+                rgba[idx + 3] = 255
+            out_path.write_bytes(encode_rgba_png(size, size, bytes(rgba)))
+            return str(out_path)
+        finally:
+            if gp_bitmap.value:
+                gdiplus.GdipDisposeImage(gp_bitmap)
+            gdiplus.GdiplusShutdown(token)
+    except Exception:
+        return None

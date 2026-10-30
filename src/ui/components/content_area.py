@@ -349,12 +349,12 @@ def build_running_tabs_bar(
         dot_color = (
             COLORS["warning"]
             if is_loading
-            else ("#09090B" if is_active else "#E4E4E7")
+            else ("#E8EFEA" if is_active else COLORS["success"])
         )
-        tab_bg = "#FFFFFF" if is_active else "#18181B"
-        tab_border = "#FFFFFF" if is_active else "#27272A"
-        text_col = "#09090B" if is_active else "#E4E4E7"
-        sub_col = "#52525B" if is_active else "#71717A"
+        tab_bg = COLORS["sidebar"] if is_active else "#F3F4EF"
+        tab_border = COLORS["sidebar"] if is_active else COLORS["border"]
+        text_col = COLORS["cover_ink"] if is_active else COLORS["text_main"]
+        sub_col = "#A9C3BB" if is_active else COLORS["text_dim"]
 
         avatar_path = get_avatar_path(pname, 64)
         if avatar_path:
@@ -445,10 +445,10 @@ def build_running_tabs_bar(
             height=30,
             padding=ft.Padding.symmetric(horizontal=9, vertical=4),
             border_radius=7,
-            bgcolor="#FFFFFF" if active else "#18181B",
+            bgcolor=COLORS["sidebar"] if active else "#F3F4EF",
             border=ft.Border.all(
                 1,
-                "#FFFFFF" if active else "#27272A",
+                COLORS["sidebar"] if active else COLORS["border"],
             ),
             ink=True,
             tooltip=tooltip,
@@ -457,7 +457,7 @@ def build_running_tabs_bar(
                 label,
                 size=11.5,
                 font_family=FONT_SEMIBOLD if active else FONT_MEDIUM,
-                color="#09090B" if active else "#A1A1AA",
+                color=COLORS["cover_ink"] if active else COLORS["text_dim"],
             ),
         )
 
@@ -466,8 +466,8 @@ def build_running_tabs_bar(
         content=ft.Container(
             padding=ft.Padding.symmetric(horizontal=10, vertical=7),
             border_radius=10,
-            bgcolor="#09090B",
-            border=ft.Border.all(1, "#27272A"),
+            bgcolor=COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["border"]),
             content=ft.Row(
                 spacing=8,
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -483,14 +483,13 @@ def build_running_tabs_bar(
                                 height=30,
                                 padding=ft.Padding.symmetric(horizontal=9, vertical=4),
                                 border_radius=7,
-                                bgcolor="#18181B",
-                                border=ft.Border.all(1, "#27272A"),
+                                bgcolor=COLORS["sidebar"],
                                 alignment=ft.Alignment(0, 0),
                                 content=ft.Text(
                                     get_string("running_tabs_badge", count=len(running_names)),
                                     size=11.5,
                                     font_family=FONT_SEMIBOLD,
-                                    color="#FAFAFA",
+                                    color=COLORS["cover_ink"],
                                 ),
                             ),
                             *tab_controls,

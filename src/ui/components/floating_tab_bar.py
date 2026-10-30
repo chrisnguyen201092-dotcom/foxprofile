@@ -19,6 +19,7 @@ from ...services.avatar_store import (
     auto_capture_muse_avatar_from_active_window,
     avatar_version,
     get_avatar_path,
+    get_smooth_fox_logo_path,
     remove_avatar,
     save_avatar_from_clipboard,
     save_avatar_from_file,
@@ -27,21 +28,27 @@ from ...services.avatar_store import (
 
 _ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets"))
 
-# Modern Monochrome Black & White Palette (Obsidian / Zinc / Pure White)
-_BG_BAR = "#09090B"
-_BORDER_BAR = "#27272A"
-_BG_ACTIVE = "#FFFFFF"
-_BORDER_ACTIVE = "#FFFFFF"
-_FG_ACTIVE = "#09090B"
-_CLOSE_ACTIVE = "#71717A"
-_CLOSE_ACTIVE_HOVER = "#09090B"
+# FoxProfile Signature Two-Tone Palette (Passport Forest Rail #17332E + Security Paper #F3F4EF)
+_BG_RAIL = "#17332E"
+_BG_RAIL_DEEP = "#102622"
+_FG_RAIL = "#E8EFEA"
+_FG_RAIL_MUTED = "#A3BAB0"
+_BORDER_RAIL = "#2C524A"
 
-_BG_INACTIVE = "#18181B"
-_BG_INACTIVE_HOVER = "#27272A"
-_BORDER_INACTIVE = "#27272A"
-_FG_INACTIVE = "#E4E4E7"
-_CLOSE_INACTIVE = "#71717A"
-_CLOSE_INACTIVE_HOVER = "#FFFFFF"
+_BG_BAR = "#F3F4EF"
+_BORDER_BAR = "#BCC3B6"
+_BG_ACTIVE = "#17332E"
+_BORDER_ACTIVE = "#17332E"
+_FG_ACTIVE = "#E8EFEA"
+_CLOSE_ACTIVE = "#A3BAB0"
+_CLOSE_ACTIVE_HOVER = "#FFFFFF"
+
+_BG_INACTIVE = "#FBFBF8"
+_BG_INACTIVE_HOVER = "#E4EBE2"
+_BORDER_INACTIVE = "#BCC3B6"
+_FG_INACTIVE = "#1E2422"
+_CLOSE_INACTIVE = "#66706A"
+_CLOSE_INACTIVE_HOVER = "#B42330"
 
 
 def _apply_win32_toolwindow(hwnd: int) -> None:
@@ -71,8 +78,8 @@ def _apply_win32_toolwindow(hwnd: int) -> None:
                 ctypes.byref(pref),
                 ctypes.sizeof(pref),
             )
-            # DWMWA_BORDER_COLOR = 34, COLORREF 0x00BBGGRR (#27272A -> 0x002A2727)
-            border_col = ctypes.c_int(0x002A2727)
+            # DWMWA_BORDER_COLOR = 34, COLORREF 0x00BBGGRR (#17332E -> 0x002E3317)
+            border_col = ctypes.c_int(0x002E3317)
             dwmapi.DwmSetWindowAttribute(
                 parent,
                 34,
@@ -187,17 +194,21 @@ class FloatingProfileTabBar:
         logo_path = os.path.join(_ASSETS_DIR, "logo.png")
         if os.path.isfile(logo_path):
             with contextlib.suppress(Exception):
-                raw_logo = tk.PhotoImage(file=logo_path)
-                factor = max(1, raw_logo.width() // 22)
-                logo_img = raw_logo.subsample(factor, factor)
+                smooth_path = get_smooth_fox_logo_path(logo_path, size=22, bg_rgb=(23, 51, 46))
+                if smooth_path and os.path.isfile(smooth_path):
+                    logo_img = tk.PhotoImage(file=smooth_path)
+                else:
+                    raw_logo = tk.PhotoImage(file=logo_path)
+                    factor = max(1, raw_logo.width() // 22)
+                    logo_img = raw_logo.subsample(factor, factor)
 
         outer = tk.Frame(
             root,
             bg=_BG_BAR,
-            highlightbackground=_BORDER_BAR,
+            highlightbackground=_BG_RAIL,
             highlightthickness=1,
-            padx=6,
-            pady=5,
+            padx=0,
+            pady=0,
         )
         outer.pack(fill="both", expand=True)
 
@@ -354,7 +365,7 @@ class FloatingProfileTabBar:
             root.after(120, _launch_overlay)
 
         def _open_avatar_menu(event: object, pname: str) -> None:
-            """Show monochrome popup menu to set/change `pname`'s circular avatar."""
+            """Show FoxProfile-themed popup menu to set/change `pname`'s circular avatar."""
             _close_popup_menu()
             rx = int(getattr(event, "x_root", root.winfo_x()))
             ry = int(getattr(event, "y_root", root.winfo_y() + root.winfo_height()))
@@ -363,13 +374,13 @@ class FloatingProfileTabBar:
             pop.overrideredirect(True)
             with contextlib.suppress(Exception):
                 pop.attributes("-topmost", True)
-            pop.configure(bg=_BG_BAR)
+            pop.configure(bg=_BG_RAIL)
             active_menu[0] = pop
 
             box = tk.Frame(
                 pop,
-                bg=_BG_BAR,
-                highlightbackground="#3F3F46",
+                bg=_BG_RAIL,
+                highlightbackground=_BORDER_RAIL,
                 highlightthickness=1,
                 padx=4,
                 pady=4,
@@ -379,8 +390,8 @@ class FloatingProfileTabBar:
             hdr = tk.Label(
                 box,
                 text=f"Avatar: {pname}",
-                bg=_BG_BAR,
-                fg="#A1A1AA",
+                bg=_BG_RAIL,
+                fg="#9BB8B0",
                 font=("Segoe UI Semibold", 8),
                 anchor="w",
                 padx=8,
@@ -389,11 +400,11 @@ class FloatingProfileTabBar:
             hdr.pack(fill="x")
 
             def _add_item(label: str, action: Callable[[], None], *, danger: bool = False) -> None:
-                fg_norm = "#F87171" if danger else "#FAFAFA"
+                fg_norm = "#FF8080" if danger else _FG_RAIL
                 item = tk.Label(
                     box,
                     text=label,
-                    bg=_BG_BAR,
+                    bg=_BG_RAIL,
                     fg=fg_norm,
                     font=("Segoe UI", 9),
                     anchor="w",
@@ -402,8 +413,8 @@ class FloatingProfileTabBar:
                     cursor="hand2",
                 )
                 item.pack(fill="x")
-                item.bind("<Enter>", lambda _e: item.configure(bg="#27272A"))
-                item.bind("<Leave>", lambda _e: item.configure(bg=_BG_BAR))
+                item.bind("<Enter>", lambda _e: item.configure(bg="#20433D"))
+                item.bind("<Leave>", lambda _e: item.configure(bg=_BG_RAIL))
                 item.bind("<Button-1>", lambda _e: (_close_popup_menu(), action()))
 
             _add_item(
@@ -523,59 +534,66 @@ class FloatingProfileTabBar:
             last_rendered[0] = None
 
         def _make_logo(parent: object) -> object:
-            chip = tk.Frame(
+            rail = tk.Frame(
                 parent,
-                bg=_BG_INACTIVE,
-                highlightbackground=_BORDER_INACTIVE,
-                highlightthickness=1,
+                bg=_BG_RAIL,
+                padx=9,
+                pady=5,
+                cursor="fleur",
             )
             if logo_img is not None:
-                lbl = tk.Label(
-                    chip,
+                ic = tk.Label(
+                    rail,
                     image=logo_img,
-                    bg=_BG_INACTIVE,
+                    bg=_BG_RAIL,
                     bd=0,
-                    padx=5,
-                    pady=2,
+                    padx=0,
+                    pady=0,
                     cursor="fleur",
                 )
-                lbl.image = logo_img  # type: ignore[attr-defined]
-            else:
-                lbl = tk.Label(
-                    chip,
-                    text="🦊",
-                    bg=_BG_INACTIVE,
-                    fg="#FFFFFF",
-                    font=("Segoe UI", 10),
-                    padx=6,
-                    pady=2,
-                    cursor="fleur",
-                )
-            lbl.pack()
-            _bind_drag(chip, click_toggle_home=True)
-            _bind_drag(lbl, click_toggle_home=True)
-            return chip
+                ic.image = logo_img  # type: ignore[attr-defined]
+                ic.pack(side="left", padx=(0, 6))
+                _bind_drag(ic, click_toggle_home=True)
 
-        def _make_fold_btn(parent: object) -> object:
+            title_lbl = tk.Label(
+                rail,
+                text="FoxProfile",
+                bg=_BG_RAIL,
+                fg=_FG_RAIL,
+                font=("Segoe UI Bold", 9),
+                padx=0,
+                pady=0,
+                cursor="fleur",
+            )
+            title_lbl.pack(side="left")
+            _bind_drag(rail, click_toggle_home=True)
+            _bind_drag(title_lbl, click_toggle_home=True)
+            return rail
+
+        def _make_fold_btn(parent: object, *, on_rail: bool = False) -> object:
+            bg_norm = _BG_RAIL_DEEP if on_rail else "#E9ECE4"
+            bg_hov = "#20433D" if on_rail else "#D5DACF"
+            fg_norm = _FG_RAIL if on_rail else _BG_RAIL
+            border_c = _BORDER_RAIL if on_rail else _BORDER_INACTIVE
             fold_frame = tk.Frame(
                 parent,
-                bg=_BG_INACTIVE,
-                highlightbackground=_BORDER_INACTIVE,
+                bg=bg_norm,
+                highlightbackground=border_c,
                 highlightthickness=1,
             )
             btn_fold = tk.Label(
                 fold_frame,
                 text="+" if collapsed["value"] else "—",
-                bg=_BG_INACTIVE,
-                fg="#A1A1AA",
+                bg=bg_norm,
+                fg=fg_norm,
                 font=("Segoe UI Bold", 8),
                 padx=7,
-                pady=3,
+                pady=2,
                 cursor="hand2",
             )
             btn_fold.pack()
-            btn_fold.bind("<Enter>", lambda _e: btn_fold.configure(bg=_BG_INACTIVE_HOVER, fg="#FFFFFF"))
-            btn_fold.bind("<Leave>", lambda _e: btn_fold.configure(bg=_BG_INACTIVE, fg="#A1A1AA"))
+            btn_fold.bind("<Enter>", lambda _e: btn_fold.configure(bg=bg_hov))
+            btn_fold.bind("<Leave>", lambda _e: btn_fold.configure(bg=bg_norm))
             btn_fold.bind("<Button-1>", lambda _e: _toggle_collapse())
             return fold_frame
 
@@ -601,7 +619,7 @@ class FloatingProfileTabBar:
                 pady=1,
             )
 
-            # Left Circular Muse Avatar (or monochrome avatar placeholder)
+            # Left Circular Muse Avatar (or subtle avatar placeholder)
             avatar_img = _get_avatar_photo(pname)
             if avatar_img is not None:
                 av_lbl = tk.Label(
@@ -620,7 +638,7 @@ class FloatingProfileTabBar:
                     tab_frame,
                     text=badge_txt,
                     bg=tab_bg,
-                    fg="#09090B" if is_active else "#A1A1AA",
+                    fg=_FG_ACTIVE if is_active else "#5E6B64",
                     font=("Segoe UI Semibold", 9),
                     padx=4,
                     pady=1,
@@ -671,9 +689,9 @@ class FloatingProfileTabBar:
 
             if not is_active:
                 def _on_enter(_e: object) -> None:
-                    tab_frame.configure(bg=_BG_INACTIVE_HOVER, highlightbackground="#3F3F46")
+                    tab_frame.configure(bg=_BG_INACTIVE_HOVER, highlightbackground="#9BA89E")
                     av_lbl.configure(bg=_BG_INACTIVE_HOVER)
-                    btn_select.configure(bg=_BG_INACTIVE_HOVER, fg="#FFFFFF")
+                    btn_select.configure(bg=_BG_INACTIVE_HOVER, fg=_BG_RAIL)
                     btn_close.configure(bg=_BG_INACTIVE_HOVER)
 
                 def _on_leave(_e: object) -> None:
@@ -688,33 +706,6 @@ class FloatingProfileTabBar:
                 btn_select.bind("<Leave>", _on_leave)
 
             return tab_frame
-
-        def _make_action_pill(
-            parent: object,
-            text: str,
-            on_click: Callable[[], None],
-        ) -> object:
-            frame = tk.Frame(
-                parent,
-                bg=_BG_INACTIVE,
-                highlightbackground=_BORDER_INACTIVE,
-                highlightthickness=1,
-            )
-            lbl = tk.Label(
-                frame,
-                text=text,
-                bg=_BG_INACTIVE,
-                fg="#FAFAFA",
-                font=("Segoe UI Semibold", 8),
-                padx=8,
-                pady=3,
-                cursor="hand2",
-            )
-            lbl.pack(fill="x", expand=True)
-            lbl.bind("<Enter>", lambda _e: lbl.configure(bg=_BG_INACTIVE_HOVER))
-            lbl.bind("<Leave>", lambda _e: lbl.configure(bg=_BG_INACTIVE))
-            lbl.bind("<Button-1>", lambda _e: (_close_popup_menu(), on_click()))
-            return frame
 
         def _rebuild(
             running: tuple[str, ...],
@@ -739,42 +730,54 @@ class FloatingProfileTabBar:
 
             if collapsed["value"]:
                 logo_lbl = _make_logo(outer)
-                logo_lbl.pack(side="left", padx=(1, 3))  # type: ignore[attr-defined]
-                fold_btn = _make_fold_btn(outer)
-                fold_btn.pack(side="left", padx=(1, 0))  # type: ignore[attr-defined]
+                logo_lbl.pack(side="left", fill="y")  # type: ignore[attr-defined]
+                sep = tk.Frame(outer, bg=_BORDER_INACTIVE, width=1)
+                sep.pack(side="left", fill="y")
+                body = tk.Frame(outer, bg=_BG_BAR, padx=5, pady=4)
+                body.pack(side="left", fill="both", expand=True)
+                _bind_drag(body, click_toggle_home=False)
+                fold_btn = _make_fold_btn(body, on_rail=False)
+                fold_btn.pack(side="left")  # type: ignore[attr-defined]
             elif orient == "vertical":
-                header_row = tk.Frame(outer, bg=_BG_BAR)
-                header_row.pack(side="top", fill="x", pady=(0, 4))
+                header_row = tk.Frame(outer, bg=_BG_RAIL, padx=4, pady=3)
+                header_row.pack(side="top", fill="x")
                 _bind_drag(header_row, click_toggle_home=False)
 
                 logo_lbl = _make_logo(header_row)
-                logo_lbl.pack(side="left", padx=(1, 2))  # type: ignore[attr-defined]
-                fold_btn = _make_fold_btn(header_row)
-                fold_btn.pack(side="right", padx=(2, 0))  # type: ignore[attr-defined]
+                logo_lbl.pack(side="left")  # type: ignore[attr-defined]
+                fold_btn = _make_fold_btn(header_row, on_rail=True)
+                fold_btn.pack(side="right", padx=(4, 2))  # type: ignore[attr-defined]
+
+                sep = tk.Frame(outer, bg=_BORDER_INACTIVE, height=1)
+                sep.pack(side="top", fill="x")
+
+                body = tk.Frame(outer, bg=_BG_BAR, padx=6, pady=5)
+                body.pack(side="top", fill="both", expand=True)
+                _bind_drag(body, click_toggle_home=False)
 
                 for pname in running:
                     pill = _make_tab_pill(
-                        outer,
+                        body,
                         pname,
                         pname == eff_active,
                         pname in loading,
                         vertical=True,
                     )
                     pill.pack(side="top", fill="x", pady=2)  # type: ignore[attr-defined]
-
-                btn_home = _make_action_pill(
-                    outer,
-                    get_string("floating_bar_home_btn"),
-                    on_click=self._on_focus_foxprofile,
-                )
-                btn_home.pack(side="top", fill="x", pady=(4, 0))  # type: ignore[attr-defined]
             else:
                 logo_lbl = _make_logo(outer)
-                logo_lbl.pack(side="left", padx=(1, 5))  # type: ignore[attr-defined]
+                logo_lbl.pack(side="left", fill="y")  # type: ignore[attr-defined]
+
+                sep = tk.Frame(outer, bg=_BORDER_INACTIVE, width=1)
+                sep.pack(side="left", fill="y")
+
+                body = tk.Frame(outer, bg=_BG_BAR, padx=6, pady=4)
+                body.pack(side="left", fill="both", expand=True)
+                _bind_drag(body, click_toggle_home=False)
 
                 for pname in running:
                     pill = _make_tab_pill(
-                        outer,
+                        body,
                         pname,
                         pname == eff_active,
                         pname in loading,
@@ -782,15 +785,8 @@ class FloatingProfileTabBar:
                     )
                     pill.pack(side="left", padx=2)  # type: ignore[attr-defined]
 
-                btn_home = _make_action_pill(
-                    outer,
-                    get_string("floating_bar_home_btn"),
-                    on_click=self._on_focus_foxprofile,
-                )
-                btn_home.pack(side="left", padx=(5, 2))  # type: ignore[attr-defined]
-
-                fold_btn = _make_fold_btn(outer)
-                fold_btn.pack(side="left", padx=(2, 0))  # type: ignore[attr-defined]
+                fold_btn = _make_fold_btn(body, on_rail=False)
+                fold_btn.pack(side="left", padx=(4, 0))  # type: ignore[attr-defined]
 
             root.update_idletasks()
             req_w = outer.winfo_reqwidth()
