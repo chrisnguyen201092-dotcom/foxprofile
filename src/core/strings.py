@@ -764,6 +764,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "floating_bar_off": "🪟 Floating Bar: OFF",
         "floating_bar_tooltip": "Toggle the Always-on-Top floating mini-tab bar at the top edge of your screen",
         "floating_bar_home_btn": "📋 FoxProfile",
+        "avatar_menu_snip": "🎯 Snip Avatar from screen",
+        "avatar_menu_paste": "📋 Paste Avatar from Clipboard",
+        "avatar_menu_file": "📁 Choose image file...",
+        "avatar_menu_remove": "🗑️ Remove Avatar",
+        "avatar_snip_hint": "Drag across the Muse Avatar for '{name}' (Press Esc or Right-click to cancel)",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -1528,6 +1533,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "floating_bar_off": "🪟 Thanh Nổi: TẮT",
         "floating_bar_tooltip": "Bật/tắt thanh Tab nhỏ gọn luôn ghim trên mép trên màn hình để chuyển nhanh Profile khi đang làm việc trong trình duyệt",
         "floating_bar_home_btn": "📋 FoxProfile",
+        "avatar_menu_snip": "🎯 Khoanh vùng chụp Avatar trên màn hình",
+        "avatar_menu_paste": "📋 Dán ảnh Avatar từ Clipboard",
+        "avatar_menu_file": "📁 Chọn file ảnh từ máy...",
+        "avatar_menu_remove": "🗑️ Xóa Avatar",
+        "avatar_snip_hint": "Kéo chuột khoanh vùng Avatar của '{name}' trên màn hình (Esc hoặc Chuột phải để hủy)",
     },
 }
 

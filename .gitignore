@@ -177,6 +177,7 @@ pyrightconfig.json
 
 # Local runtime data (cookies, fingerprints, profiles, logs)
 camoufox_data/
+avatars/
 profiles.json
 custom_pages.json
 trash_profiles.json

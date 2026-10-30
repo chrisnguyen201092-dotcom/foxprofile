@@ -163,6 +163,7 @@ class App:
             on_close_tab=self._on_close_browser_tab,
             on_toggle_single_stage=self._on_toggle_single_stage,
             on_focus_foxprofile=self._on_focus_foxprofile,
+            on_avatar_changed=self.state.schedule_refresh,
         )
         self._trash_btn = ft.Container(
             width=34,

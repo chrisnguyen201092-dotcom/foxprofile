@@ -4,6 +4,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ...core.strings import get_string
+from ...services.avatar_store import get_avatar_path
 from ...services.monitor import MonitorSnapshot
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 
@@ -348,20 +349,36 @@ def build_running_tabs_bar(
         dot_color = (
             COLORS["warning"]
             if is_loading
-            else ("#FFFFFF" if is_active else COLORS["live"])
+            else ("#09090B" if is_active else "#E4E4E7")
         )
-        tab_bg = COLORS["live"] if is_active else COLORS["card_bg"]
-        tab_border = COLORS["live"] if is_active else COLORS["rule_strong"]
-        text_col = "#FFFFFF" if is_active else COLORS["text_main"]
-        sub_col = "#E2E8F0" if is_active else COLORS["text_dim"]
+        tab_bg = "#FFFFFF" if is_active else "#18181B"
+        tab_border = "#FFFFFF" if is_active else "#27272A"
+        text_col = "#09090B" if is_active else "#E4E4E7"
+        sub_col = "#52525B" if is_active else "#71717A"
 
-        label_items: list[ft.Control] = [
-            ft.Container(
+        avatar_path = get_avatar_path(pname, 64)
+        if avatar_path:
+            lead_ctrl: ft.Control = ft.Container(
+                width=20,
+                height=20,
+                border_radius=10,
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                content=ft.Image(
+                    src=avatar_path,
+                    width=20,
+                    height=20,
+                ),
+            )
+        else:
+            lead_ctrl = ft.Container(
                 width=7,
                 height=7,
                 border_radius=4,
                 bgcolor=dot_color,
-            ),
+            )
+
+        label_items: list[ft.Control] = [
+            lead_ctrl,
             ft.Text(
                 pname,
                 size=12.5,
@@ -382,7 +399,7 @@ def build_running_tabs_bar(
         tab_controls.append(
             ft.Container(
                 height=32,
-                border_radius=7,
+                border_radius=8,
                 bgcolor=tab_bg,
                 border=ft.Border.all(1, tab_border),
                 content=ft.Row(
@@ -391,7 +408,7 @@ def build_running_tabs_bar(
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     controls=[
                         ft.Container(
-                            padding=ft.Padding.only(left=10, right=6, top=5, bottom=5),
+                            padding=ft.Padding.only(left=8, right=6, top=4, bottom=4),
                             ink=True,
                             tooltip=get_string("running_tabs_tooltip"),
                             on_click=lambda _, n=pname: on_select_tab(n),
@@ -427,11 +444,11 @@ def build_running_tabs_bar(
         return ft.Container(
             height=30,
             padding=ft.Padding.symmetric(horizontal=9, vertical=4),
-            border_radius=6,
-            bgcolor=COLORS["sidebar"] if active else COLORS["input_bg"],
+            border_radius=7,
+            bgcolor="#FFFFFF" if active else "#18181B",
             border=ft.Border.all(
                 1,
-                COLORS["sidebar"] if active else COLORS["rule_strong"],
+                "#FFFFFF" if active else "#27272A",
             ),
             ink=True,
             tooltip=tooltip,
@@ -440,7 +457,7 @@ def build_running_tabs_bar(
                 label,
                 size=11.5,
                 font_family=FONT_SEMIBOLD if active else FONT_MEDIUM,
-                color=COLORS["cover_ink"] if active else COLORS["text_sub"],
+                color="#09090B" if active else "#A1A1AA",
             ),
         )
 
@@ -448,9 +465,9 @@ def build_running_tabs_bar(
         padding=ft.Padding.only(bottom=10),
         content=ft.Container(
             padding=ft.Padding.symmetric(horizontal=10, vertical=7),
-            border_radius=9,
-            bgcolor=COLORS["input_bg"],
-            border=ft.Border.all(1, COLORS["card_border"]),
+            border_radius=10,
+            bgcolor="#09090B",
+            border=ft.Border.all(1, "#27272A"),
             content=ft.Row(
                 spacing=8,
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -465,14 +482,15 @@ def build_running_tabs_bar(
                             ft.Container(
                                 height=30,
                                 padding=ft.Padding.symmetric(horizontal=9, vertical=4),
-                                border_radius=6,
-                                bgcolor=COLORS["sidebar"],
+                                border_radius=7,
+                                bgcolor="#18181B",
+                                border=ft.Border.all(1, "#27272A"),
                                 alignment=ft.Alignment(0, 0),
                                 content=ft.Text(
                                     get_string("running_tabs_badge", count=len(running_names)),
                                     size=11.5,
                                     font_family=FONT_SEMIBOLD,
-                                    color=COLORS["cover_ink"],
+                                    color="#FAFAFA",
                                 ),
                             ),
                             *tab_controls,

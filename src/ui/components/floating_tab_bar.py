@@ -1,8 +1,9 @@
-"""Always-on-top Floating Mini-Tab Bar for switching running browser profiles on Windows.
+"""Always-on-top Monochrome Floating Mini-Tab Bar with per-profile circular Muse Avatars.
 
-Runs in a lightweight daemon thread using Tkinter + Win32 `WS_EX_TOOLWINDOW` so the user
-can switch between running Camoufox profile windows in 1 click without returning to the
-main FoxProfile window, while keeping every browser process 100% isolated (`SWP_NOSIZE`).
+Runs in a lightweight daemon thread using Tkinter + Win32 `WS_EX_TOOLWINDOW` + DWM
+rounded corners (`DWMWCP_ROUND`) so the user can switch between running Camoufox profile
+windows in 1 click without returning to the main FoxProfile window, while keeping every
+browser process 100% isolated (`SWP_NOSIZE`).
 """
 
 from __future__ import annotations
@@ -14,12 +15,36 @@ import threading
 from collections.abc import Callable
 
 from ...core.strings import get_string
+from ...services.avatar_store import (
+    avatar_version,
+    get_avatar_path,
+    remove_avatar,
+    save_avatar_from_clipboard,
+    save_avatar_from_file,
+    save_avatar_from_screen_rect,
+)
 
 _ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets"))
 
+# Modern Monochrome Black & White Palette (Obsidian / Zinc / Pure White)
+_BG_BAR = "#09090B"
+_BORDER_BAR = "#27272A"
+_BG_ACTIVE = "#FFFFFF"
+_BORDER_ACTIVE = "#FFFFFF"
+_FG_ACTIVE = "#09090B"
+_CLOSE_ACTIVE = "#71717A"
+_CLOSE_ACTIVE_HOVER = "#09090B"
+
+_BG_INACTIVE = "#18181B"
+_BG_INACTIVE_HOVER = "#27272A"
+_BORDER_INACTIVE = "#27272A"
+_FG_INACTIVE = "#E4E4E7"
+_CLOSE_INACTIVE = "#71717A"
+_CLOSE_INACTIVE_HOVER = "#FFFFFF"
+
 
 def _apply_win32_toolwindow(hwnd: int) -> None:
-    """Hide the floating bar from the Windows taskbar and Alt+Tab switcher."""
+    """Hide floating bar from taskbar/Alt+Tab and enable Windows 11 DWM rounded corners."""
     if sys.platform != "win32" or hwnd <= 0:
         return
     with contextlib.suppress(Exception):
@@ -30,10 +55,29 @@ def _apply_win32_toolwindow(hwnd: int) -> None:
         ws_ex_toolwindow = 0x00000080
         ws_ex_topmost = 0x00000008
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-        set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        set_long = getattr(user32, "SetWindowLongPtrW", user32.GetWindowLongW)
         parent = user32.GetParent(hwnd) or hwnd
         cur = int(get_long(parent, gwl_exstyle))
         set_long(parent, gwl_exstyle, cur | ws_ex_toolwindow | ws_ex_topmost)
+
+        with contextlib.suppress(Exception):
+            dwmapi = ctypes.windll.dwmapi
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+            pref = ctypes.c_int(2)
+            dwmapi.DwmSetWindowAttribute(
+                parent,
+                33,
+                ctypes.byref(pref),
+                ctypes.sizeof(pref),
+            )
+            # DWMWA_BORDER_COLOR = 34, COLORREF 0x00BBGGRR (#27272A -> 0x002A2727)
+            border_col = ctypes.c_int(0x002A2727)
+            dwmapi.DwmSetWindowAttribute(
+                parent,
+                34,
+                ctypes.byref(border_col),
+                ctypes.sizeof(border_col),
+            )
 
 
 def _compute_orientation(
@@ -56,7 +100,7 @@ def _compute_orientation(
 
 
 class FloatingProfileTabBar:
-    """Thread-safe controller for the Always-on-Top Floating Mini-Tab Bar."""
+    """Thread-safe controller for the Always-on-Top Monochrome Floating Mini-Tab Bar."""
 
     def __init__(
         self,
@@ -64,11 +108,13 @@ class FloatingProfileTabBar:
         on_close_tab: Callable[[str], None],
         on_toggle_single_stage: Callable[[], None],
         on_focus_foxprofile: Callable[[], None],
+        on_avatar_changed: Callable[[], None] | None = None,
     ) -> None:
         self._on_select_tab = on_select_tab
         self._on_close_tab = on_close_tab
         self._on_toggle_single_stage = on_toggle_single_stage
         self._on_focus_foxprofile = on_focus_foxprofile
+        self._on_avatar_changed = on_avatar_changed
 
         self._lock = threading.Lock()
         self._state: tuple[tuple[str, ...], frozenset[str], str | None, bool, bool] = (
@@ -121,6 +167,7 @@ class FloatingProfileTabBar:
     def _run_tk_loop(self) -> None:
         try:
             import tkinter as tk
+            from tkinter import filedialog
         except Exception:
             return
 
@@ -133,23 +180,15 @@ class FloatingProfileTabBar:
         root.overrideredirect(True)
         with contextlib.suppress(Exception):
             root.attributes("-topmost", True)
-            root.configure(bg="#FFFFFF")
-
-        logo_img = None
-        logo_path = os.path.join(_ASSETS_DIR, "logo.png")
-        if os.path.isfile(logo_path):
-            with contextlib.suppress(Exception):
-                raw_logo = tk.PhotoImage(file=logo_path)
-                factor = max(1, raw_logo.width() // 20)
-                logo_img = raw_logo.subsample(factor, factor)
+            root.configure(bg=_BG_BAR)
 
         outer = tk.Frame(
             root,
-            bg="#FFFFFF",
-            highlightbackground="#CBD5E1",
+            bg=_BG_BAR,
+            highlightbackground=_BORDER_BAR,
             highlightthickness=1,
-            padx=5,
-            pady=4,
+            padx=6,
+            pady=5,
         )
         outer.pack(fill="both", expand=True)
 
@@ -168,8 +207,237 @@ class FloatingProfileTabBar:
         }
         collapsed = {"value": False}
         last_rendered: list[object] = [None]
+        photo_cache: dict[tuple[str, float], object] = {}
+        active_menu: list[object] = [None]
+
+        def _close_popup_menu() -> None:
+            if active_menu[0] is not None:
+                with contextlib.suppress(Exception):
+                    active_menu[0].destroy()  # type: ignore[attr-defined]
+                active_menu[0] = None
+
+        def _notify_avatar_updated() -> None:
+            last_rendered[0] = None
+            if self._on_avatar_changed is not None:
+                with contextlib.suppress(Exception):
+                    self._on_avatar_changed()
+
+        def _get_avatar_photo(pname: str) -> object | None:
+            path = get_avatar_path(pname, 22)
+            if not path:
+                return None
+            ver = avatar_version(pname)
+            cache_key = (pname, ver)
+            cached = photo_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            with contextlib.suppress(Exception):
+                img = tk.PhotoImage(file=path)
+                photo_cache[cache_key] = img
+                return img
+            return None
+
+        def _open_screen_snipper(pname: str) -> None:
+            """Interactive full-screen crosshair selector to snip the Muse avatar from screen."""
+            _close_popup_menu()
+            self._on_select_tab(pname)
+
+            def _launch_overlay() -> None:
+                snip = tk.Toplevel(root)
+                snip.overrideredirect(True)
+                scr_w = root.winfo_screenwidth()
+                scr_h = root.winfo_screenheight()
+                snip.geometry(f"{scr_w}x{scr_h}+0+0")
+                with contextlib.suppress(Exception):
+                    snip.attributes("-topmost", True)
+                    snip.attributes("-alpha", 0.28)
+                snip.configure(bg="#09090B", cursor="crosshair")
+
+                canvas = tk.Canvas(
+                    snip,
+                    bg="#09090B",
+                    highlightthickness=0,
+                    cursor="crosshair",
+                )
+                canvas.pack(fill="both", expand=True)
+
+                # Top instruction banner
+                canvas.create_rectangle(
+                    scr_w // 2 - 310,
+                    16,
+                    scr_w // 2 + 310,
+                    52,
+                    fill="#000000",
+                    outline="#FFFFFF",
+                    width=1,
+                )
+                canvas.create_text(
+                    scr_w // 2,
+                    34,
+                    text=get_string("avatar_snip_hint", name=pname),
+                    fill="#FFFFFF",
+                    font=("Segoe UI Semibold", 10),
+                )
+
+                coords = {"x1": 0, "y1": 0, "rect": None, "oval": None}
+
+                def _cancel(_e: object = None) -> None:
+                    with contextlib.suppress(Exception):
+                        snip.destroy()
+
+                def _on_press(e: object) -> None:
+                    coords["x1"] = int(getattr(e, "x_root", 0))
+                    coords["y1"] = int(getattr(e, "y_root", 0))
+                    if coords["rect"]:
+                        canvas.delete(coords["rect"])
+                    if coords["oval"]:
+                        canvas.delete(coords["oval"])
+                    coords["rect"] = canvas.create_rectangle(
+                        coords["x1"],
+                        coords["y1"],
+                        coords["x1"],
+                        coords["y1"],
+                        outline="#FFFFFF",
+                        width=2,
+                        dash=(4, 2),
+                    )
+                    coords["oval"] = canvas.create_oval(
+                        coords["x1"],
+                        coords["y1"],
+                        coords["x1"],
+                        coords["y1"],
+                        outline="#FFFFFF",
+                        width=2,
+                    )
+
+                def _on_motion(e: object) -> None:
+                    if not coords["rect"]:
+                        return
+                    x2 = int(getattr(e, "x_root", 0))
+                    y2 = int(getattr(e, "y_root", 0))
+                    canvas.coords(coords["rect"], coords["x1"], coords["y1"], x2, y2)
+                    if coords["oval"]:
+                        canvas.coords(coords["oval"], coords["x1"], coords["y1"], x2, y2)
+
+                def _on_release(e: object) -> None:
+                    x1 = int(coords["x1"])
+                    y1 = int(coords["y1"])
+                    x2 = int(getattr(e, "x_root", 0))
+                    y2 = int(getattr(e, "y_root", 0))
+                    with contextlib.suppress(Exception):
+                        snip.destroy()
+                    root.update_idletasks()
+                    if (
+                        abs(x2 - x1) >= 10
+                        and abs(y2 - y1) >= 10
+                        and save_avatar_from_screen_rect(pname, x1, y1, x2, y2)
+                    ):
+                        _notify_avatar_updated()
+
+                canvas.bind("<ButtonPress-1>", _on_press)
+                canvas.bind("<B1-Motion>", _on_motion)
+                canvas.bind("<ButtonRelease-1>", _on_release)
+                canvas.bind("<Button-3>", _cancel)
+                snip.bind("<Escape>", _cancel)
+                snip.focus_force()
+
+            root.after(120, _launch_overlay)
+
+        def _open_avatar_menu(event: object, pname: str) -> None:
+            """Show monochrome popup menu to set/change `pname`'s circular avatar."""
+            _close_popup_menu()
+            rx = int(getattr(event, "x_root", root.winfo_x()))
+            ry = int(getattr(event, "y_root", root.winfo_y() + root.winfo_height()))
+
+            pop = tk.Toplevel(root)
+            pop.overrideredirect(True)
+            with contextlib.suppress(Exception):
+                pop.attributes("-topmost", True)
+            pop.configure(bg=_BG_BAR)
+            active_menu[0] = pop
+
+            box = tk.Frame(
+                pop,
+                bg=_BG_BAR,
+                highlightbackground="#3F3F46",
+                highlightthickness=1,
+                padx=4,
+                pady=4,
+            )
+            box.pack(fill="both", expand=True)
+
+            hdr = tk.Label(
+                box,
+                text=f"Avatar: {pname}",
+                bg=_BG_BAR,
+                fg="#A1A1AA",
+                font=("Segoe UI Semibold", 8),
+                anchor="w",
+                padx=8,
+                pady=3,
+            )
+            hdr.pack(fill="x")
+
+            def _add_item(label: str, action: Callable[[], None], *, danger: bool = False) -> None:
+                fg_norm = "#F87171" if danger else "#FAFAFA"
+                item = tk.Label(
+                    box,
+                    text=label,
+                    bg=_BG_BAR,
+                    fg=fg_norm,
+                    font=("Segoe UI", 9),
+                    anchor="w",
+                    padx=10,
+                    pady=5,
+                    cursor="hand2",
+                )
+                item.pack(fill="x")
+                item.bind("<Enter>", lambda _e: item.configure(bg="#27272A"))
+                item.bind("<Leave>", lambda _e: item.configure(bg=_BG_BAR))
+                item.bind("<Button-1>", lambda _e: (_close_popup_menu(), action()))
+
+            _add_item(
+                get_string("avatar_menu_snip"),
+                lambda: _open_screen_snipper(pname),
+            )
+
+            def _do_paste() -> None:
+                if save_avatar_from_clipboard(pname):
+                    _notify_avatar_updated()
+
+            _add_item(get_string("avatar_menu_paste"), _do_paste)
+
+            def _do_file() -> None:
+                fpath = filedialog.askopenfilename(
+                    parent=root,
+                    title=f"Avatar - {pname}",
+                    filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")],
+                )
+                if fpath and save_avatar_from_file(pname, fpath):
+                    _notify_avatar_updated()
+
+            _add_item(get_string("avatar_menu_file"), _do_file)
+
+            if get_avatar_path(pname, 22):
+                def _do_remove() -> None:
+                    if remove_avatar(pname):
+                        _notify_avatar_updated()
+
+                _add_item(get_string("avatar_menu_remove"), _do_remove, danger=True)
+
+            pop.update_idletasks()
+            pw = pop.winfo_reqwidth()
+            ph = pop.winfo_reqheight()
+            scr_w = root.winfo_screenwidth()
+            scr_h = root.winfo_screenheight()
+            px = max(6, min(rx, scr_w - pw - 6))
+            py = max(6, min(ry + 8, scr_h - ph - 6))
+            pop.geometry(f"{pw}x{ph}+{px}+{py}")
+            _apply_win32_toolwindow(pop.winfo_id())
+            pop.bind("<FocusOut>", lambda _e: _close_popup_menu())
 
         def _start_drag(event: object) -> None:
+            _close_popup_menu()
             rx = int(getattr(event, "x_root", 0))
             ry = int(getattr(event, "y_root", 0))
             drag_state["start_root_x"] = rx
@@ -240,53 +508,52 @@ class FloatingProfileTabBar:
         _bind_drag(outer, click_toggle_home=False)
 
         def _toggle_collapse() -> None:
+            _close_popup_menu()
             collapsed["value"] = not collapsed["value"]
             last_rendered[0] = None
 
         def _make_logo(parent: object) -> object:
-            if logo_img is not None:
-                lbl = tk.Label(
-                    parent,
-                    image=logo_img,
-                    bg="#FFFFFF",
-                    bd=0,
-                    padx=3,
-                    pady=2,
-                    cursor="fleur",
-                )
-                lbl.image = logo_img  # type: ignore[attr-defined]
-            else:
-                lbl = tk.Label(
-                    parent,
-                    text="🦊",
-                    bg="#FFFFFF",
-                    fg="#C2510F",
-                    font=("Segoe UI", 11),
-                    padx=4,
-                    pady=1,
-                    cursor="fleur",
-                )
+            chip = tk.Frame(
+                parent,
+                bg=_BG_INACTIVE,
+                highlightbackground=_BORDER_INACTIVE,
+                highlightthickness=1,
+            )
+            lbl = tk.Label(
+                chip,
+                text="✦ FOX",
+                bg=_BG_INACTIVE,
+                fg="#FFFFFF",
+                font=("Segoe UI Bold", 8),
+                padx=7,
+                pady=3,
+                cursor="fleur",
+            )
+            lbl.pack()
+            _bind_drag(chip, click_toggle_home=True)
             _bind_drag(lbl, click_toggle_home=True)
-            return lbl
+            return chip
 
         def _make_fold_btn(parent: object) -> object:
             fold_frame = tk.Frame(
                 parent,
-                bg="#F1F5F9",
-                highlightbackground="#CBD5E1",
+                bg=_BG_INACTIVE,
+                highlightbackground=_BORDER_INACTIVE,
                 highlightthickness=1,
             )
             btn_fold = tk.Label(
                 fold_frame,
                 text="+" if collapsed["value"] else "—",
-                bg="#F1F5F9",
-                fg="#334155",
+                bg=_BG_INACTIVE,
+                fg="#A1A1AA",
                 font=("Segoe UI Bold", 8),
-                padx=6,
-                pady=2,
+                padx=7,
+                pady=3,
                 cursor="hand2",
             )
             btn_fold.pack()
+            btn_fold.bind("<Enter>", lambda _e: btn_fold.configure(bg=_BG_INACTIVE_HOVER, fg="#FFFFFF"))
+            btn_fold.bind("<Leave>", lambda _e: btn_fold.configure(bg=_BG_INACTIVE, fg="#A1A1AA"))
             btn_fold.bind("<Button-1>", lambda _e: _toggle_collapse())
             return fold_frame
 
@@ -297,25 +564,57 @@ class FloatingProfileTabBar:
             is_loading: bool,
             vertical: bool,
         ) -> object:
-            tab_bg = "#5B3FA8" if is_active else "#F8FAFC"
-            tab_border = "#4C3294" if is_active else "#CBD5E1"
-            tab_fg = "#FFFFFF" if is_active else "#1E293B"
-            dot = "⏳" if is_loading else "●"
+            tab_bg = _BG_ACTIVE if is_active else _BG_INACTIVE
+            tab_border = _BORDER_ACTIVE if is_active else _BORDER_INACTIVE
+            tab_fg = _FG_ACTIVE if is_active else _FG_INACTIVE
+            close_fg = _CLOSE_ACTIVE if is_active else _CLOSE_INACTIVE
+            close_hover_fg = _CLOSE_ACTIVE_HOVER if is_active else _CLOSE_INACTIVE_HOVER
 
             tab_frame = tk.Frame(
                 parent,
                 bg=tab_bg,
                 highlightbackground=tab_border,
                 highlightthickness=1,
+                padx=3,
+                pady=1,
             )
+
+            # Left Circular Muse Avatar (or monochrome avatar placeholder)
+            avatar_img = _get_avatar_photo(pname)
+            if avatar_img is not None:
+                av_lbl = tk.Label(
+                    tab_frame,
+                    image=avatar_img,
+                    bg=tab_bg,
+                    bd=0,
+                    padx=2,
+                    pady=1,
+                    cursor="hand2",
+                )
+                av_lbl.image = avatar_img  # type: ignore[attr-defined]
+            else:
+                badge_txt = "⏳" if is_loading else "⊕"
+                av_lbl = tk.Label(
+                    tab_frame,
+                    text=badge_txt,
+                    bg=tab_bg,
+                    fg="#09090B" if is_active else "#A1A1AA",
+                    font=("Segoe UI Semibold", 9),
+                    padx=4,
+                    pady=1,
+                    cursor="hand2",
+                )
+            av_lbl.pack(side="left", padx=(2, 1))
+            av_lbl.bind("<Button-1>", lambda e, n=pname: _open_avatar_menu(e, n))
+            av_lbl.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
 
             btn_select = tk.Label(
                 tab_frame,
-                text=f"{dot} {pname}",
+                text=pname,
                 bg=tab_bg,
                 fg=tab_fg,
                 font=("Segoe UI Semibold" if is_active else "Segoe UI", 9),
-                padx=7,
+                padx=6,
                 pady=2,
                 anchor="w" if vertical else "center",
                 cursor="hand2",
@@ -323,59 +622,83 @@ class FloatingProfileTabBar:
             btn_select.pack(side="left", fill="x" if vertical else "none", expand=vertical)
             btn_select.bind(
                 "<Button-1>",
-                lambda _e, n=pname: self._on_select_tab(n),
+                lambda _e, n=pname: (_close_popup_menu(), self._on_select_tab(n)),
+            )
+            btn_select.bind(
+                "<Button-3>",
+                lambda e, n=pname: _open_avatar_menu(e, n),
             )
 
             btn_close = tk.Label(
                 tab_frame,
                 text="✕",
                 bg=tab_bg,
-                fg="#DDD6FE" if is_active else "#94A3B8",
+                fg=close_fg,
                 font=("Segoe UI", 8),
                 padx=5,
                 pady=2,
                 cursor="hand2",
             )
             btn_close.pack(side="right" if vertical else "left")
+            btn_close.bind("<Enter>", lambda _e: btn_close.configure(fg=close_hover_fg))
+            btn_close.bind("<Leave>", lambda _e: btn_close.configure(fg=close_fg))
             btn_close.bind(
                 "<Button-1>",
-                lambda _e, n=pname: self._on_close_tab(n),
+                lambda _e, n=pname: (_close_popup_menu(), self._on_close_tab(n)),
             )
+
+            if not is_active:
+                def _on_enter(_e: object) -> None:
+                    tab_frame.configure(bg=_BG_INACTIVE_HOVER, highlightbackground="#3F3F46")
+                    av_lbl.configure(bg=_BG_INACTIVE_HOVER)
+                    btn_select.configure(bg=_BG_INACTIVE_HOVER, fg="#FFFFFF")
+                    btn_close.configure(bg=_BG_INACTIVE_HOVER)
+
+                def _on_leave(_e: object) -> None:
+                    tab_frame.configure(bg=_BG_INACTIVE, highlightbackground=_BORDER_INACTIVE)
+                    av_lbl.configure(bg=_BG_INACTIVE)
+                    btn_select.configure(bg=_BG_INACTIVE, fg=_FG_INACTIVE)
+                    btn_close.configure(bg=_BG_INACTIVE)
+
+                tab_frame.bind("<Enter>", _on_enter)
+                tab_frame.bind("<Leave>", _on_leave)
+                btn_select.bind("<Enter>", _on_enter)
+                btn_select.bind("<Leave>", _on_leave)
+
             return tab_frame
 
         def _make_action_pill(
             parent: object,
             text: str,
-            bg: str,
-            fg: str,
-            border: str,
             on_click: Callable[[], None],
         ) -> object:
             frame = tk.Frame(
                 parent,
-                bg=bg,
-                highlightbackground=border,
+                bg=_BG_INACTIVE,
+                highlightbackground=_BORDER_INACTIVE,
                 highlightthickness=1,
             )
             lbl = tk.Label(
                 frame,
                 text=text,
-                bg=bg,
-                fg=fg,
+                bg=_BG_INACTIVE,
+                fg="#FAFAFA",
                 font=("Segoe UI Semibold", 8),
-                padx=7,
-                pady=2,
+                padx=8,
+                pady=3,
                 cursor="hand2",
             )
             lbl.pack(fill="x", expand=True)
-            lbl.bind("<Button-1>", lambda _e: on_click())
+            lbl.bind("<Enter>", lambda _e: lbl.configure(bg=_BG_INACTIVE_HOVER))
+            lbl.bind("<Leave>", lambda _e: lbl.configure(bg=_BG_INACTIVE))
+            lbl.bind("<Button-1>", lambda _e: (_close_popup_menu(), on_click()))
             return frame
 
         def _rebuild(
             running: tuple[str, ...],
             loading: frozenset[str],
             active_tab: str | None,
-            single_stage: bool,
+            _single_stage: bool,
         ) -> None:
             for child in outer.winfo_children():
                 child.destroy()
@@ -398,9 +721,8 @@ class FloatingProfileTabBar:
                 fold_btn = _make_fold_btn(outer)
                 fold_btn.pack(side="left", padx=(1, 0))  # type: ignore[attr-defined]
             elif orient == "vertical":
-                # Vertical layout (docked on left or right side -> expands downwards)
-                header_row = tk.Frame(outer, bg="#FFFFFF")
-                header_row.pack(side="top", fill="x", pady=(0, 3))
+                header_row = tk.Frame(outer, bg=_BG_BAR)
+                header_row.pack(side="top", fill="x", pady=(0, 4))
                 _bind_drag(header_row, click_toggle_home=False)
 
                 logo_lbl = _make_logo(header_row)
@@ -416,21 +738,17 @@ class FloatingProfileTabBar:
                         pname in loading,
                         vertical=True,
                     )
-                    pill.pack(side="top", fill="x", pady=1)  # type: ignore[attr-defined]
+                    pill.pack(side="top", fill="x", pady=2)  # type: ignore[attr-defined]
 
                 btn_home = _make_action_pill(
                     outer,
                     get_string("floating_bar_home_btn"),
-                    bg="#F8FAFC",
-                    fg="#1E293B",
-                    border="#CBD5E1",
                     on_click=self._on_focus_foxprofile,
                 )
-                btn_home.pack(side="top", fill="x", pady=(3, 0))  # type: ignore[attr-defined]
+                btn_home.pack(side="top", fill="x", pady=(4, 0))  # type: ignore[attr-defined]
             else:
-                # Horizontal layout (top or bottom of screen -> expands horizontally)
                 logo_lbl = _make_logo(outer)
-                logo_lbl.pack(side="left", padx=(1, 4))  # type: ignore[attr-defined]
+                logo_lbl.pack(side="left", padx=(1, 5))  # type: ignore[attr-defined]
 
                 for pname in running:
                     pill = _make_tab_pill(
@@ -445,9 +763,6 @@ class FloatingProfileTabBar:
                 btn_home = _make_action_pill(
                     outer,
                     get_string("floating_bar_home_btn"),
-                    bg="#F8FAFC",
-                    fg="#1E293B",
-                    border="#CBD5E1",
                     on_click=self._on_focus_foxprofile,
                 )
                 btn_home.pack(side="left", padx=(5, 2))  # type: ignore[attr-defined]
@@ -468,7 +783,7 @@ class FloatingProfileTabBar:
                 drag_state["win_y"] = y
             else:
                 x = max(8, (scr_w - req_w) // 2)
-                y = 0
+                y = 4
             root.geometry(f"{req_w}x{req_h}+{x}+{y}")
 
         def _poll() -> None:
@@ -481,6 +796,7 @@ class FloatingProfileTabBar:
 
             if not enabled or not running:
                 if last_rendered[0] != "hidden":
+                    _close_popup_menu()
                     root.withdraw()
                     last_rendered[0] = "hidden"
                 root.after(150, _poll)
@@ -495,6 +811,7 @@ class FloatingProfileTabBar:
                 scr_h,
                 bool(drag_state["custom_pos"]),
             )
+            av_sig = tuple(avatar_version(n) for n in running)
             render_key = (
                 running,
                 loading,
@@ -502,13 +819,14 @@ class FloatingProfileTabBar:
                 single_stage,
                 collapsed["value"],
                 cur_orient,
+                av_sig,
             )
             if render_key != last_rendered[0]:
                 was_hidden = last_rendered[0] in (None, "hidden")
                 _rebuild(running, loading, active_tab, single_stage)
                 if was_hidden:
                     root.deiconify()
-                    _apply_win32_toolwindow(root.winfo_id())
+                _apply_win32_toolwindow(root.winfo_id())
                 with contextlib.suppress(Exception):
                     root.attributes("-topmost", True)
                 last_rendered[0] = render_key

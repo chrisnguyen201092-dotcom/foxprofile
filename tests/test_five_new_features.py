@@ -4742,6 +4742,26 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     app._on_select_browser_tab("#1  Monica")
     assert switched_calls[-1] == ("#1  Monica", True)
 
+    # 5. Per-profile circular Muse avatar store (isolated outside camoufox_data)
+    from src.services.avatar_store import (
+        _save_square_rgba_buffers,
+        apply_circular_mask_bgra_to_rgba,
+        avatar_version,
+        get_avatar_path,
+        remove_avatar,
+    )
+
+    av_dir = str(tmp_path / "avatars")
+    assert get_avatar_path("#1  Monica", 22, avatars_dir=av_dir) is None
+    rgba_22 = apply_circular_mask_bgra_to_rgba(b"\x80\x90\xa0\xff" * (22 * 22), 22)
+    rgba_64 = apply_circular_mask_bgra_to_rgba(b"\x80\x90\xa0\xff" * (64 * 64), 64)
+    assert _save_square_rgba_buffers("#1  Monica", rgba_22, rgba_64, avatars_dir=av_dir) is True
+    p22 = get_avatar_path("#1  Monica", 22, avatars_dir=av_dir)
+    assert p22 is not None and p22.endswith("_22.png")
+    assert avatar_version("#1  Monica", avatars_dir=av_dir) > 0.0
+    assert remove_avatar("#1  Monica", avatars_dir=av_dir) is True
+    assert get_avatar_path("#1  Monica", 22, avatars_dir=av_dir) is None
+
 
 
 
