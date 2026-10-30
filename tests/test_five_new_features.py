@@ -4762,6 +4762,7 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
 
     # Verify Profile Row (build_profile_card) displays circular Muse Avatar when present
     import flet as ft
+
     import src.services.avatar_store as av_mod
     from src.ui.components.profile_card import build_profile_card
 
