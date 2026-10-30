@@ -403,3 +403,177 @@ def save_avatar_from_file(
             gdiplus.GdiplusShutdown(token)
     except Exception:
         return False
+
+
+def find_muse_connected_avatar_box_bgra(
+    raw_bgra: bytes,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int] | None:
+    """Detect the `⚡ Connected` green badge in a BGRA frame and return the circular avatar bbox `(x1, y1, x2, y2)`."""
+    if width < 160 or height < 180 or len(raw_bgra) < width * height * 4:
+        return None
+
+    # Scan with stride=2 to locate the ~14x14 green `⚡ Connected` circle quickly
+    visited: set[tuple[int, int]] = set()
+    for sy in range(160, height - 10, 2):
+        row_off = sy * width * 4
+        for sx in range(20, width - 60, 2):
+            idx = row_off + sx * 4
+            b = raw_bgra[idx]
+            g = raw_bgra[idx + 1]
+            r = raw_bgra[idx + 2]
+            if g > 120 and r < 60 and b < 60 and (sx, sy) not in visited:
+                # Flood/window gather around (sx, sy) within +/- 18px
+                gx_min = sx
+                gx_max = sx
+                gy_min = sy
+                gy_max = sy
+                count = 0
+                for yy in range(max(0, sy - 16), min(height, sy + 18)):
+                    r_off = yy * width * 4
+                    for xx in range(max(0, sx - 16), min(width, sx + 18)):
+                        ii = r_off + xx * 4
+                        bb, gg, rr = raw_bgra[ii], raw_bgra[ii + 1], raw_bgra[ii + 2]
+                        if gg > 120 and rr < 60 and bb < 60:
+                            visited.add((xx, yy))
+                            count += 1
+                            if xx < gx_min:
+                                gx_min = xx
+                            if xx > gx_max:
+                                gx_max = xx
+                            if yy < gy_min:
+                                gy_min = yy
+                            if yy > gy_max:
+                                gy_max = yy
+                gw = gx_max - gx_min + 1
+                gh = gy_max - gy_min + 1
+                if 9 <= gw <= 26 and 9 <= gh <= 26 and 55 <= count <= 420:
+                    scale = max(0.85, min(2.0, (gw + gh) / 28.0))
+                    gx_c = (gx_min + gx_max) / 2.0
+                    gy_c = (gy_min + gy_max) / 2.0
+                    x1 = int(round(gx_c - 13.0 * scale))
+                    y1 = int(round(gy_c - 174.0 * scale))
+                    x2 = int(round(gx_c + 109.0 * scale))
+                    y2 = int(round(gy_c - 52.0 * scale))
+                    if x1 >= 0 and y1 >= 0 and x2 <= width and y2 <= height and (x2 - x1) >= 48:
+                        # Verify avatar center has non-uniform content
+                        cx = (x1 + x2) // 2
+                        cy = (y1 + y2) // 2
+                        c_idx = (cy * width + cx) * 4
+                        cb, cg, cr = raw_bgra[c_idx], raw_bgra[c_idx + 1], raw_bgra[c_idx + 2]
+                        if not (cr > 250 and cg > 250 and cb > 250):
+                            return (x1, y1, x2, y2)
+    return None
+
+
+def auto_capture_muse_avatar_from_active_window(
+    profile_name: str,
+    *,
+    avatars_dir: str | None = None,
+) -> bool:
+    """Passively inspect the foreground Camoufox window for the Muse `⚡ Connected` card and auto-save its avatar."""
+    if sys.platform != "win32" or not profile_name:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        fg = user32.GetForegroundWindow()
+        if not fg or user32.IsIconic(fg):
+            return False
+
+        length = user32.GetWindowTextLengthW(fg)
+        if length <= 0:
+            return False
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(fg, buf, length + 1)
+        title = buf.value or ""
+        prefix = f"[{profile_name}] "
+        if not (title.startswith(prefix) or "Muse" in title or " — " in title):
+            return False
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        rect = RECT()
+        if not user32.GetWindowRect(fg, ctypes.byref(rect)):
+            return False
+        win_w = int(rect.right - rect.left)
+        win_h = int(rect.bottom - rect.top)
+        if win_w < 300 or win_h < 300:
+            return False
+
+        # Only scan the top 480px band of the browser window where the Muse card opens
+        scan_x = int(rect.left) + 8
+        scan_y = int(rect.top) + 70
+        scan_w = min(win_w - 16, 1600)
+        scan_h = min(win_h - 80, 440)
+        if scan_w < 200 or scan_h < 200:
+            return False
+
+        srccopy = 0x00CC0020
+        screen_dc = user32.GetDC(0)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = scan_w
+        bmi.biHeight = -scan_h
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0
+
+        bits_ptr = ctypes.c_void_p()
+        dib = gdi32.CreateDIBSection(mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0)
+        if not dib or not bits_ptr.value:
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(0, screen_dc)
+            return False
+
+        old = gdi32.SelectObject(mem_dc, dib)
+        try:
+            gdi32.BitBlt(mem_dc, 0, 0, scan_w, scan_h, screen_dc, scan_x, scan_y, srccopy)
+            raw_bgra = ctypes.string_at(bits_ptr.value, scan_w * scan_h * 4)
+        finally:
+            gdi32.SelectObject(mem_dc, old)
+            gdi32.DeleteObject(dib)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(0, screen_dc)
+
+        box = find_muse_connected_avatar_box_bgra(raw_bgra, scan_w, scan_h)
+        if box is None:
+            return False
+        bx1, by1, bx2, by2 = box
+        return save_avatar_from_screen_rect(
+            profile_name,
+            scan_x + bx1,
+            scan_y + by1,
+            scan_x + bx2,
+            scan_y + by2,
+            avatars_dir=avatars_dir,
+        )
+    except Exception:
+        return False

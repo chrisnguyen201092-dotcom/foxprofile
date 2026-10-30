@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from ...core.strings import get_string
 from ...services.avatar_store import (
+    auto_capture_muse_avatar_from_active_window,
     avatar_version,
     get_avatar_path,
     remove_avatar,
@@ -209,6 +210,7 @@ class FloatingProfileTabBar:
         last_rendered: list[object] = [None]
         photo_cache: dict[tuple[str, float], object] = {}
         active_menu: list[object] = [None]
+        poll_tick: list[int] = [0]
 
         def _close_popup_menu() -> None:
             if active_menu[0] is not None:
@@ -801,6 +803,15 @@ class FloatingProfileTabBar:
                     last_rendered[0] = "hidden"
                 root.after(150, _poll)
                 return
+
+            poll_tick[0] += 1
+            eff_cur = active_tab if active_tab in running else (running[0] if running else None)
+            if (
+                eff_cur
+                and poll_tick[0] % 10 == 0
+                and auto_capture_muse_avatar_from_active_window(eff_cur)
+            ):
+                _notify_avatar_updated()
 
             scr_w = root.winfo_screenwidth()
             scr_h = root.winfo_screenheight()
