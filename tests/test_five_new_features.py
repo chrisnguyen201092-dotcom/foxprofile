@@ -4757,10 +4757,16 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     rgba_64 = apply_circular_mask_bgra_to_rgba(b"\x80\x90\xa0\xff" * (64 * 64), 64)
     assert _save_square_rgba_buffers("#1  Monica", rgba_22, rgba_64, avatars_dir=av_dir) is True
     p22 = get_avatar_path("#1  Monica", 22, avatars_dir=av_dir)
+    p64 = get_avatar_path("#1  Monica", 64, avatars_dir=av_dir)
     assert p22 is not None and p22.endswith("_22.png")
+    assert p64 is not None and p64.endswith(".gif")
+    with open(p64, "rb") as _gf:
+        gif_raw = _gf.read()
+    assert gif_raw.startswith(b"GIF89a") and b"NETSCAPE2.0" in gif_raw
     assert avatar_version("#1  Monica", avatars_dir=av_dir) > 0.0
 
-    # Verify Profile Row (build_profile_card) displays circular Muse Avatar when present
+    # Verify Profile Row (build_profile_card) displays animated circular Muse Avatar
+    # and places GestureDetector OUTSIDE ReorderableDragHandle
     import flet as ft
 
     import src.services.avatar_store as av_mod
@@ -4778,34 +4784,66 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
             lambda _n: None,
             lambda _n: None,
             lambda _n: None,
+            draggable=True,
             on_status_click=lambda _n: None,
             on_avatar_double_click=lambda n: dbl_clicked.append(n),
         )
         name_cell = card_ctrl.content.controls[1]
-        lead_ring = name_cell.content.controls[0]
+        assert isinstance(name_cell.content, ft.Row)
+        gesture_det = name_cell.content.controls[0]
+        drag_wrapped_text = name_cell.content.controls[1]
+        assert isinstance(gesture_det, ft.GestureDetector)
+        assert isinstance(drag_wrapped_text, ft.ReorderableDragHandle)
+
+        lead_ring = gesture_det.content
         assert lead_ring.width == 36 and lead_ring.height == 36
         assert isinstance(lead_ring.content.content, ft.Image)
+        assert str(lead_ring.content.content.src).endswith(".gif")
 
         class _FakeEvt:
             def __init__(self, control: object, data: str = "") -> None:
                 self.control = control
                 self.data = data
 
-        lead_ring.on_hover(_FakeEvt(lead_ring, "true"))
-        assert lead_ring.scale == 1.16
-        lead_ring.on_hover(_FakeEvt(lead_ring, "false"))
+        gesture_det.on_enter(_FakeEvt(gesture_det))
+        assert lead_ring.scale == 1.15
+        gesture_det.on_exit(_FakeEvt(gesture_det))
         assert lead_ring.scale == 1.0
 
-        # 1st click bounces without opening dialog; 2nd click (double-click) triggers callback
+        # Native double-tap triggers callback immediately
+        gesture_det.on_double_tap(_FakeEvt(gesture_det))
+        assert dbl_clicked == ["#1  Monica"]
+        dbl_clicked.clear()
+
+        # Fallback 2-click timing also triggers callback
         lead_ring.on_click(_FakeEvt(lead_ring))
         assert dbl_clicked == []
         lead_ring.on_click(_FakeEvt(lead_ring))
         assert dbl_clicked == ["#1  Monica"]
+
+        # Profile without an avatar file (#2  Sienna) still gets a 36x36 circular placeholder badge
+        prof_no_av = isolated_pm.profiles["#2  Sienna"]
+        card_no_av = build_profile_card(
+            prof_no_av,
+            False,
+            False,
+            lambda _n: None,
+            lambda _n: None,
+            lambda _n: None,
+            draggable=True,
+            on_avatar_double_click=lambda n: dbl_clicked.append(n),
+        )
+        no_av_gesture = card_no_av.content.controls[1].content.controls[0]
+        assert isinstance(no_av_gesture, ft.GestureDetector)
+        assert no_av_gesture.content.width == 36 and no_av_gesture.content.height == 36
+        no_av_gesture.on_double_tap(_FakeEvt(no_av_gesture))
+        assert dbl_clicked[-1] == "#2  Sienna"
     finally:
         av_mod.AVATARS_DIR = orig_av_dir
 
     assert remove_avatar("#1  Monica", avatars_dir=av_dir) is True
     assert get_avatar_path("#1  Monica", 22, avatars_dir=av_dir) is None
+    assert get_avatar_path("#1  Monica", 64, avatars_dir=av_dir) is None
 
 
 

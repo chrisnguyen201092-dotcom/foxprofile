@@ -1459,6 +1459,7 @@ class AppHandlers:
             return
         from ..services.avatar_store import (
             get_avatar_path,
+            launch_avatar_screen_snipper,
             remove_avatar,
             save_avatar_from_clipboard,
             save_avatar_from_file,
@@ -1520,6 +1521,20 @@ class AppHandlers:
                 self._log(get_string("avatar_updated_log", name=name))
                 self._refresh()
 
+        def _on_snip_screen(_: ft.ControlEvent) -> None:
+            page.pop_dialog()
+
+            def _after_snip(saved: bool) -> None:
+                if saved:
+                    self._log(get_string("avatar_updated_log", name=name))
+                    self._refresh()
+
+            launch_avatar_screen_snipper(
+                name,
+                on_done=_after_snip,
+                hint_text=get_string("avatar_snip_hint", name=name),
+            )
+
         def _on_pick_file(_: ft.ControlEvent) -> None:
             page.run_task(_pick_file_async)
 
@@ -1539,11 +1554,11 @@ class AppHandlers:
 
         btn_rows: list[ft.Control] = [
             ft.Button(
-                get_string("avatar_menu_file"),
-                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                get_string("avatar_menu_snip"),
+                icon=ft.Icons.CROP_FREE_ROUNDED,
                 style=PRIMARY_STYLE,
                 height=38,
-                on_click=_on_pick_file,
+                on_click=_on_snip_screen,
             ),
             ft.OutlinedButton(
                 get_string("avatar_menu_paste"),
@@ -1551,6 +1566,13 @@ class AppHandlers:
                 style=OUTLINE_STYLE,
                 height=38,
                 on_click=_on_paste_clipboard,
+            ),
+            ft.OutlinedButton(
+                get_string("avatar_menu_file"),
+                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                style=OUTLINE_STYLE,
+                height=38,
+                on_click=_on_pick_file,
             ),
         ]
         if cur_av:

@@ -16,7 +16,11 @@ import os
 import pathlib
 import struct
 import sys
+import threading
+import time
 import zlib
+from collections import Counter
+from collections.abc import Callable
 
 AVATARS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "avatars")
@@ -27,14 +31,37 @@ def _profile_key(profile_name: str) -> str:
     return hashlib.sha1(profile_name.encode("utf-8")).hexdigest()[:16]
 
 
+def _cleanup_animated_gifs(base_dir: pathlib.Path, key: str) -> None:
+    if not base_dir.is_dir():
+        return
+    for p in base_dir.glob(f"{key}_64*.gif"):
+        with contextlib.suppress(OSError):
+            p.unlink()
+
+
 def get_avatar_path(profile_name: str, size: int = 22, *, avatars_dir: str | None = None) -> str | None:
     """Return path to the profile's circular avatar of `size` (22 or 64, `.gif` or `.png`), or None."""
     base = avatars_dir or AVATARS_DIR
     key = _profile_key(profile_name)
     if size > 24:
-        gif_path = os.path.join(base, f"{key}_64.gif")
-        if os.path.isfile(gif_path):
-            return gif_path
+        base_path = pathlib.Path(base)
+        if base_path.is_dir():
+            gifs = sorted(
+                base_path.glob(f"{key}_64*.gif"),
+                key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+                reverse=True,
+            )
+            if gifs:
+                return str(gifs[0])
+            png_64 = base_path / f"{key}_64.png"
+            if png_64.is_file():
+                with contextlib.suppress(Exception):
+                    rgba = decode_rgba_png(png_64.read_bytes())
+                    if rgba is not None and len(rgba) == 64 * 64 * 4:
+                        ms = int(time.time() * 1000)
+                        gif_out = base_path / f"{key}_64_{ms}.gif"
+                        gif_out.write_bytes(encode_animated_avatar_gif(rgba))
+                        return str(gif_out)
     suffix = "_22.png" if size <= 24 else "_64.png"
     path = os.path.join(base, f"{key}{suffix}")
     if os.path.isfile(path):
@@ -45,8 +72,8 @@ def get_avatar_path(profile_name: str, size: int = 22, *, avatars_dir: str | Non
 
 def avatar_version(profile_name: str, *, avatars_dir: str | None = None) -> float:
     """Return mtime of the profile's avatar (0.0 if none) for UI cache invalidation."""
-    p = get_avatar_path(profile_name, 64, avatars_dir=avatars_dir) or get_avatar_path(
-        profile_name, 22, avatars_dir=avatars_dir
+    p = get_avatar_path(profile_name, 22, avatars_dir=avatars_dir) or get_avatar_path(
+        profile_name, 64, avatars_dir=avatars_dir
     )
     if not p:
         return 0.0
@@ -57,15 +84,15 @@ def avatar_version(profile_name: str, *, avatars_dir: str | None = None) -> floa
 
 def remove_avatar(profile_name: str, *, avatars_dir: str | None = None) -> bool:
     """Delete any saved avatar files for `profile_name`."""
-    base = avatars_dir or AVATARS_DIR
+    base_path = pathlib.Path(avatars_dir or AVATARS_DIR)
     key = _profile_key(profile_name)
     removed = False
-    for suffix in ("_22.png", "_64.png", "_64.gif"):
-        p = pathlib.Path(base) / f"{key}{suffix}"
-        if p.is_file():
-            with contextlib.suppress(OSError):
-                p.unlink()
-                removed = True
+    if base_path.is_dir():
+        for p in list(base_path.glob(f"{key}_22*")) + list(base_path.glob(f"{key}_64*")):
+            if p.is_file():
+                with contextlib.suppress(OSError):
+                    p.unlink()
+                    removed = True
     return removed
 
 
@@ -90,6 +117,270 @@ def encode_rgba_png(width: int, height: int, rgba_bytes: bytes) -> bytes:
         + _chunk(b"IDAT", compressed)
         + _chunk(b"IEND", b"")
     )
+
+
+def decode_rgba_png(png_bytes: bytes) -> bytes | None:
+    """Decode an 8-bit RGBA filter-0 PNG created by `encode_rgba_png` into raw RGBA bytes."""
+    if not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    pos = 8
+    w = h = 0
+    idat = bytearray()
+    while pos + 8 <= len(png_bytes):
+        length = struct.unpack(">I", png_bytes[pos : pos + 4])[0]
+        tag = png_bytes[pos + 4 : pos + 8]
+        data = png_bytes[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if tag == b"IHDR":
+            w, h, bit_depth, color_type = struct.unpack(">IIBB", data[:10])
+            if bit_depth != 8 or color_type != 6 or w <= 0 or h <= 0:
+                return None
+        elif tag == b"IDAT":
+            idat.extend(data)
+        elif tag == b"IEND":
+            break
+    if w <= 0 or h <= 0 or not idat:
+        return None
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except Exception:
+        return None
+    stride = w * 4
+    if len(raw) < h * (stride + 1):
+        return None
+    out = bytearray(w * h * 4)
+    for y in range(h):
+        row_start = y * (stride + 1)
+        if raw[row_start] != 0:
+            return None
+        out[y * stride : (y + 1) * stride] = raw[row_start + 1 : row_start + 1 + stride]
+    return bytes(out)
+
+
+def _lzw_encode_gif8(indices: bytes) -> bytes:
+    """Encode 8-bit palette indices into GIF89a LZW image data sub-blocks."""
+    clear_code = 256
+    eoi_code = 257
+    next_code = 258
+    code_size = 9
+    max_code = 512
+    table: dict[int, int] = {}
+
+    bit_buf = 0
+    bit_cnt = 0
+    out_bytes = bytearray()
+
+    def emit(code: int, c_size: int) -> None:
+        nonlocal bit_buf, bit_cnt
+        bit_buf |= (code & ((1 << c_size) - 1)) << bit_cnt
+        bit_cnt += c_size
+        while bit_cnt >= 8:
+            out_bytes.append(bit_buf & 0xFF)
+            bit_buf >>= 8
+            bit_cnt -= 8
+
+    emit(clear_code, code_size)
+    if not indices:
+        emit(eoi_code, code_size)
+    else:
+        prefix = indices[0]
+        for k in indices[1:]:
+            key = (prefix << 8) | k
+            hit = table.get(key)
+            if hit is not None:
+                prefix = hit
+            else:
+                emit(prefix, code_size)
+                if next_code < 4096:
+                    table[key] = next_code
+                    next_code += 1
+                    if next_code > max_code and code_size < 12:
+                        code_size += 1
+                        max_code = 1 << code_size
+                else:
+                    emit(clear_code, code_size)
+                    table.clear()
+                    next_code = 258
+                    code_size = 9
+                    max_code = 512
+                prefix = k
+        emit(prefix, code_size)
+        emit(eoi_code, code_size)
+
+    if bit_cnt > 0:
+        out_bytes.append(bit_buf & 0xFF)
+
+    blocks = bytearray([8])  # LZW minimum code size = 8
+    pos = 0
+    n = len(out_bytes)
+    while pos < n:
+        chunk = out_bytes[pos : pos + 255]
+        blocks.append(len(chunk))
+        blocks.extend(chunk)
+        pos += 255
+    blocks.append(0)
+    return bytes(blocks)
+
+
+def encode_animated_avatar_gif(rgba_64: bytes) -> bytes:
+    """Generate an 8-frame looping 64x64 `GIF89a` with lively plush idle motion (bob + squash/stretch + head tilt)."""
+    size = 64
+    cx = 31.5
+    cy = 31.5
+    max_sample_r = 28.8
+    outer_r = 31.2
+
+    frames_rgb: list[list[tuple[int, int, int] | None]] = []
+    bucket_counts: Counter[tuple[int, int, int]] = Counter()
+
+    num_frames = 8
+    for f in range(num_frames):
+        angle = (2.0 * math.pi * f) / num_frames
+        # Cute plush idle motion: vertical bounce + squash/stretch + slight head rock
+        shift_y = 2.6 * math.sin(angle)
+        scale_x = 1.0 + 0.055 * math.cos(angle)
+        scale_y = 1.0 - 0.055 * math.cos(angle)
+        theta = 0.075 * math.sin(angle)
+        cos_t = math.cos(-theta)
+        sin_t = math.sin(-theta)
+
+        frame_pixels: list[tuple[int, int, int] | None] = [None] * (size * size)
+        for y in range(size):
+            dy = y - cy
+            for x in range(size):
+                dx = x - cx
+                dist = math.hypot(dx, dy)
+                if dist >= outer_r:
+                    continue
+                wy = dy + shift_y
+                wx = dx
+                rx = (wx * cos_t - wy * sin_t) / scale_x
+                ry = (wx * sin_t + wy * cos_t) / scale_y
+                s_dist = math.hypot(rx, ry)
+                if s_dist > max_sample_r:
+                    scale_back = max_sample_r / s_dist
+                    rx *= scale_back
+                    ry *= scale_back
+                sx = max(0.0, min(size - 1.001, cx + rx))
+                sy = max(0.0, min(size - 1.001, cy + ry))
+
+                x0 = int(sx)
+                y0 = int(sy)
+                fx = sx - x0
+                fy = sy - y0
+                x1 = min(size - 1, x0 + 1)
+                y1 = min(size - 1, y0 + 1)
+
+                i00 = (y0 * size + x0) * 4
+                i10 = (y0 * size + x1) * 4
+                i01 = (y1 * size + x0) * 4
+                i11 = (y1 * size + x1) * 4
+
+                w00 = (1.0 - fx) * (1.0 - fy)
+                w10 = fx * (1.0 - fy)
+                w01 = (1.0 - fx) * fy
+                w11 = fx * fy
+
+                r = int(
+                    round(
+                        rgba_64[i00] * w00
+                        + rgba_64[i10] * w10
+                        + rgba_64[i01] * w01
+                        + rgba_64[i11] * w11
+                    )
+                )
+                g = int(
+                    round(
+                        rgba_64[i00 + 1] * w00
+                        + rgba_64[i10 + 1] * w10
+                        + rgba_64[i01 + 1] * w01
+                        + rgba_64[i11 + 1] * w11
+                    )
+                )
+                b = int(
+                    round(
+                        rgba_64[i00 + 2] * w00
+                        + rgba_64[i10 + 2] * w10
+                        + rgba_64[i01 + 2] * w01
+                        + rgba_64[i11 + 2] * w11
+                    )
+                )
+
+                if dist >= 29.5:
+                    ring_t = max(0.0, min(1.0, (dist - 29.5) / 1.7)) * 0.4
+                    r = int(round(r * (1.0 - ring_t) + 251 * ring_t))
+                    g = int(round(g * (1.0 - ring_t) + 251 * ring_t))
+                    b = int(round(b * (1.0 - ring_t) + 248 * ring_t))
+
+                b5 = (r >> 3, g >> 3, b >> 3)
+                frame_pixels[y * size + x] = b5
+                bucket_counts[b5] += 1
+        frames_rgb.append(frame_pixels)
+
+    sorted_buckets = [b5 for b5, _ in bucket_counts.most_common()]
+    palette_rgb: list[tuple[int, int, int]] = []
+    used_set: set[tuple[int, int, int]] = set()
+    for min_dist_sq in (144, 36, 0):
+        for b5 in sorted_buckets:
+            if len(palette_rgb) >= 255:
+                break
+            if b5 in used_set:
+                continue
+            cr = (b5[0] << 3) | (b5[0] >> 2)
+            cg = (b5[1] << 3) | (b5[1] >> 2)
+            cb = (b5[2] << 3) | (b5[2] >> 2)
+            if min_dist_sq > 0 and any(
+                (cr - pr) ** 2 + (cg - pg) ** 2 + (cb - pb) ** 2 < min_dist_sq
+                for pr, pg, pb in palette_rgb
+            ):
+                continue
+            palette_rgb.append((cr, cg, cb))
+            used_set.add(b5)
+        if len(palette_rgb) >= 255:
+            break
+
+    if not palette_rgb:
+        palette_rgb.append((251, 251, 248))
+
+    bucket_to_idx: dict[tuple[int, int, int], int] = {}
+    for b5 in sorted_buckets:
+        cr = (b5[0] << 3) | (b5[0] >> 2)
+        cg = (b5[1] << 3) | (b5[1] >> 2)
+        cb = (b5[2] << 3) | (b5[2] >> 2)
+        best_i = 0
+        best_d = 1 << 30
+        for idx, (pr, pg, pb) in enumerate(palette_rgb):
+            d = (cr - pr) ** 2 + (cg - pg) ** 2 + (cb - pb) ** 2
+            if d < best_d:
+                best_d = d
+                best_i = idx
+                if d == 0:
+                    break
+        bucket_to_idx[b5] = best_i
+
+    gct = bytearray(256 * 3)
+    for idx, (pr, pg, pb) in enumerate(palette_rgb):
+        gct[idx * 3] = pr
+        gct[idx * 3 + 1] = pg
+        gct[idx * 3 + 2] = pb
+
+    out = bytearray()
+    out.extend(b"GIF89a")
+    out.extend(struct.pack("<HHBBB", size, size, 0xF7, 255, 0))
+    out.extend(gct)
+    out.extend(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00")
+
+    delay_cs = 9  # 90ms per frame (~11 FPS continuous loop)
+    for frame_pixels in frames_rgb:
+        idx_buf = bytearray(size * size)
+        for i, b5 in enumerate(frame_pixels):
+            idx_buf[i] = 255 if b5 is None else bucket_to_idx[b5]
+        out.extend(b"\x21\xF9\x04\x09" + struct.pack("<H", delay_cs) + b"\xFF\x00")
+        out.extend(b"\x2C" + struct.pack("<HHHHB", 0, 0, size, size, 0))
+        out.extend(_lzw_encode_gif8(bytes(idx_buf)))
+
+    out.extend(b"\x3B")
+    return bytes(out)
 
 
 def apply_circular_mask_bgra_to_rgba(
@@ -145,12 +436,11 @@ def _save_square_rgba_buffers(
     base = pathlib.Path(avatars_dir or AVATARS_DIR)
     base.mkdir(parents=True, exist_ok=True)
     key = _profile_key(profile_name)
-    old_gif = base / f"{key}_64.gif"
-    if old_gif.is_file():
-        with contextlib.suppress(OSError):
-            old_gif.unlink()
+    _cleanup_animated_gifs(base, key)
     (base / f"{key}_22.png").write_bytes(encode_rgba_png(22, 22, rgba_22))
     (base / f"{key}_64.png").write_bytes(encode_rgba_png(64, 64, rgba_64))
+    ms = int(time.time() * 1000)
+    (base / f"{key}_64_{ms}.gif").write_bytes(encode_animated_avatar_gif(rgba_64))
     return True
 
 
@@ -409,8 +699,10 @@ def save_avatar_from_file(
                 base = pathlib.Path(avatars_dir or AVATARS_DIR)
                 base.mkdir(parents=True, exist_ok=True)
                 key = _profile_key(profile_name)
+                _cleanup_animated_gifs(base, key)
+                ms = int(time.time() * 1000)
                 with contextlib.suppress(OSError):
-                    (base / f"{key}_64.gif").write_bytes(pathlib.Path(file_path).read_bytes())
+                    (base / f"{key}_64_{ms}.gif").write_bytes(pathlib.Path(file_path).read_bytes())
             return ok
         finally:
             if hbmp.value:
@@ -743,3 +1035,120 @@ def get_smooth_fox_logo_path(
             gdiplus.GdiplusShutdown(token)
     except Exception:
         return None
+
+
+def launch_avatar_screen_snipper(
+    profile_name: str,
+    on_done: Callable[[bool], None] | None = None,
+    *,
+    hint_text: str = "",
+    avatars_dir: str | None = None,
+) -> None:
+    """Open a fullscreen crosshair overlay in a daemon thread to snip an avatar from any screen region."""
+    def _worker() -> None:
+        saved = False
+        try:
+            import tkinter as tk
+
+            snip = tk.Tk()
+            snip.overrideredirect(True)
+            scr_w = snip.winfo_screenwidth()
+            scr_h = snip.winfo_screenheight()
+            snip.geometry(f"{scr_w}x{scr_h}+0+0")
+            with contextlib.suppress(Exception):
+                snip.attributes("-topmost", True)
+                snip.attributes("-alpha", 0.28)
+            snip.configure(bg="#09090B", cursor="crosshair")
+
+            canvas = tk.Canvas(
+                snip,
+                bg="#09090B",
+                highlightthickness=0,
+                cursor="crosshair",
+            )
+            canvas.pack(fill="both", expand=True)
+
+            banner_label = hint_text or f"Kéo chuột khoanh vùng Avatar cho [{profile_name}] (Nhấn ESC để hủy)"
+            canvas.create_rectangle(
+                scr_w // 2 - 310,
+                16,
+                scr_w // 2 + 310,
+                52,
+                fill="#000000",
+                outline="#FFFFFF",
+                width=1,
+            )
+            canvas.create_text(
+                scr_w // 2,
+                34,
+                text=banner_label,
+                fill="#FFFFFF",
+                font=("Segoe UI Semibold", 10),
+            )
+
+            coords: dict[str, int | None] = {"x1": 0, "y1": 0, "rect": None, "oval": None}
+
+            def _cancel(_e: object = None) -> None:
+                with contextlib.suppress(Exception):
+                    snip.destroy()
+
+            def _on_press(e: object) -> None:
+                x1 = int(getattr(e, "x_root", 0))
+                y1 = int(getattr(e, "y_root", 0))
+                coords["x1"] = x1
+                coords["y1"] = y1
+                if coords["rect"]:
+                    canvas.delete(coords["rect"])
+                if coords["oval"]:
+                    canvas.delete(coords["oval"])
+                coords["rect"] = canvas.create_rectangle(
+                    x1, y1, x1, y1, outline="#FFFFFF", width=2, dash=(4, 2)
+                )
+                coords["oval"] = canvas.create_oval(
+                    x1, y1, x1, y1, outline="#FFFFFF", width=2
+                )
+
+            def _on_motion(e: object) -> None:
+                if not coords["rect"]:
+                    return
+                x1 = int(coords["x1"] or 0)
+                y1 = int(coords["y1"] or 0)
+                x2 = int(getattr(e, "x_root", 0))
+                y2 = int(getattr(e, "y_root", 0))
+                canvas.coords(coords["rect"], x1, y1, x2, y2)
+                if coords["oval"]:
+                    canvas.coords(coords["oval"], x1, y1, x2, y2)
+
+            def _on_release(e: object) -> None:
+                nonlocal saved
+                x1 = int(coords["x1"] or 0)
+                y1 = int(coords["y1"] or 0)
+                x2 = int(getattr(e, "x_root", 0))
+                y2 = int(getattr(e, "y_root", 0))
+                with contextlib.suppress(Exception):
+                    snip.destroy()
+                if abs(x2 - x1) >= 10 and abs(y2 - y1) >= 10:
+                    time.sleep(0.06)
+                    saved = save_avatar_from_screen_rect(
+                        profile_name,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        avatars_dir=avatars_dir,
+                    )
+
+            canvas.bind("<ButtonPress-1>", _on_press)
+            canvas.bind("<B1-Motion>", _on_motion)
+            canvas.bind("<ButtonRelease-1>", _on_release)
+            canvas.bind("<Button-3>", _cancel)
+            snip.bind("<Escape>", _cancel)
+            snip.focus_force()
+            snip.mainloop()
+        except Exception:
+            saved = False
+        if on_done is not None:
+            with contextlib.suppress(Exception):
+                on_done(saved)
+
+    threading.Thread(target=_worker, daemon=True).start()
