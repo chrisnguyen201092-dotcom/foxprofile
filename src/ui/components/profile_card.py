@@ -1,4 +1,5 @@
 import contextlib
+import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -20,6 +21,7 @@ from ..theme.styles import DANGER_ICON_STYLE, ICON_STYLE
 from .launch_button import build_launch_button
 
 _OS_LABELS = {"windows": "WIN", "macos": "MAC", "linux": "LIN"}
+_LAST_AVATAR_CLICK: list[object] = ["", 0.0]
 
 # One column grid for the header and every row: (expand, fixed width).
 COLUMNS = {
@@ -269,6 +271,7 @@ def build_profile_card(
     on_copy_token: Callable[[str], None] | None = None,
     on_fetch_mail_otp: Callable[[str], None] | None = None,
     on_open_mail_credentials: Callable[[str], None] | None = None,
+    on_avatar_double_click: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -568,8 +571,51 @@ def build_profile_card(
     name_parts: list[ft.Control] = []
     dot_color = profile.color or (status_disp[1] if status_disp is not None else None)
     avatar_path = get_avatar_path(profile.name, 64)
+    has_av_action = on_avatar_double_click is not None or on_status_click is not None
+    av_tip = (
+        get_string("tooltip_double_click_avatar")
+        if on_avatar_double_click is not None
+        else (get_string("tooltip_click_status") if on_status_click is not None else profile.name)
+    )
+
+    def _handle_avatar_click(e: ft.ControlEvent, n: str = profile.name) -> None:
+        if on_avatar_double_click is not None:
+            now = time.monotonic()
+            prev_name = str(_LAST_AVATAR_CLICK[0])
+            prev_ts = float(_LAST_AVATAR_CLICK[1])  # type: ignore[arg-type]
+            if prev_name == n and (now - prev_ts) <= 0.48:
+                _LAST_AVATAR_CLICK[1] = 0.0
+                on_avatar_double_click(n)
+                return
+            _LAST_AVATAR_CLICK[0] = n
+            _LAST_AVATAR_CLICK[1] = now
+            ctrl = getattr(e, "control", None)
+            if ctrl is not None:
+                with contextlib.suppress(Exception):
+                    ctrl.scale = 1.18 if getattr(ctrl, "scale", 1.0) <= 1.1 else 1.0
+                    ctrl.rotate = 0.08 if getattr(ctrl, "rotate", 0.0) <= 0.0 else -0.07
+                    ctrl.update()
+            return
+        if on_status_click is not None:
+            on_status_click(n)
+
     if avatar_path:
-        ring_color = dot_color or COLORS["rule_strong"]
+        ring_color = (
+            COLORS["success"]
+            if is_running and not profile.color
+            else (dot_color or COLORS["rule_strong"])
+        )
+
+        def _on_avatar_hover(e: ft.ControlEvent) -> None:
+            ctrl = getattr(e, "control", None)
+            if ctrl is None:
+                return
+            hovered = str(getattr(e, "data", "")).lower() == "true" or getattr(e, "data", None) is True
+            with contextlib.suppress(Exception):
+                ctrl.scale = 1.16 if hovered else 1.0
+                ctrl.rotate = -0.07 if hovered else 0.0
+                ctrl.update()
+
         name_parts.append(
             ft.Container(
                 width=36,
@@ -577,18 +623,15 @@ def build_profile_card(
                 border_radius=18,
                 padding=1.5,
                 bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(1.5, ring_color),
-                ink=on_status_click is not None,
-                tooltip=(
-                    get_string("tooltip_click_status")
-                    if on_status_click is not None
-                    else profile.name
-                ),
-                on_click=(
-                    (lambda _, n=profile.name: on_status_click(n))
-                    if on_status_click is not None
-                    else None
-                ),
+                border=ft.Border.all(2.0 if is_running else 1.5, ring_color),
+                scale=1.0,
+                rotate=0.0,
+                animate_scale=ft.Animation(220, ft.AnimationCurve.EASE_OUT_BACK),
+                animate_rotation=ft.Animation(220, ft.AnimationCurve.EASE_OUT_BACK),
+                ink=has_av_action,
+                tooltip=av_tip,
+                on_hover=_on_avatar_hover,
+                on_click=_handle_avatar_click if has_av_action else None,
                 content=ft.Container(
                     width=33,
                     height=33,
@@ -603,7 +646,7 @@ def build_profile_card(
                 ),
             )
         )
-    elif dot_color or on_status_click is not None:
+    elif dot_color or has_av_action:
         name_parts.append(
             ft.Container(
                 width=10,
@@ -611,13 +654,9 @@ def build_profile_card(
                 border_radius=5,
                 bgcolor=dot_color,
                 border=(None if dot_color else ft.Border.all(1.5, COLORS["rule_strong"])),
-                ink=on_status_click is not None,
-                tooltip=get_string("tooltip_click_status") if on_status_click is not None else None,
-                on_click=(
-                    (lambda _, n=profile.name: on_status_click(n))
-                    if on_status_click is not None
-                    else None
-                ),
+                ink=has_av_action,
+                tooltip=av_tip,
+                on_click=_handle_avatar_click if has_av_action else None,
             )
         )
     if name_parts:

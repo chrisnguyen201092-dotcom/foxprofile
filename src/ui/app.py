@@ -976,6 +976,7 @@ class App:
                     on_copy_token=self.h.on_copy_token,
                     on_fetch_mail_otp=self.h.on_fetch_mail_otp,
                     on_open_mail_credentials=self.h.on_open_mail_credentials,
+                    on_avatar_double_click=self.h.on_open_avatar_dialog,
                     monitor_info=snap.profiles.get(p.name),
                     proxy_check_state=self.state.proxy_status.get(p.name),
                 )

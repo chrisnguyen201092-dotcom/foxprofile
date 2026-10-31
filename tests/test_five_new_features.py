@@ -4770,6 +4770,7 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
     try:
         av_mod.AVATARS_DIR = av_dir
         prof_obj = isolated_pm.profiles["#1  Monica"]
+        dbl_clicked: list[str] = []
         card_ctrl = build_profile_card(
             prof_obj,
             False,
@@ -4778,11 +4779,28 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
             lambda _n: None,
             lambda _n: None,
             on_status_click=lambda _n: None,
+            on_avatar_double_click=lambda n: dbl_clicked.append(n),
         )
         name_cell = card_ctrl.content.controls[1]
         lead_ring = name_cell.content.controls[0]
         assert lead_ring.width == 36 and lead_ring.height == 36
         assert isinstance(lead_ring.content.content, ft.Image)
+
+        class _FakeEvt:
+            def __init__(self, control: object, data: str = "") -> None:
+                self.control = control
+                self.data = data
+
+        lead_ring.on_hover(_FakeEvt(lead_ring, "true"))
+        assert lead_ring.scale == 1.16
+        lead_ring.on_hover(_FakeEvt(lead_ring, "false"))
+        assert lead_ring.scale == 1.0
+
+        # 1st click bounces without opening dialog; 2nd click (double-click) triggers callback
+        lead_ring.on_click(_FakeEvt(lead_ring))
+        assert dbl_clicked == []
+        lead_ring.on_click(_FakeEvt(lead_ring))
+        assert dbl_clicked == ["#1  Monica"]
     finally:
         av_mod.AVATARS_DIR = orig_av_dir
 

@@ -28,9 +28,13 @@ def _profile_key(profile_name: str) -> str:
 
 
 def get_avatar_path(profile_name: str, size: int = 22, *, avatars_dir: str | None = None) -> str | None:
-    """Return path to the profile's circular PNG avatar of `size` (22 or 64), or None."""
+    """Return path to the profile's circular avatar of `size` (22 or 64, `.gif` or `.png`), or None."""
     base = avatars_dir or AVATARS_DIR
     key = _profile_key(profile_name)
+    if size > 24:
+        gif_path = os.path.join(base, f"{key}_64.gif")
+        if os.path.isfile(gif_path):
+            return gif_path
     suffix = "_22.png" if size <= 24 else "_64.png"
     path = os.path.join(base, f"{key}{suffix}")
     if os.path.isfile(path):
@@ -41,7 +45,9 @@ def get_avatar_path(profile_name: str, size: int = 22, *, avatars_dir: str | Non
 
 def avatar_version(profile_name: str, *, avatars_dir: str | None = None) -> float:
     """Return mtime of the profile's avatar (0.0 if none) for UI cache invalidation."""
-    p = get_avatar_path(profile_name, 22, avatars_dir=avatars_dir)
+    p = get_avatar_path(profile_name, 64, avatars_dir=avatars_dir) or get_avatar_path(
+        profile_name, 22, avatars_dir=avatars_dir
+    )
     if not p:
         return 0.0
     with contextlib.suppress(OSError):
@@ -54,7 +60,7 @@ def remove_avatar(profile_name: str, *, avatars_dir: str | None = None) -> bool:
     base = avatars_dir or AVATARS_DIR
     key = _profile_key(profile_name)
     removed = False
-    for suffix in ("_22.png", "_64.png"):
+    for suffix in ("_22.png", "_64.png", "_64.gif"):
         p = pathlib.Path(base) / f"{key}{suffix}"
         if p.is_file():
             with contextlib.suppress(OSError):
@@ -139,6 +145,10 @@ def _save_square_rgba_buffers(
     base = pathlib.Path(avatars_dir or AVATARS_DIR)
     base.mkdir(parents=True, exist_ok=True)
     key = _profile_key(profile_name)
+    old_gif = base / f"{key}_64.gif"
+    if old_gif.is_file():
+        with contextlib.suppress(OSError):
+            old_gif.unlink()
     (base / f"{key}_22.png").write_bytes(encode_rgba_png(22, 22, rgba_22))
     (base / f"{key}_64.png").write_bytes(encode_rgba_png(64, 64, rgba_64))
     return True
@@ -390,11 +400,18 @@ def save_avatar_from_file(
             )
             if status != 0 or not hbmp.value:
                 return False
-            return _scale_hbitmap_to_circular_avatars_win32(
+            ok = _scale_hbitmap_to_circular_avatars_win32(
                 int(hbmp.value),
                 profile_name,
                 avatars_dir=avatars_dir,
             )
+            if ok and file_path.lower().endswith(".gif"):
+                base = pathlib.Path(avatars_dir or AVATARS_DIR)
+                base.mkdir(parents=True, exist_ok=True)
+                key = _profile_key(profile_name)
+                with contextlib.suppress(OSError):
+                    (base / f"{key}_64.gif").write_bytes(pathlib.Path(file_path).read_bytes())
+            return ok
         finally:
             if hbmp.value:
                 gdi32.DeleteObject(wintypes.HANDLE(hbmp.value))
