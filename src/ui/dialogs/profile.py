@@ -1401,9 +1401,57 @@ def open_mail_credentials_dialog(
             )
         inbox_list_col.controls = cards
 
+    def _save_single_if_changed() -> None:
+        em = (email_field.value or "").strip()
+        pw = (password_field.value or "").strip()
+        tfa = (two_fa_field.value or "").strip()
+        rec = (recovery_field.value or "").strip()
+        tok = (mail_token_field.value or "").strip()
+        nt = (notes_field.value or "").strip()
+        changed = (
+            (em or None) != (getattr(profile, "email", None) or None)
+            or (pw or None) != (getattr(profile, "password", None) or None)
+            or (tfa or None) != (getattr(profile, "two_fa", None) or None)
+            or (rec or None) != (getattr(profile, "recovery_email", None) or None)
+            or (tok or None) != (getattr(profile, "mail_token", None) or None)
+            or (nt or None) != (getattr(profile, "notes", None) or None)
+        )
+        if not changed:
+            return
+        for validate_fn, val in (
+            (validate_email, em),
+            (validate_password, pw),
+            (validate_two_fa, tfa),
+            (validate_email, rec),
+            (validate_mail_token, tok),
+            (validate_notes, nt),
+        ):
+            v_ok, _ = validate_fn(val)
+            if not v_ok:
+                return
+        sig_single = inspect.signature(on_save_single)
+        if len(sig_single.parameters) >= 6:
+            on_save_single(
+                em or None,
+                pw or None,
+                tfa or None,
+                rec or None,
+                nt or None,
+                tok or None,
+            )
+        else:
+            on_save_single(
+                em or None,
+                pw or None,
+                tfa or None,
+                rec or None,
+                nt or None,
+            )
+
     def _trigger_read_inbox() -> None:
         if active_tab[0] != "inbox":
             _switch_tab("inbox", auto_fetch=False)
+        _save_single_if_changed()
         em_addr = (email_field.value or "").strip()
         tok_str = (mail_token_field.value or "").strip()
         pw_str = (password_field.value or "").strip()
@@ -1497,9 +1545,9 @@ def open_mail_credentials_dialog(
         inbox_body.visible = tab == "inbox"
         bulk_body.visible = tab == "bulk"
         copy_all_btn.visible = tab == "single"
-        save_btn.visible = tab in ("single", "bulk")
+        save_btn.visible = tab in ("single", "inbox", "bulk")
         save_btn.content = ft.Text(
-            get_string("save_changes") if tab == "single" else get_string("mail_bulk_apply_btn")
+            get_string("mail_bulk_apply_btn") if tab == "bulk" else get_string("save_changes")
         )
         feedback_text.visible = False
         _rebuild_tabs()
