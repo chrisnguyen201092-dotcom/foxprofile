@@ -769,12 +769,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "avatar_menu_file": "📁 Choose image file...",
         "avatar_menu_remove": "🗑️ Remove Avatar",
         "avatar_snip_hint": "Drag across the Muse Avatar for '{name}' (Press Esc or Right-click to cancel)",
-        "tooltip_double_click_avatar": "Double-click to set or change Muse Avatar (supports .png, .jpg, .gif)",
-        "avatar_dlg_title": "Muse Avatar: {name}",
-        "avatar_dlg_subtitle": "Choose an image/animated GIF from disk or paste from Clipboard",
-        "avatar_updated_log": "[{name}] Updated Muse avatar",
-        "avatar_removed_log": "[{name}] Removed Muse avatar",
-        "avatar_clipboard_empty_log": "[{name}] No image found in Clipboard",
     },
     "vi": {
         "app_name": "FoxProfile",
@@ -1544,12 +1538,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "avatar_menu_file": "📁 Chọn file ảnh từ máy...",
         "avatar_menu_remove": "🗑️ Xóa Avatar",
         "avatar_snip_hint": "Kéo chuột khoanh vùng Avatar của '{name}' trên màn hình (Esc hoặc Chuột phải để hủy)",
-        "tooltip_double_click_avatar": "Bấm đúp 2 lần để đặt / đổi Avatar Muse (hỗ trợ ảnh tĩnh .png, .jpg và ảnh động .gif)",
-        "avatar_dlg_title": "Avatar Muse: {name}",
-        "avatar_dlg_subtitle": "Chọn ảnh / GIF động từ máy hoặc dán trực tiếp từ Clipboard",
-        "avatar_updated_log": "[{name}] Đã cập nhật Avatar Muse",
-        "avatar_removed_log": "[{name}] Đã xóa Avatar Muse",
-        "avatar_clipboard_empty_log": "[{name}] Không tìm thấy hình ảnh trong Clipboard",
     },
 }
 

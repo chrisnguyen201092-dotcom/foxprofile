@@ -1,5 +1,4 @@
 import contextlib
-import time
 from collections.abc import Callable
 from datetime import datetime
 
@@ -21,7 +20,6 @@ from ..theme.styles import DANGER_ICON_STYLE, ICON_STYLE
 from .launch_button import build_launch_button
 
 _OS_LABELS = {"windows": "WIN", "macos": "MAC", "linux": "LIN"}
-_LAST_AVATAR_CLICK: list[object] = ["", 0.0]
 
 # One column grid for the header and every row: (expand, fixed width).
 COLUMNS = {
@@ -271,7 +269,6 @@ def build_profile_card(
     on_copy_token: Callable[[str], None] | None = None,
     on_fetch_mail_otp: Callable[[str], None] | None = None,
     on_open_mail_credentials: Callable[[str], None] | None = None,
-    on_avatar_double_click: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
     proxy_check_state: tuple[str, str] | None = None,
 ) -> ft.Container:
@@ -568,115 +565,45 @@ def build_profile_card(
     else:
         text_block = top_line
 
-    def _drag_wrap(ctrl: ft.Control, disable_drag: bool = False) -> ft.Control:
-        if not draggable or disable_drag:
-            return ctrl
-        return ft.ReorderableDragHandle(
-            mouse_cursor=ft.MouseCursor.GRAB,
-            content=ctrl,
-        )
-
     name_parts: list[ft.Control] = []
     dot_color = profile.color or (status_disp[1] if status_disp is not None else None)
     avatar_path = get_avatar_path(profile.name, 64)
-    has_av_action = on_avatar_double_click is not None or on_status_click is not None
-    av_tip = (
-        get_string("tooltip_double_click_avatar")
-        if on_avatar_double_click is not None
-        else (get_string("tooltip_click_status") if on_status_click is not None else profile.name)
-    )
-
-    def _handle_avatar_click(_e: ft.ControlEvent, n: str = profile.name) -> None:
-        if on_avatar_double_click is not None:
-            now = time.monotonic()
-            prev_name = str(_LAST_AVATAR_CLICK[0])
-            prev_ts = float(_LAST_AVATAR_CLICK[1])  # type: ignore[arg-type]
-            if prev_name == n and (now - prev_ts) <= 0.50:
-                _LAST_AVATAR_CLICK[1] = 0.0
-                on_avatar_double_click(n)
-                return
-            _LAST_AVATAR_CLICK[0] = n
-            _LAST_AVATAR_CLICK[1] = now
-            return
-        if on_status_click is not None:
-            on_status_click(n)
-
-    def _handle_avatar_double_tap(_e: ft.ControlEvent, n: str = profile.name) -> None:
-        _LAST_AVATAR_CLICK[1] = 0.0
-        if on_avatar_double_click is not None:
-            on_avatar_double_click(n)
-        elif on_status_click is not None:
-            on_status_click(n)
-
-    if avatar_path or on_avatar_double_click is not None:
-        ring_color = (
-            COLORS["success"]
-            if is_running and not profile.color
-            else (dot_color or COLORS["rule_strong"])
-        )
-        av_inner: ft.Control = (
+    if avatar_path:
+        ring_color = dot_color or COLORS["rule_strong"]
+        name_parts.append(
             ft.Container(
-                width=33,
-                height=33,
-                border_radius=17,
-                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-                content=ft.Image(
-                    src=avatar_path,
+                width=36,
+                height=36,
+                border_radius=18,
+                padding=1.5,
+                bgcolor=COLORS["input_bg"],
+                border=ft.Border.all(1.5, ring_color),
+                ink=on_status_click is not None,
+                tooltip=(
+                    get_string("tooltip_click_status")
+                    if on_status_click is not None
+                    else profile.name
+                ),
+                on_click=(
+                    (lambda _, n=profile.name: on_status_click(n))
+                    if on_status_click is not None
+                    else None
+                ),
+                content=ft.Container(
                     width=33,
                     height=33,
-                    gapless_playback=True,
-                ),
-            )
-            if avatar_path
-            else ft.Container(
-                width=33,
-                height=33,
-                border_radius=17,
-                bgcolor=(
-                    ft.Colors.with_opacity(0.12, dot_color)
-                    if dot_color
-                    else COLORS["input_bg"]
-                ),
-                alignment=ft.Alignment(0, 0),
-                content=ft.Icon(
-                    ft.Icons.FACE_RETOUCHING_NATURAL_ROUNDED,
-                    size=17,
-                    color=dot_color or COLORS["text_dim"],
+                    border_radius=17,
+                    clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                    content=ft.Image(
+                        src=avatar_path,
+                        width=33,
+                        height=33,
+                        gapless_playback=True,
+                    ),
                 ),
             )
         )
-        av_container = ft.Container(
-            width=36,
-            height=36,
-            border_radius=18,
-            padding=1.5 if avatar_path else 1.0,
-            bgcolor=COLORS["input_bg"],
-            border=ft.Border.all(2.0 if (is_running or avatar_path) else 1.5, ring_color),
-            scale=1.0,
-            rotate=0.0,
-            animate_scale=ft.Animation(200, ft.AnimationCurve.EASE_OUT_BACK),
-            animate_rotation=ft.Animation(200, ft.AnimationCurve.EASE_OUT_BACK),
-            tooltip=av_tip,
-            on_click=_handle_avatar_click if has_av_action else None,
-            content=av_inner,
-        )
-
-        def _set_avatar_hover(hovered: bool, box: ft.Container = av_container) -> None:
-            with contextlib.suppress(Exception):
-                box.scale = 1.15 if hovered else 1.0
-                box.rotate = -0.07 if hovered else 0.0
-                box.update()
-
-        name_parts.append(
-            ft.GestureDetector(
-                mouse_cursor=ft.MouseCursor.CLICK if has_av_action else ft.MouseCursor.BASIC,
-                on_double_tap=_handle_avatar_double_tap if has_av_action else None,
-                on_enter=lambda _e: _set_avatar_hover(True),
-                on_exit=lambda _e: _set_avatar_hover(False),
-                content=av_container,
-            )
-        )
-    elif dot_color or has_av_action:
+    elif dot_color or on_status_click is not None:
         name_parts.append(
             ft.Container(
                 width=10,
@@ -684,25 +611,32 @@ def build_profile_card(
                 border_radius=5,
                 bgcolor=dot_color,
                 border=(None if dot_color else ft.Border.all(1.5, COLORS["rule_strong"])),
-                ink=has_av_action,
-                tooltip=av_tip,
-                on_click=_handle_avatar_click if has_av_action else None,
+                ink=on_status_click is not None,
+                tooltip=get_string("tooltip_click_status") if on_status_click is not None else None,
+                on_click=(
+                    (lambda _, n=profile.name: on_status_click(n))
+                    if on_status_click is not None
+                    else None
+                ),
             )
         )
     if name_parts:
-        name_parts.append(
-            _drag_wrap(
-                ft.Container(expand=True, content=text_block),
-                disable_drag=editing_note,
-            )
-        )
+        name_parts.append(ft.Container(expand=True, content=text_block))
         name_cell_content: ft.Control = ft.Row(
-            spacing=8 if (avatar_path or on_avatar_double_click is not None) else 6,
+            spacing=8 if avatar_path else 6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             controls=name_parts,
         )
     else:
-        name_cell_content = _drag_wrap(text_block, disable_drag=editing_note)
+        name_cell_content = text_block
+
+    def _drag_wrap(ctrl: ft.Control, disable_drag: bool = False) -> ft.Control:
+        if not draggable or disable_drag:
+            return ctrl
+        return ft.ReorderableDragHandle(
+            mouse_cursor=ft.MouseCursor.GRAB,
+            content=ctrl,
+        )
 
     launch_btn = build_launch_button(profile.name, is_loading, is_running, on_launch)
     launch_btn.width = 100
@@ -730,7 +664,7 @@ def build_profile_card(
                         on_change=lambda _, n=profile.name: on_select(n) if on_select else None,
                     ),
                 ),
-                _cell("name", name_cell_content),
+                _cell("name", _drag_wrap(name_cell_content, disable_drag=editing_note)),
                 _cell(
                     "device",
                     _drag_wrap(
