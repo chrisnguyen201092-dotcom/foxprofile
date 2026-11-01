@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import os
 import re
 import threading
 import time
+from collections.abc import Callable
 
 import flet as ft
 
@@ -130,8 +132,13 @@ def _search_match_rank(prof: object, query: str) -> tuple[int, tuple] | None:
 
 
 class App:
-    def __init__(self, container: Container | None = None) -> None:
+    def __init__(
+        self,
+        container: Container | None = None,
+        on_ui_ready: Callable[[], None] | None = None,
+    ) -> None:
         c = container or Container()
+        self._on_ui_ready = on_ui_ready
         self.pm: IProfileManager = c.profile_manager
         self.bl: IBrowserLauncher = c.browser_launcher
         self.ps: IProxyService = c.proxy_service
@@ -220,6 +227,9 @@ class App:
         self._file_picker = fp
         self._build_ui()
         self.state._last_running_snapshot = self.bl.running_profile_names()
+        if self._on_ui_ready is not None:
+            with contextlib.suppress(Exception):
+                self._on_ui_ready()
         if not self._reconcile_started:
             self._reconcile_started = True
             page.run_task(self._ui_reconcile_loop)
@@ -1109,8 +1119,7 @@ class App:
 
     def _log(self, message: str) -> None:
         logger.info(message)
-        if self.state.add_log(message):
-            self.state.schedule_refresh()
+        self.state.add_log(message)
 
     def _flush_log(self) -> None:
         text = self.state.flush_log()
@@ -1215,6 +1224,9 @@ class App:
                         self._maybe_start_daily_mail_scan()
                     last_minute_tick = now_mono
                     self._refresh_profiles()
+                elif self.state._pending_log_flush:
+                    self._flush_log()
+                    self._safe_update()
             except Exception as e:
                 logger.error("Error in UI reconcile loop: %s", e)
             await asyncio.sleep(0.12)

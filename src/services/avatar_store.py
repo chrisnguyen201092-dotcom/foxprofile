@@ -25,6 +25,77 @@ AVATARS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "avatars")
 )
 
+# Short-lived directory index cache so rendering 100+ profile cards in a single UI frame
+# performs 1 `os.scandir(avatars)` instead of 100+ repeated directory scans on HDD.
+# Maps `abs_base_dir -> (mono_ts, dir_mtime_ns, map_22, map_64_best, mtime_22, mtime_64)`.
+_AVATAR_DIR_CACHE: dict[
+    str,
+    tuple[float, int, dict[str, str], dict[str, str], dict[str, float]],
+] = {}
+
+
+def _invalidate_avatar_cache(avatars_dir: str | None = None) -> None:
+    if avatars_dir is None:
+        _AVATAR_DIR_CACHE.clear()
+    else:
+        _AVATAR_DIR_CACHE.pop(os.path.abspath(avatars_dir), None)
+
+
+def _get_avatar_index(
+    base: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, float]] | None:
+    abs_base = os.path.abspath(base)
+    now_mono = time.monotonic()
+    cached = _AVATAR_DIR_CACHE.get(abs_base)
+    # Within the same UI render burst (< 1.0s) on the default AVATARS_DIR, reuse without statting
+    if cached is not None and abs_base == AVATARS_DIR and (now_mono - cached[0]) < 1.0:
+        return cached[2], cached[3], cached[4]
+    try:
+        dir_mtime_ns = os.stat(abs_base).st_mtime_ns
+    except OSError:
+        _AVATAR_DIR_CACHE.pop(abs_base, None)
+        return None
+    if (
+        cached is not None
+        and cached[1] == dir_mtime_ns
+        and (now_mono - cached[0]) < 5.0
+    ):
+        return cached[2], cached[3], cached[4]
+
+    map_22: dict[str, str] = {}
+    map_64_plain: dict[str, str] = {}
+    map_64_ver: dict[str, tuple[float, str]] = {}
+    mtime_map: dict[str, float] = {}
+    with contextlib.suppress(OSError), os.scandir(abs_base) as it:
+        for entry in it:
+            name = entry.name
+            if not name.endswith(".png") or len(name) < 23 or not entry.is_file():
+                continue
+            key = name[:16]
+            rest = name[16:-4]  # e.g. "_22", "_64", or "_64_<ms>"
+            try:
+                mt = entry.stat().st_mtime
+            except OSError:
+                continue
+            if rest == "_22":
+                map_22[key] = entry.path
+                mtime_map[entry.path] = mt
+            elif rest == "_64":
+                map_64_plain[key] = entry.path
+                mtime_map[entry.path] = mt
+            elif rest.startswith("_64_"):
+                prev = map_64_ver.get(key)
+                if prev is None or mt > prev[0]:
+                    map_64_ver[key] = (mt, entry.path)
+                mtime_map[entry.path] = mt
+
+    map_64_best: dict[str, str] = dict(map_64_plain)
+    for k, (_mt, ver_path) in map_64_ver.items():
+        map_64_best[k] = ver_path
+
+    _AVATAR_DIR_CACHE[abs_base] = (now_mono, dir_mtime_ns, map_22, map_64_best, mtime_map)
+    return map_22, map_64_best, mtime_map
+
 
 def _profile_key(profile_name: str) -> str:
     return hashlib.sha1(profile_name.encode("utf-8")).hexdigest()[:16]
@@ -33,43 +104,29 @@ def _profile_key(profile_name: str) -> str:
 def get_avatar_path(profile_name: str, size: int = 22, *, avatars_dir: str | None = None) -> str | None:
     """Return path to the profile's circular PNG avatar of `size` (22 or 64), or None."""
     base = avatars_dir or AVATARS_DIR
-    if not os.path.isdir(base):
+    idx = _get_avatar_index(base)
+    if idx is None:
         return None
+    map_22, map_64_best, _ = idx
     key = _profile_key(profile_name)
     if size <= 24:
-        p22 = os.path.join(base, f"{key}_22.png")
-        if os.path.isfile(p22):
-            return p22
-        p64 = os.path.join(base, f"{key}_64.png")
-        return p64 if os.path.isfile(p64) else None
-
-    # For size > 24 (e.g. 64px in main Flet profile table), prefer versioned `{key}_64_<ms>.png`
-    # so Flutter's FileImage cache immediately displays updated avatars without restart.
-    prefix = f"{key}_64_"
-    newest_path: str | None = None
-    newest_mtime = -1.0
-    with contextlib.suppress(OSError):
-        for entry in os.scandir(base):
-            if entry.is_file() and entry.name.startswith(prefix) and entry.name.endswith(".png"):
-                mt = entry.stat().st_mtime
-                if mt > newest_mtime:
-                    newest_mtime = mt
-                    newest_path = entry.path
-    if newest_path:
-        return newest_path
-
-    p64 = os.path.join(base, f"{key}_64.png")
-    if os.path.isfile(p64):
-        return p64
-    p22 = os.path.join(base, f"{key}_22.png")
-    return p22 if os.path.isfile(p22) else None
+        return map_22.get(key) or map_64_best.get(key)
+    return map_64_best.get(key) or map_22.get(key)
 
 
 def avatar_version(profile_name: str, *, avatars_dir: str | None = None) -> float:
     """Return mtime of the profile's avatar (0.0 if none) for UI cache invalidation."""
-    p = get_avatar_path(profile_name, 22, avatars_dir=avatars_dir)
+    base = avatars_dir or AVATARS_DIR
+    idx = _get_avatar_index(base)
+    if idx is None:
+        return 0.0
+    map_22, map_64_best, mtime_map = idx
+    key = _profile_key(profile_name)
+    p = map_22.get(key) or map_64_best.get(key)
     if not p:
         return 0.0
+    if p in mtime_map:
+        return mtime_map[p]
     with contextlib.suppress(OSError):
         return os.path.getmtime(p)
     return 0.0
@@ -87,6 +144,8 @@ def remove_avatar(profile_name: str, *, avatars_dir: str | None = None) -> bool:
             with contextlib.suppress(OSError):
                 p.unlink()
                 removed = True
+    if removed:
+        _invalidate_avatar_cache(avatars_dir)
     return removed
 
 
@@ -258,6 +317,7 @@ def _save_square_rgba_buffers(
     (base / f"{key}_64.png").write_bytes(png_64)
     ver_ms = int(time.time() * 1000)
     (base / f"{key}_64_{ver_ms}.png").write_bytes(png_64)
+    _invalidate_avatar_cache(avatars_dir)
     return True
 
 

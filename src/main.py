@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,15 +23,23 @@ def _build_api_app(container: Container):
 def main() -> None:
     check_bind_safety(API_HOST, API_TOKEN)
     container = Container()
+    ui_ready = threading.Event()
 
-    api_server = APIServer(lambda: _build_api_app(container))
+    def _deferred_api_app():
+        # Wait for the initial Flet UI frame to finish rendering (up to 3s fallback)
+        # so FastAPI/MCP imports don't compete for GIL and HDD I/O during window startup.
+        ui_ready.wait(timeout=3.0)
+        return _build_api_app(container)
+
+    api_server = APIServer(_deferred_api_app)
     api_server.start()
     logger.info("API available at http://%s:%s/api/v1", API_HOST, API_PORT)
 
     try:
-        gui = App(container)
+        gui = App(container, on_ui_ready=ui_ready.set)
         gui.run()
     finally:
+        ui_ready.set()
         api_server.stop()
 
 

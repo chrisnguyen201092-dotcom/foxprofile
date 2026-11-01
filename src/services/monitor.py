@@ -74,6 +74,33 @@ _RE_LAUNCH_FAILED = re.compile(
 )
 _RE_RENAME_PROFILE = re.compile(r"^Updated profile:\s*(?P<old>.+?)\s*->\s*(?P<new>.+)$")
 _RE_TRASH_PROFILE = re.compile(r"^(?:Moved profile to trash|Deleted profile):\s*(?P<prof>.+)$")
+_LOG_MSG_PREFIXES = (
+    "[",
+    "Starting browser for profile:",
+    "Browser started for profile:",
+    "\u0110ang kh\u1edfi ch\u1ea1y:",
+    "Launching:",
+    "Stopping browser for ",
+    "Stopped browser for profile:",
+    "Browser process for ",
+    "Browser ",
+    "Session ended",
+    "Phi\u00ean k\u1ebft th\u00fac:",
+    "\u0110\u00e3 \u0111\u00f3ng:",
+    "Launch failed for profile ",
+    "Error starting browser for ",
+    "Updated profile:",
+    "Moved profile to trash:",
+    "Deleted profile:",
+)
+_BRACKET_EVENT_TOKENS = (
+    "Starting browser for ",
+    "\u0110ang kh\u1edfi \u0111\u1ed9ng tr\u00ecnh duy\u1ec7t cho ",
+    "BROWSER_STARTED",
+    "BROWSER_CLOSED",
+    "LAUNCH_CANCELLED",
+    "LAUNCH_FAILED:",
+)
 
 _MULTI_PART_TLDS = frozenset(
     {
@@ -1158,6 +1185,7 @@ class MonitorService:
         self._data_dir = pathlib.Path(data_dir)
         self._log_dir = pathlib.Path(log_dir)
         self._log_cache_key: tuple[tuple[str, float, int], ...] = ()
+        self._log_file_events_cache: dict[str, tuple[float, int, list[tuple[str, str]]]] = {}
         self._log_history: dict[str, dict[str, Any]] = {}
         self._live_started_at: dict[str, dt.datetime] = {}
         self._live_stopped_at: dict[str, dt.datetime] = {}
@@ -1922,7 +1950,7 @@ class MonitorService:
             if not val:
                 return None
             with contextlib.suppress(ValueError):
-                return dt.datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+                return dt.datetime.fromisoformat(val)
             return None
 
         candidates = list(h.get("sessions", [])) + list(
@@ -2013,10 +2041,12 @@ class MonitorService:
         if not self._log_dir.exists():
             return self._log_history
         log_files = sorted(self._log_dir.glob("foxprofile_*.log"))[-30:]
+        valid_logs: list[tuple[pathlib.Path, float, int]] = []
         key_parts: list[tuple[str, float, int]] = []
         for lf in log_files:
             try:
                 st = lf.stat()
+                valid_logs.append((lf, st.st_mtime, st.st_size))
                 key_parts.append((lf.name, st.st_mtime, st.st_size))
             except OSError:
                 continue
@@ -2082,20 +2112,35 @@ class MonitorService:
                             else:
                                 h["last_closed"] = None
 
-        for lf in log_files:
-            try:
-                lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                m = _RE_LOG_LINE.match(line)
-                if not m:
+        for lf, lf_mtime, lf_size in valid_logs:
+            cached_f = self._log_file_events_cache.get(lf.name)
+            if (
+                cached_f is not None
+                and cached_f[0] == lf_mtime
+                and cached_f[1] == lf_size
+            ):
+                relevant_lines = cached_f[2]
+            else:
+                try:
+                    raw_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
                     continue
-                ts_str = m.group("ts")
-                msg = m.group("msg").strip()
-                if not msg:
-                    continue
+                relevant_lines = []
+                for line in raw_lines:
+                    m = _RE_LOG_LINE.match(line)
+                    if not m:
+                        continue
+                    msg = m.group("msg").strip()
+                    if not msg or not msg.startswith(_LOG_MSG_PREFIXES):
+                        continue
+                    if msg.startswith("[") and not any(
+                        tok in msg for tok in _BRACKET_EVENT_TOKENS
+                    ):
+                        continue
+                    relevant_lines.append((m.group("ts"), msg))
+                self._log_file_events_cache[lf.name] = (lf_mtime, lf_size, relevant_lines)
 
+            for ts_str, msg in relevant_lines:
                 mr = _RE_RENAME_PROFILE.match(msg)
                 if mr:
                     old_p = mr.group("old").strip()
@@ -2297,62 +2342,77 @@ class MonitorService:
                 "fp_hw_sig": "",
             }
 
+        def _stat_mtime(p: pathlib.Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
         tabs_file = pdir / "tabs.json"
+        tabs_mtime = _stat_mtime(tabs_file)
+
         cookies_db = pdir / "cookies.sqlite"
+        cookies_mtime = _stat_mtime(cookies_db)
         is_chrome_cookies = False
-        if not cookies_db.exists():
-            for _cand in (
-                pdir / "Default" / "Network" / "Cookies",
-                pdir / "Default" / "Cookies",
-            ):
-                if _cand.exists():
-                    cookies_db = _cand
-                    is_chrome_cookies = True
-                    break
+
         places_db = pdir / "places.sqlite"
+        places_mtime = _stat_mtime(places_db)
         is_chrome_history = False
-        if not places_db.exists():
-            _ch_hist = pdir / "Default" / "History"
-            if _ch_hist.exists():
-                places_db = _ch_hist
-                is_chrome_history = True
+
         prefs_file = pdir / "prefs.js"
-        if not prefs_file.exists():
-            _ch_prefs = pdir / "Default" / "Preferences"
-            if _ch_prefs.exists():
-                prefs_file = _ch_prefs
+        prefs_mtime = _stat_mtime(prefs_file)
+
         fp_file = pdir / "fingerprint.json"
+        fp_mtime = _stat_mtime(fp_file)
         is_chrome_persona = False
-        if not fp_file.exists():
+        if fp_mtime == 0.0:
             _ch_persona = pdir / "chrome_persona.json"
-            if _ch_persona.exists():
+            _ch_fp_mtime = _stat_mtime(_ch_persona)
+            if _ch_fp_mtime > 0.0:
                 fp_file = _ch_persona
+                fp_mtime = _ch_fp_mtime
                 is_chrome_persona = True
-        has_cache2 = (
-            (pdir / "cache2").is_dir()
-            or (pdir / "Default" / "Cache").is_dir()
-            or (pdir / "Default" / "Network" / "Cache").is_dir()
-        )
-        try:
-            tabs_mtime = tabs_file.stat().st_mtime
-        except OSError:
-            tabs_mtime = 0.0
-        try:
-            cookies_mtime = cookies_db.stat().st_mtime
-        except OSError:
-            cookies_mtime = 0.0
-        try:
-            places_mtime = places_db.stat().st_mtime
-        except OSError:
-            places_mtime = 0.0
-        try:
-            prefs_mtime = prefs_file.stat().st_mtime
-        except OSError:
-            prefs_mtime = 0.0
-        try:
-            fp_mtime = fp_file.stat().st_mtime
-        except OSError:
-            fp_mtime = 0.0
+
+        has_cache2 = (pdir / "cache2").is_dir()
+
+        # Only probe Chromium `Default/` paths when Camoufox files are absent
+        if (
+            cookies_mtime == 0.0
+            or places_mtime == 0.0
+            or prefs_mtime == 0.0
+            or not has_cache2
+        ) and (pdir / "Default").is_dir():
+            default_dir = pdir / "Default"
+            if cookies_mtime == 0.0:
+                for _cand in (
+                    default_dir / "Network" / "Cookies",
+                    default_dir / "Cookies",
+                ):
+                    _cm = _stat_mtime(_cand)
+                    if _cm > 0.0:
+                        cookies_db = _cand
+                        cookies_mtime = _cm
+                        is_chrome_cookies = True
+                        break
+            if places_mtime == 0.0:
+                _ch_hist = default_dir / "History"
+                _pm = _stat_mtime(_ch_hist)
+                if _pm > 0.0:
+                    places_db = _ch_hist
+                    places_mtime = _pm
+                    is_chrome_history = True
+            if prefs_mtime == 0.0:
+                _ch_prefs = default_dir / "Preferences"
+                _prm = _stat_mtime(_ch_prefs)
+                if _prm > 0.0:
+                    prefs_file = _ch_prefs
+                    prefs_mtime = _prm
+            if not has_cache2:
+                has_cache2 = (
+                    (default_dir / "Cache").is_dir()
+                    or (default_dir / "Network" / "Cache").is_dir()
+                )
+
         last_active_ts = max(tabs_mtime, cookies_mtime, prefs_mtime)
 
         if cached is not None:
