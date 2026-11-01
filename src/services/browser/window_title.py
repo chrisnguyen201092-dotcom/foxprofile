@@ -24,6 +24,7 @@ def _child_pids_win32(root_pid: int) -> set[int]:
         from ctypes import wintypes
 
         th32cs_snapprocess = 0x00000002
+        process_query_limited_information = 0x1000
         kernel32 = ctypes.windll.kernel32
 
         class PROCESSENTRY32(ctypes.Structure):
@@ -40,8 +41,48 @@ def _child_pids_win32(root_pid: int) -> set[int]:
                 ("szExeFile", ctypes.c_char * 260),
             ]
 
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.Process32First.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32)]
+        kernel32.Process32First.restype = wintypes.BOOL
+        kernel32.Process32Next.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32)]
+        kernel32.Process32Next.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetProcessTimes.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        def _proc_ctime(pid: int) -> int:
+            h = kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if not h:
+                return 0
+            c_ft = wintypes.FILETIME()
+            e_ft = wintypes.FILETIME()
+            k_ft = wintypes.FILETIME()
+            u_ft = wintypes.FILETIME()
+            ok_t = kernel32.GetProcessTimes(
+                h,
+                ctypes.byref(c_ft),
+                ctypes.byref(e_ft),
+                ctypes.byref(k_ft),
+                ctypes.byref(u_ft),
+            )
+            kernel32.CloseHandle(h)
+            if not ok_t:
+                return 0
+            return (int(c_ft.dwHighDateTime) << 32) | int(c_ft.dwLowDateTime)
+
         snap = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
-        if snap == -1:
+        invalid_handle = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        if not snap or int(snap) == invalid_handle:
             return set()
         parent_map: dict[int, list[int]] = {}
         try:
@@ -56,14 +97,27 @@ def _child_pids_win32(root_pid: int) -> set[int]:
         finally:
             kernel32.CloseHandle(snap)
 
+        self_pid = os.getpid()
+        ctime_cache: dict[int, int] = {root_pid: _proc_ctime(root_pid)}
         descendants: set[int] = {root_pid}
         queue = [root_pid]
         while queue:
             cur = queue.pop()
+            t_cur = ctime_cache.get(cur, 0)
             for child in parent_map.get(cur, []):
-                if child not in descendants:
-                    descendants.add(child)
-                    queue.append(child)
+                if child in descendants:
+                    continue
+                if root_pid != self_pid and child == self_pid:
+                    continue
+                t_child = ctime_cache.get(child)
+                if t_child is None:
+                    t_child = _proc_ctime(child)
+                    ctime_cache[child] = t_child
+                # Guard against Windows PID reuse: a real child cannot be older than its parent
+                if t_cur > 0 and t_child > 0 and t_child < t_cur:
+                    continue
+                descendants.add(child)
+                queue.append(child)
         return descendants
     except Exception:
         return set()
@@ -134,6 +188,7 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
 
 
 _locked_hwnd_sizes: dict[int, tuple[int, int]] = {}
+_saved_hwnd_positions: dict[int, tuple[int, int]] = {}
 _shield_lock = threading.Lock()
 _shield_started = False
 
@@ -325,6 +380,7 @@ def _ensure_maximize_shield_win32() -> None:
                 for h in list(_locked_hwnd_sizes):
                     if not user32.IsWindow(wintypes.HWND(h)):
                         _locked_hwnd_sizes.pop(h, None)
+                        _saved_hwnd_positions.pop(h, None)
                     else:
                         _lock_window_size_win32(h)
                 time.sleep(0.2)
@@ -388,6 +444,8 @@ def _lock_window_size_win32(hwnd: int) -> None:
             w = int(rect.right - rect.left)
             h = int(rect.bottom - rect.top)
             if w >= 300 and h >= 200:
+                if int(rect.left) > -10000 and int(rect.top) > -10000:
+                    _saved_hwnd_positions[int(hwnd)] = (int(rect.left), int(rect.top))
                 locked = _locked_hwnd_sizes.get(int(hwnd))
                 if locked is None:
                     _locked_hwnd_sizes[int(hwnd)] = (w, h)
@@ -431,10 +489,14 @@ def _raise_and_move_hwnd_win32(
 
     fg_hwnd = user32.GetForegroundWindow()
     fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+    target_tid = user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), None)
     cur_tid = kernel32.GetCurrentThreadId()
-    attached = False
+    attached_fg = False
+    attached_target = False
     if fg_tid and cur_tid and fg_tid != cur_tid:
-        attached = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
+        attached_fg = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
+    if target_tid and cur_tid and target_tid not in (cur_tid, fg_tid):
+        attached_target = bool(user32.AttachThreadInput(cur_tid, target_tid, True))
 
     try:
         flags = swp_nosize | swp_showwindow
@@ -451,8 +513,12 @@ def _raise_and_move_hwnd_win32(
         user32.SetWindowPos(wintypes.HWND(hwnd), hwnd_notopmost, px, py, 0, 0, flags)
         user32.BringWindowToTop(wintypes.HWND(hwnd))
         user32.SetForegroundWindow(wintypes.HWND(hwnd))
+        with contextlib.suppress(Exception):
+            user32.SwitchToThisWindow(wintypes.HWND(hwnd), True)
     finally:
-        if attached:
+        if attached_target:
+            user32.AttachThreadInput(cur_tid, target_tid, False)
+        if attached_fg:
             user32.AttachThreadInput(cur_tid, fg_tid, False)
 
 
@@ -480,10 +546,12 @@ def switch_browser_window(
 ) -> bool:
     """Switch to `target_name`'s browser window in Single-Stage mode using SWP_NOSIZE.
 
-    When `single_stage=True`, centers `target_name`'s window in the desktop work area
-    (preserving its exact width and height via `SWP_NOSIZE`) and minimizes the windows
-    of all other running profiles so only one browser window is shown on screen.
+    When `single_stage=True`, restores `target_name`'s window at its exact previous
+    screen position (preserving its exact width and height via `SWP_NOSIZE`) and
+    minimizes the windows of all other running profiles so only one browser window
+    is shown on screen.
     """
+    _ = top_margin
     if sys.platform != "win32":
         return False
     target_pid = next((pid for pname, pid in profile_pids if pname == target_name), None)
@@ -498,7 +566,6 @@ def switch_browser_window(
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
-        spi_getworkarea = 0x0030
         sw_restore = 9
         sw_showminnoactive = 7
         sw_forceminimize = 11
@@ -511,41 +578,36 @@ def switch_browser_window(
                 ("bottom", wintypes.LONG),
             ]
 
-        work = RECT()
-        if not user32.SystemParametersInfoW(spi_getworkarea, 0, ctypes.byref(work), 0):
-            work.left, work.top, work.right, work.bottom = 0, 0, 1920, 1040
-
-        stage_top = int(work.top) + max(0, int(top_margin))
-        work_w = max(800, int(work.right - work.left))
-        work_h = max(600, int(work.bottom) - stage_top)
-
         target_set = set(target_hwnds)
-        # 1. Minimize all other running profile browser windows FIRST so windows never stack
+        # 1. Save position & minimize all other running profile browser windows FIRST
         for pname, pid in profile_pids:
             if pname == target_name:
                 continue
             for other_hwnd in _find_profile_hwnds_win32(pname, pid):
                 _lock_window_size_win32(other_hwnd)
-                if other_hwnd not in target_set and not user32.IsIconic(other_hwnd):
+                if other_hwnd not in target_set and not user32.IsIconic(wintypes.HWND(other_hwnd)):
+                    other_rect = RECT()
+                    if (
+                        user32.GetWindowRect(wintypes.HWND(other_hwnd), ctypes.byref(other_rect))
+                        and int(other_rect.left) > -10000
+                        and int(other_rect.top) > -10000
+                    ):
+                        _saved_hwnd_positions[int(other_hwnd)] = (
+                            int(other_rect.left),
+                            int(other_rect.top),
+                        )
                     user32.ShowWindowAsync(wintypes.HWND(other_hwnd), sw_showminnoactive)
                     user32.ShowWindow(wintypes.HWND(other_hwnd), sw_forceminimize)
 
-        # 2. Restore, center (preserving exact SWP_NOSIZE viewport), and focus target window
+        # 2. Restore target window to its exact previous position (with SWP_NOSIZE) and focus it
         for hwnd in reversed(target_hwnds):
-            if user32.IsIconic(hwnd):
+            saved_pos = _saved_hwnd_positions.get(int(hwnd))
+            if user32.IsIconic(wintypes.HWND(hwnd)):
                 user32.ShowWindow(wintypes.HWND(hwnd), sw_restore)
-            win_rect = RECT()
-            user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(win_rect))
-            win_w = max(400, int(win_rect.right - win_rect.left))
-            win_h = max(300, int(win_rect.bottom - win_rect.top))
-
-            x = int(work.left) + max(0, (work_w - win_w) // 2)
-            y = stage_top + max(0, (work_h - win_h) // 2)
-            max_x = max(int(work.left), int(work.right) - min(win_w, work_w))
-            max_y = max(stage_top, int(work.bottom) - min(win_h, work_h))
-            x = max(int(work.left), min(x, max_x))
-            y = max(stage_top, min(y, max_y))
-            _raise_and_move_hwnd_win32(hwnd, x=x, y=y)
+            if saved_pos is not None:
+                _raise_and_move_hwnd_win32(hwnd, x=saved_pos[0], y=saved_pos[1])
+            else:
+                _raise_and_move_hwnd_win32(hwnd)
 
         return True
     except Exception:
@@ -714,6 +776,7 @@ def arrange_browser_windows(profile_pids: list[tuple[str, int | None]]) -> int:
             x = max(int(work.left), min(x, max_x))
             y = max(int(work.top), min(y, max_y))
 
+            _saved_hwnd_positions[int(hwnd)] = (x, y)
             _raise_and_move_hwnd_win32(hwnd, x=x, y=y)
 
         return count

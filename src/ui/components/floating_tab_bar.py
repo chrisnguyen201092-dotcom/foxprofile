@@ -541,8 +541,10 @@ class FloatingProfileTabBar:
             drag_state["scr_h"] = root.winfo_screenheight()
             drag_state["cur_w"] = max(40, root.winfo_width())
             drag_state["cur_h"] = max(28, root.winfo_height())
-            drag_state["x"] = rx - root.winfo_x()
-            drag_state["y"] = ry - root.winfo_y()
+            cur_wx = int(drag_state["win_x"]) if drag_state["custom_pos"] else root.winfo_x()
+            cur_wy = int(drag_state["win_y"]) if drag_state["custom_pos"] else root.winfo_y()
+            drag_state["x"] = rx - cur_wx
+            drag_state["y"] = ry - cur_wy
             if win32_user32 is not None:
                 with contextlib.suppress(Exception):
                     hwnd = root.winfo_id()
@@ -558,6 +560,8 @@ class FloatingProfileTabBar:
                 > 3
             ):
                 drag_state["moved"] = True
+            if not drag_state["moved"]:
+                return
             scr_w = int(drag_state["scr_w"])
             scr_h = int(drag_state["scr_h"])
             cur_w = int(drag_state["cur_w"])
