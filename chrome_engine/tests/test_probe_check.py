@@ -78,6 +78,37 @@ def test_coherent_fingerprint_has_no_issues():
     assert probe.check(PERSONA, good_fp()) == []
 
 
+def test_pinned_gpu_and_brand_version_checked():
+    pinned = Persona(
+        seed=9,
+        platform="windows",
+        platform_version="19.0.0",
+        brand="Chrome",
+        hardware_concurrency=8,
+        timezone="Asia/Ho_Chi_Minh",
+        locale="vi-VN",
+        brand_version="148.0.0.0",
+        gpu_vendor="Google Inc. (Intel)",
+        gpu_renderer="ANGLE (Intel, Iris Xe Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    )
+    assert probe.check(pinned, good_fp()) == []
+
+    mismatch_gpu = Persona(
+        seed=9,
+        platform="windows",
+        platform_version="19.0.0",
+        brand="Chrome",
+        hardware_concurrency=8,
+        timezone="Asia/Ho_Chi_Minh",
+        locale="vi-VN",
+        brand_version="149.0.0.0",
+        gpu_vendor="Google Inc. (NVIDIA)",
+        gpu_renderer="ANGLE (NVIDIA, RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    )
+    found = codes(good_fp(), mismatch_gpu)
+    assert {"brand_version", "webgl_vendor", "webgl_renderer_pin"} <= found
+
+
 def _set(fp, path, value):
     target = fp
     for key in path[:-1]:

@@ -15,6 +15,7 @@ import asyncio
 import base64
 import contextlib
 import ipaddress
+import socket
 import ssl
 from collections import deque
 from dataclasses import dataclass
@@ -24,6 +25,14 @@ _HEAD_LIMIT = 64 * 1024
 _BUFFER = 64 * 1024
 CONNECT_TIMEOUT = 20.0
 _HOP_HEADERS = {"proxy-authorization", "proxy-connection", "connection", "keep-alive"}
+
+
+def _set_nodelay(writer: asyncio.StreamWriter) -> None:
+    """Disable Nagle's algorithm on the underlying TCP socket to minimize tunnel latency."""
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        with contextlib.suppress(OSError, AttributeError):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
 
 class UpstreamError(Exception):
@@ -108,6 +117,7 @@ async def open_tunnel(
         ),
         CONNECT_TIMEOUT,
     )
+    _set_nodelay(writer)
     try:
         if upstream.scheme == "socks5":
             await asyncio.wait_for(
@@ -287,6 +297,7 @@ class ProxyBridge:
         await self.stop()
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        _set_nodelay(writer)
         task = asyncio.current_task()
         if task:
             self._clients.add(task)
@@ -363,7 +374,7 @@ class ProxyBridge:
 
     async def _open_upstream_raw(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         use_tls = ssl.create_default_context() if self.upstream.scheme == "https" else None
-        return await asyncio.wait_for(
+        reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
                 self.upstream.host,
                 self.upstream.port,
@@ -372,3 +383,5 @@ class ProxyBridge:
             ),
             CONNECT_TIMEOUT,
         )
+        _set_nodelay(writer)
+        return reader, writer

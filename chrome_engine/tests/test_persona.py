@@ -47,6 +47,11 @@ def test_random_seed_when_none():
         ({"hardware_concurrency": 128}, "hardware_concurrency"),
         ({"timezone": "Mars/Olympus"}, "timezone"),
         ({"locale": "english"}, "locale"),
+        ({"brand_version": "v148"}, "brand_version"),
+        ({"gpu_vendor": "   "}, "gpu_vendor"),
+        ({"gpu_renderer": ""}, "gpu_renderer"),
+        ({"screen_width": 1920}, "screen_width and screen_height"),
+        ({"screen_width": 100, "screen_height": 100}, "valid dimensions"),
     ],
 )
 def test_validation(changes, message):
@@ -77,6 +82,45 @@ def test_to_args():
     ]
 
 
+def test_to_args_with_hardware_and_brand_overrides():
+    p = Persona(
+        seed=42,
+        platform="windows",
+        platform_version="19.0.0",
+        brand="Chrome",
+        hardware_concurrency=16,
+        brand_version="148.0.7778.215",
+        gpu_vendor="Google Inc. (NVIDIA)",
+        gpu_renderer="ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        screen_width=2560,
+        screen_height=1440,
+    )
+    args = p.to_args()
+    assert "--fingerprint-brand-version=148.0.7778.215" in args
+    assert "--fingerprint-gpu-vendor=Google Inc. (NVIDIA)" in args
+    assert (
+        "--fingerprint-gpu-renderer=ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+        in args
+    )
+    assert p.effective_screen() == (2560, 1440)
+    assert p.effective_gpu() == (
+        "Google Inc. (NVIDIA)",
+        "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    )
+
+
+def test_effective_screen_and_gpu_are_deterministic_per_seed():
+    p1 = personas.generate("windows", seed=8888)
+    p2 = personas.generate("windows", seed=8888)
+    assert p1.effective_screen() == p2.effective_screen()
+    assert p1.effective_gpu() == p2.effective_gpu()
+    w, h = p1.effective_screen()
+    assert w >= 1280 and h >= 720
+    vendor, renderer = p1.effective_gpu()
+    assert "Google Inc." in vendor
+    assert "Direct3D11" in renderer
+
+
 def test_to_args_leaves_geo_to_the_ip():
     args = Persona(seed=1, platform="windows", platform_version="10.0.0").to_args()
     assert not any(a.startswith(("--timezone", "--lang", "--accept-lang")) for a in args)
@@ -103,7 +147,15 @@ def test_with_geo_only_fills_open_fields():
 
 
 def test_json_roundtrip_ignores_unknown_keys():
-    p = personas.generate("windows", seed=99, locale="vi-VN")
+    p = personas.generate(
+        "windows",
+        seed=99,
+        locale="vi-VN",
+        gpu_vendor="Google Inc. (Intel)",
+        gpu_renderer="ANGLE (Intel, Iris Xe Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        screen_width=1920,
+        screen_height=1080,
+    )
     data = {**p.to_json(), "future_field": 1}
     assert Persona.from_json(data) == p
 

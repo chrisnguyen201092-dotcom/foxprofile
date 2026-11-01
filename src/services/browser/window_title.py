@@ -363,6 +363,15 @@ def _lock_window_size_win32(hwnd: int) -> None:
                 ("bottom", wintypes.LONG),
             ]
 
+        if user32.IsIconic(wintypes.HWND(hwnd)):
+            return
+        if user32.IsZoomed(wintypes.HWND(hwnd)):
+            if int(hwnd) not in _locked_hwnd_sizes:
+                # Window legitimately started maximized (e.g. ChromeEngine --start-maximized);
+                # never un-maximize it or alter its viewport.
+                return
+            user32.ShowWindow(wintypes.HWND(hwnd), sw_restore)
+
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
         set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
         cur_style = int(get_long(wintypes.HWND(hwnd), gwl_style))
@@ -373,11 +382,6 @@ def _lock_window_size_win32(hwnd: int) -> None:
         if hmenu:
             user32.DeleteMenu(hmenu, sc_maximize, mf_bycommand)
             user32.DeleteMenu(hmenu, sc_size, mf_bycommand)
-
-        if user32.IsIconic(wintypes.HWND(hwnd)):
-            return
-        if user32.IsZoomed(wintypes.HWND(hwnd)):
-            user32.ShowWindow(wintypes.HWND(hwnd), sw_restore)
 
         rect = RECT()
         if user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sys
+import types
 
 import pytest
 
@@ -31,6 +33,40 @@ def test_build_args_headless_sets_a_real_screen():
     assert "--window-size=1920,1080" in args
     assert "--screen-info={0,0 1920x1080}" in args
     assert "--start-maximized" not in args
+
+
+def test_build_args_uses_persona_pinned_screen():
+    p_custom = Persona(
+        seed=5,
+        platform="windows",
+        platform_version="15.0.0",
+        hardware_concurrency=8,
+        screen_width=2560,
+        screen_height=1440,
+    )
+    args_headless = build_args(p_custom, headless=True)
+    assert "--window-size=2560,1440" in args_headless
+    assert "--screen-info={0,0 2560x1440}" in args_headless
+
+    args_headed = build_args(p_custom, headless=False)
+    assert "--screen-info={0,0 2560x1440}" in args_headed
+    assert "--start-maximized" in args_headed
+
+
+def test_get_async_playwright_prefers_patchright_when_installed(monkeypatch):
+    fake_pr = types.ModuleType("patchright.async_api")
+    fake_pr.async_playwright = lambda: "patchright-driver"
+    fake_pkg = types.ModuleType("patchright")
+    fake_pkg.async_api = fake_pr
+    monkeypatch.setitem(sys.modules, "patchright", fake_pkg)
+    monkeypatch.setitem(sys.modules, "patchright.async_api", fake_pr)
+    monkeypatch.delenv("FOXPROFILE_DISABLE_PATCHRIGHT", raising=False)
+    assert engine_mod._get_async_playwright()() == "patchright-driver"
+
+    monkeypatch.setenv("FOXPROFILE_DISABLE_PATCHRIGHT", "1")
+    import playwright.async_api as pw
+
+    assert engine_mod._get_async_playwright() is pw.async_playwright
 
 
 def test_build_args_offscreen():
@@ -176,6 +212,44 @@ def test_geo_is_skipped_when_pinned(tmp_path, monkeypatch):
     assert eng.geo is None
     assert "--timezone=Europe/Paris" in eng.args
     assert any(a.startswith("--proxy-server=http://127.0.0.1:") for a in eng.args)
+
+
+def test_always_lookup_geo_verifies_proxy_when_pinned(tmp_path, monkeypatch):
+    from chrome_engine.geo import ExitGeo
+
+    monkeypatch.setattr(
+        engine_mod,
+        "lookup",
+        lambda url: ExitGeo(
+            ip="198.51.100.7",
+            timezone="America/New_York",
+            locale="en-US",
+            latitude=40.71,
+            longitude=-74.01,
+        ),
+    )
+    eng = ChromeEngine(
+        tmp_path / "p",
+        executable=__file__,
+        proxy="http://127.0.0.1:9",
+        always_lookup_geo=True,
+        timezone="Europe/Paris",
+        locale="fr-FR",
+    )
+
+    import playwright.async_api as pw
+
+    class Fake:
+        async def start(self):
+            raise RuntimeError("stop before the browser")
+
+    monkeypatch.setattr(pw, "async_playwright", lambda: Fake())
+    with pytest.raises(RuntimeError, match="stop before the browser"):
+        asyncio.run(eng.start())
+    assert eng.persona.timezone == "Europe/Paris"
+    assert eng.persona.locale == "fr-FR"
+    assert eng.geo is not None
+    assert (eng.geo.latitude, eng.geo.longitude) == (40.71, -74.01)
 
 
 def test_webrtc_policy_on_a_fresh_profile(tmp_path):

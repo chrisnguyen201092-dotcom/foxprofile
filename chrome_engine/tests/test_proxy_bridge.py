@@ -1,5 +1,6 @@
 import asyncio
 import json
+import socket
 from collections import deque
 
 import pytest
@@ -223,9 +224,12 @@ def test_stop_closes_open_tunnels():
     run(_with_servers(test, HttpProxy))
 
 
-def test_open_tunnel_directly():
+def test_open_tunnel_directly_sets_tcp_nodelay():
     async def test(origin, upstream, bridge):
         reader, writer = await open_tunnel(Upstream.parse(upstream.url), "127.0.0.1", origin.port)
+        sock = writer.get_extra_info("socket")
+        assert sock is not None
+        assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
         writer.write(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         await writer.drain()
         assert b"origin-ok" in await reader.read()

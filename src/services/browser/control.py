@@ -7,8 +7,12 @@ stdout as "CONTROL:<port>:<token>" so the launcher can forward API calls.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import inspect
+import math
 import os
+import random
 import re
 import secrets
 from typing import Any
@@ -35,12 +39,99 @@ PROTECTED_ANTI_DETECT_DOMAINS = (
     "account.live.com",
 )
 
+_FAST_BIGRAMS = frozenset(
+    {
+        "th",
+        "he",
+        "in",
+        "er",
+        "an",
+        "re",
+        "on",
+        "at",
+        "en",
+        "nd",
+        "ti",
+        "es",
+        "or",
+        "te",
+        "of",
+        "ed",
+        "is",
+        "it",
+        "al",
+        "ar",
+        "st",
+        "to",
+        "nt",
+        "ng",
+    }
+)
+
 
 class ControlError(Exception):
     pass
 
 
 _SCHEME = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$", re.S)
+
+
+def _bezier_trajectory(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    steps: int = 8,
+    rng: random.Random | None = None,
+) -> list[tuple[float, float]]:
+    """Generate a smooth cubic Bezier mouse path with ease-in-out timing."""
+    r = rng or random
+    x0, y0 = float(start[0]), float(start[1])
+    x3, y3 = float(end[0]), float(end[1])
+    dx, dy = x3 - x0, y3 - y0
+    dist = math.hypot(dx, dy)
+    if steps <= 1 or dist < 2.0:
+        return [(x3, y3)]
+
+    spread = min(80.0, max(6.0, dist * 0.22))
+    # Two control points at ~30% and ~70% along the segment with lateral arc offset
+    x1 = x0 + dx * 0.30 + r.uniform(-spread, spread)
+    y1 = y0 + dy * 0.30 + r.uniform(-spread, spread)
+    x2 = x0 + dx * 0.70 + r.uniform(-spread * 0.6, spread * 0.6)
+    y2 = y0 + dy * 0.70 + r.uniform(-spread * 0.6, spread * 0.6)
+
+    pts: list[tuple[float, float]] = []
+    for i in range(1, steps + 1):
+        u = i / steps
+        # Smoothstep ease-in-out
+        t = u * u * (3.0 - 2.0 * u)
+        mt = 1.0 - t
+        px = (mt**3) * x0 + 3.0 * (mt**2) * t * x1 + 3.0 * mt * (t**2) * x2 + (t**3) * x3
+        py = (mt**3) * y0 + 3.0 * (mt**2) * t * y1 + 3.0 * mt * (t**2) * y2 + (t**3) * y3
+        pts.append((round(px, 2), round(py, 2)))
+    pts[-1] = (x3, y3)
+    return pts
+
+
+def _human_keystroke_delays(
+    text: str,
+    base_ms: float = 38.0,
+    rng: random.Random | None = None,
+) -> list[float]:
+    """Compute realistic per-character inter-keystroke delays (ms) with bigram & punctuation cadence."""
+    r = rng or random
+    delays: list[float] = []
+    prev = ""
+    for ch in text:
+        mult = r.uniform(0.78, 1.28)
+        pair = (prev + ch).lower()
+        if pair in _FAST_BIGRAMS:
+            mult *= r.uniform(0.62, 0.82)
+        elif ch in " .,!?;:\n":
+            mult *= r.uniform(1.35, 1.95)
+        elif ch.isupper() or ch.isdigit():
+            mult *= r.uniform(1.12, 1.40)
+        delays.append(round(max(12.0, base_ms * mult), 2))
+        prev = ch
+    return delays
 
 
 def is_protected_anti_detect_url(url: str) -> tuple[bool, str]:
@@ -113,6 +204,7 @@ class PageController:
     def __init__(self, context: Any) -> None:
         self._context = context
         self._current: Any = None
+        self._mouse_pos: tuple[float, float] = (120.0, 120.0)
 
     # --- page selection ---------------------------------------------------
 
@@ -201,16 +293,32 @@ class PageController:
             await page.keyboard.press(key)
         return await self._describe(page)
 
-    async def click_at(self, x: float, y: float) -> dict[str, Any]:
-        """Click viewport coordinates, as seen on a screenshot of the active tab."""
+    async def click_at(self, x: float, y: float, human: bool = True) -> dict[str, Any]:
+        """Click viewport coordinates, moving along a human-like Bezier trajectory first."""
         page = await self._guard_dom_action("click_at")
-        await page.mouse.click(x, y)
+        mouse = getattr(page, "mouse", None)
+        if human and mouse is not None and hasattr(mouse, "move"):
+            for px, py in _bezier_trajectory(self._mouse_pos, (x, y), steps=8):
+                await mouse.move(px, py)
+                await asyncio.sleep(0.002)
+        self._mouse_pos = (float(x), float(y))
+        if mouse is not None:
+            sig = inspect.signature(mouse.click)
+            if human and "delay" in sig.parameters:
+                await mouse.click(x, y, delay=random.randint(25, 65))
+            else:
+                await mouse.click(x, y)
         return await self._describe(page)
 
-    async def keyboard_type(self, text: str) -> dict[str, Any]:
-        """Type into whatever element has focus."""
+    async def keyboard_type(self, text: str, human: bool = True) -> dict[str, Any]:
+        """Type into whatever element has focus with human-like inter-keystroke cadence."""
         page = await self._guard_dom_action("keyboard_type")
-        await page.keyboard.type(text)
+        if human and 0 < len(text) <= 200:
+            for ch, delay_ms in zip(text, _human_keystroke_delays(text), strict=True):
+                await page.keyboard.type(ch)
+                await asyncio.sleep(min(delay_ms, 15.0) / 1000.0)
+        else:
+            await page.keyboard.type(text)
         return await self._describe(page)
 
     async def wait_for(self, selector: str, timeout: int = 15_000) -> dict[str, Any]:

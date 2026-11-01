@@ -10,6 +10,7 @@ What the engine adds on top of a bare `launch_persistent_context`:
 - proxies with credentials, through a loopback bridge (proxy_bridge.py);
 - timezone / locale from the proxy's exit IP unless the persona pins them;
 - Playwright's automation switches removed where a page can observe them;
+- automatic Patchright stealth driver support when installed;
 - a refusal to present an OS the host cannot fake consistently.
 """
 
@@ -54,6 +55,20 @@ IGNORED_DEFAULT_ARGS = (
 HEADLESS_SCREEN = (1920, 1080)
 
 _FEATURES_BLOCK = re.compile(r"disabledFeatures = \[(.*?)\]\.filter\(Boolean\)", re.S)
+
+
+def _get_async_playwright() -> Any:
+    """Return patchright's async_playwright if installed, falling back to playwright."""
+    import playwright.async_api as pw
+
+    if getattr(pw.async_playwright, "__module__", "") != "playwright.async_api":
+        return pw.async_playwright
+    if os.getenv("FOXPROFILE_DISABLE_PATCHRIGHT") != "1":
+        with contextlib.suppress(ImportError):
+            from patchright.async_api import async_playwright as pr_async_playwright
+
+            return pr_async_playwright
+    return pw.async_playwright
 
 
 @functools.lru_cache(maxsize=1)
@@ -143,13 +158,22 @@ def build_args(
     if proxy_url:
         args.append(f"--proxy-server={proxy_url}")
     args += ["--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble"]
+    pinned_screen = (
+        (persona.screen_width, persona.screen_height)
+        if persona.screen_width and persona.screen_height
+        else None
+    )
     if headless is True:
         # Headless otherwise reports an 800x600 screen.
-        w, h = HEADLESS_SCREEN
+        w, h = pinned_screen or HEADLESS_SCREEN
         args += [f"--window-size={w},{h}", f"--screen-info={{0,0 {w}x{h}}}"]
     elif headless == "offscreen":
-        args += ["--window-position=-32000,-32000", "--window-size=1600,900"]
+        w, h = pinned_screen or (1600, 900)
+        args += ["--window-position=-32000,-32000", f"--window-size={w},{h}"]
     else:
+        if pinned_screen:
+            w, h = pinned_screen
+            args.append(f"--screen-info={{0,0 {w}x{h}}}")
         args.append("--start-maximized")
     args += list(extra_args)
     return args
@@ -167,6 +191,7 @@ class ChromeEngine:
         proxy: str | None = None,
         headless: bool | str = False,
         geoip: bool = True,
+        always_lookup_geo: bool = False,
         timezone: str | None = None,
         locale: str | None = None,
         executable: str | Path | None = None,
@@ -183,6 +208,7 @@ class ChromeEngine:
         self._proxy = proxy
         self.headless = headless
         self.geoip = geoip
+        self._always_lookup_geo = always_lookup_geo
         self._timezone = timezone
         self._locale = locale
         self._executable = executable
@@ -225,7 +251,11 @@ class ChromeEngine:
         if upstream:
             self.bridge = await ProxyBridge(upstream).start()
 
-        if upstream and self.geoip and not (persona.timezone and persona.locale):
+        if (
+            upstream
+            and self.geoip
+            and (self._always_lookup_geo or not (persona.timezone and persona.locale))
+        ):
             self.geo = await self._lookup_geo()
             persona = persona.with_geo(self.geo.timezone, self.geo.locale)
         self.persona = persona
@@ -237,8 +267,7 @@ class ChromeEngine:
             extra_args=self._extra_args,
         )
 
-        from playwright.async_api import async_playwright
-
+        async_playwright = _get_async_playwright()
         self._playwright = await async_playwright().start()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         set_webrtc_policy(

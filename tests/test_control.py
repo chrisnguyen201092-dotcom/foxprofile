@@ -5,7 +5,9 @@ import pytest
 from src.services.browser.control import (
     ControlError,
     PageController,
+    _bezier_trajectory,
     _check_url,
+    _human_keystroke_delays,
     is_protected_anti_detect_url,
 )
 
@@ -40,10 +42,36 @@ def test_blocked_urls(url):
         _check_url(url)
 
 
+class FakeMouse:
+    def __init__(self):
+        self.moves: list[tuple[float, float]] = []
+        self.clicks: list[tuple[float, float, int | None]] = []
+
+    async def move(self, x: float, y: float):
+        self.moves.append((x, y))
+
+    async def click(self, x: float, y: float, delay: int | None = None):
+        self.clicks.append((x, y, delay))
+
+
+class FakeKeyboard:
+    def __init__(self):
+        self.typed: list[str] = []
+        self.pressed: list[str] = []
+
+    async def type(self, text: str):
+        self.typed.append(text)
+
+    async def press(self, key: str):
+        self.pressed.append(key)
+
+
 class FakePage:
     def __init__(self, url="about:blank"):
         self.url = url
         self.closed = False
+        self.mouse = FakeMouse()
+        self.keyboard = FakeKeyboard()
 
     def is_closed(self):
         return self.closed
@@ -131,6 +159,42 @@ def test_protected_anti_detect_dom_guard():
     ):
         with pytest.raises(ControlError, match="Anti-Detect Safety Guard"):
             run(c.dispatch(act, params))
+
+
+def test_bezier_trajectory_and_human_click_at():
+    pts = _bezier_trajectory((100.0, 100.0), (500.0, 350.0), steps=12)
+    assert len(pts) == 12
+    assert pts[-1] == (500.0, 350.0)
+    # Ensure trajectory is curved (intermediate points deviate from exact straight line)
+    deviations = [
+        abs((x - 100.0) * (350.0 - 100.0) - (y - 100.0) * (500.0 - 100.0)) for x, y in pts[:-1]
+    ]
+    assert max(deviations) > 0.0
+
+    ctx = FakeContext(1)
+    c = PageController(ctx)
+    res = run(c.dispatch("click_at", {"x": 420, "y": 280}))
+    assert res == {"url": "https://p0.test/", "title": "T"}
+    assert len(ctx.pages[0].mouse.moves) == 8
+    assert ctx.pages[0].mouse.moves[-1] == (420.0, 280.0)
+    assert len(ctx.pages[0].mouse.clicks) == 1
+    cx, cy, click_delay = ctx.pages[0].mouse.clicks[0]
+    assert (cx, cy) == (420, 280)
+    assert 25 <= click_delay <= 65
+
+
+def test_human_keystroke_delays_and_keyboard_type():
+    delays = _human_keystroke_delays("Hello, world! 123")
+    assert len(delays) == len("Hello, world! 123")
+    assert all(12.0 <= d <= 150.0 for d in delays)
+    # Variation must be non-zero (not robotic uniform cadence)
+    assert len({round(d, 2) for d in delays}) > 3
+
+    ctx = FakeContext(1)
+    c = PageController(ctx)
+    res = run(c.dispatch("keyboard_type", {"text": "Fox!\nGo"}))
+    assert res == {"url": "https://p0.test/", "title": "T"}
+    assert ctx.pages[0].keyboard.typed == list("Fox!\nGo")
 
 
 # ---------------------------------------------------------------------------

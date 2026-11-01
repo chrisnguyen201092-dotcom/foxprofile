@@ -2299,10 +2299,40 @@ class MonitorService:
 
         tabs_file = pdir / "tabs.json"
         cookies_db = pdir / "cookies.sqlite"
+        is_chrome_cookies = False
+        if not cookies_db.exists():
+            for _cand in (
+                pdir / "Default" / "Network" / "Cookies",
+                pdir / "Default" / "Cookies",
+            ):
+                if _cand.exists():
+                    cookies_db = _cand
+                    is_chrome_cookies = True
+                    break
         places_db = pdir / "places.sqlite"
+        is_chrome_history = False
+        if not places_db.exists():
+            _ch_hist = pdir / "Default" / "History"
+            if _ch_hist.exists():
+                places_db = _ch_hist
+                is_chrome_history = True
         prefs_file = pdir / "prefs.js"
+        if not prefs_file.exists():
+            _ch_prefs = pdir / "Default" / "Preferences"
+            if _ch_prefs.exists():
+                prefs_file = _ch_prefs
         fp_file = pdir / "fingerprint.json"
-        has_cache2 = (pdir / "cache2").is_dir()
+        is_chrome_persona = False
+        if not fp_file.exists():
+            _ch_persona = pdir / "chrome_persona.json"
+            if _ch_persona.exists():
+                fp_file = _ch_persona
+                is_chrome_persona = True
+        has_cache2 = (
+            (pdir / "cache2").is_dir()
+            or (pdir / "Default" / "Cache").is_dir()
+            or (pdir / "Default" / "Network" / "Cache").is_dir()
+        )
         try:
             tabs_mtime = tabs_file.stat().st_mtime
         except OSError:
@@ -2407,29 +2437,63 @@ class MonitorService:
             try:
                 raw_fp = fp_file.read_text(encoding="utf-8", errors="replace")
                 fp_obj = json.loads(raw_fp)
-                fp_inner = fp_obj.get("fingerprint", {}) if isinstance(fp_obj, dict) else {}
-                if isinstance(fp_inner, dict) and fp_inner:
-                    norm_fp = json.dumps(fp_inner, sort_keys=True, separators=(",", ":"))
+                if is_chrome_persona and isinstance(fp_obj, dict):
+                    norm_fp = json.dumps(fp_obj, sort_keys=True, separators=(",", ":"))
                     result["fp_hash"] = hashlib.sha1(norm_fp.encode("utf-8")).hexdigest()[:16]
-                    nav = fp_inner.get("navigator") or {}
-                    scr = fp_inner.get("screen") or {}
-                    vc = fp_inner.get("videoCard") or fp_inner.get("gpu") or fp_inner.get("webgl") or {}
-                    plat = str(nav.get("platform") or fp_obj.get("os") or "")
-                    w = scr.get("width") or ""
-                    h_px = scr.get("height") or ""
-                    cores = nav.get("hardwareConcurrency") or ""
-                    rend = str(
-                        (vc.get("renderer") if isinstance(vc, dict) else "")
-                        or fp_inner.get("webgl:renderer")
-                        or ""
-                    )[:48]
+                    plat_raw = str(fp_obj.get("platform") or "windows").lower()
+                    plat = {"windows": "Win32", "macos": "MacIntel", "linux": "Linux x86_64"}.get(
+                        plat_raw, plat_raw
+                    )
+                    cores = fp_obj.get("hardware_concurrency") or 8
+                    w = fp_obj.get("screen_width")
+                    h_px = fp_obj.get("screen_height")
+                    rend_full = str(fp_obj.get("gpu_renderer") or "")
+                    if not (w and h_px) or not rend_full:
+                        with contextlib.suppress(Exception):
+                            from chrome_engine.persona import Persona
+
+                            p_obj = Persona.from_json(fp_obj)
+                            if not (w and h_px):
+                                w, h_px = p_obj.effective_screen()
+                            if not rend_full:
+                                _, rend_full = p_obj.effective_gpu()
+                    rend = str(rend_full or "")[:48]
                     if plat and w and h_px:
                         result["fp_hw_sig"] = f"{plat}|{w}x{h_px}|{cores}c|{rend}"
-                    scr_lbl = f"{w}x{h_px}" if w else ""
+                    scr_lbl = f"{w}x{h_px}" if (w and h_px) else ""
                     cpu_lbl = f"{cores} CPU" if cores is not None and cores != "" else ""
                     result["device_label"] = (
                         f"{scr_lbl} · {cpu_lbl}" if (scr_lbl and cpu_lbl) else cpu_lbl
                     )
+                else:
+                    fp_inner = fp_obj.get("fingerprint", {}) if isinstance(fp_obj, dict) else {}
+                    if isinstance(fp_inner, dict) and fp_inner:
+                        norm_fp = json.dumps(fp_inner, sort_keys=True, separators=(",", ":"))
+                        result["fp_hash"] = hashlib.sha1(norm_fp.encode("utf-8")).hexdigest()[:16]
+                        nav = fp_inner.get("navigator") or {}
+                        scr = fp_inner.get("screen") or {}
+                        vc = (
+                            fp_inner.get("videoCard")
+                            or fp_inner.get("gpu")
+                            or fp_inner.get("webgl")
+                            or {}
+                        )
+                        plat = str(nav.get("platform") or fp_obj.get("os") or "")
+                        w = scr.get("width") or ""
+                        h_px = scr.get("height") or ""
+                        cores = nav.get("hardwareConcurrency") or ""
+                        rend = str(
+                            (vc.get("renderer") if isinstance(vc, dict) else "")
+                            or fp_inner.get("webgl:renderer")
+                            or ""
+                        )[:48]
+                        if plat and w and h_px:
+                            result["fp_hw_sig"] = f"{plat}|{w}x{h_px}|{cores}c|{rend}"
+                        scr_lbl = f"{w}x{h_px}" if w else ""
+                        cpu_lbl = f"{cores} CPU" if cores is not None and cores != "" else ""
+                        result["device_label"] = (
+                            f"{scr_lbl} · {cpu_lbl}" if (scr_lbl and cpu_lbl) else cpu_lbl
+                        )
             except Exception:
                 pass
 
@@ -2443,7 +2507,7 @@ class MonitorService:
             except Exception:
                 pass
 
-        # Only read cookies.sqlite when the profile's browser is NOT running
+        # Only read cookies.sqlite / Default/Network/Cookies when the profile's browser is NOT running
         if not is_running and cookies_mtime > 0:
             try:
                 db_posix = cookies_db.resolve().as_posix()
@@ -2451,14 +2515,33 @@ class MonitorService:
                 conn = sqlite3.connect(uri, uri=True, timeout=0.3)
                 try:
                     cur = conn.cursor()
-                    try:
+                    if is_chrome_cookies:
                         cur.execute(
-                            "SELECT host, name, creationTime, expiry FROM moz_cookies"
+                            "SELECT host_key, name, creation_utc, expires_utc FROM cookies"
                         )
-                        rows = cur.fetchall()
-                    except sqlite3.OperationalError:
-                        cur.execute("SELECT host, name, 0, expiry FROM moz_cookies")
-                        rows = cur.fetchall()
+                        raw_rows = cur.fetchall()
+                        rows = [
+                            (
+                                h,
+                                n,
+                                max(0.0, (float(ct) / 1_000_000.0) - 11_644_473_600.0)
+                                if ct and float(ct) > 0
+                                else 0,
+                                max(0.0, (float(ex) / 1_000_000.0) - 11_644_473_600.0)
+                                if ex and float(ex) > 0
+                                else 0,
+                            )
+                            for h, n, ct, ex in raw_rows
+                        ]
+                    else:
+                        try:
+                            cur.execute(
+                                "SELECT host, name, creationTime, expiry FROM moz_cookies"
+                            )
+                            rows = cur.fetchall()
+                        except sqlite3.OperationalError:
+                            cur.execute("SELECT host, name, 0, expiry FROM moz_cookies")
+                            rows = cur.fetchall()
                 finally:
                     conn.close()
 
@@ -2620,7 +2703,7 @@ class MonitorService:
             except Exception:
                 pass
 
-        # Only read places.sqlite when the profile's browser is NOT running
+        # Only read places.sqlite / Default/History when the profile's browser is NOT running
         if not is_running and places_mtime > 0:
             try:
                 pl_posix = places_db.resolve().as_posix()
@@ -2628,9 +2711,12 @@ class MonitorService:
                 conn_pl = sqlite3.connect(pl_uri, uri=True, timeout=0.3)
                 try:
                     cur_pl = conn_pl.cursor()
-                    cur_pl.execute(
-                        "SELECT url, rev_host FROM moz_places WHERE visit_count > 0"
-                    )
+                    if is_chrome_history:
+                        cur_pl.execute("SELECT url, '' FROM urls WHERE visit_count > 0")
+                    else:
+                        cur_pl.execute(
+                            "SELECT url, rev_host FROM moz_places WHERE visit_count > 0"
+                        )
                     pl_rows = cur_pl.fetchall()
                 finally:
                     conn_pl.close()

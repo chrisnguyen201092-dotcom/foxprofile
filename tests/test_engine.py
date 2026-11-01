@@ -1,7 +1,9 @@
 """The browser engine a profile runs on: stored, validated, and routed to its runner."""
 
 import json
+import sqlite3
 import sys
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,8 +11,9 @@ from fastapi.testclient import TestClient
 from src.api.app import create_app
 from src.core.container import Container
 from src.models.profile import Profile
-from src.services.browser import fingerprint
+from src.services.browser import cookies, fingerprint
 from src.services.browser.process import runner_command
+from src.services.monitor import MonitorService
 from src.services.profile.manager import ProfileManager
 
 
@@ -97,6 +100,102 @@ def test_fingerprint_summary_reads_the_chrome_persona(tmp_path):
     assert fingerprint.reset(str(tmp_path))
     assert not (tmp_path / fingerprint.CHROME_PERSONA_FILE).exists()
     assert fingerprint.summary(str(tmp_path)) is None
+
+
+def test_monitor_service_inspects_chrome_profile_disk_and_trust_score(tmp_path):
+    data_dir = tmp_path / "camoufox_data"
+    log_dir = tmp_path / "logs"
+    pdir = data_dir / "chrome_live"
+    (pdir / "Default" / "Network").mkdir(parents=True)
+    (pdir / "Default" / "Cache").mkdir(parents=True)
+
+    # 1. Write chrome_persona.json and tabs.json
+    (pdir / "chrome_persona.json").write_text(
+        json.dumps(
+            {
+                "seed": 4242,
+                "platform": "windows",
+                "platform_version": "19.0.0",
+                "brand": "Chrome",
+                "hardware_concurrency": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pdir / "tabs.json").write_text(
+        json.dumps({"tabs": ["https://muse.ai/thread/8899aabb"]}), encoding="utf-8"
+    )
+
+    # 2. Write Chromium Default/Network/Cookies (datr created 15 days ago + hatch_gw + hatch_sess + ps_l)
+    now = time.time()
+    datr_created_chrome = cookies._unix_to_chrome_time(now - 15 * 86400)
+    exp_chrome = cookies._unix_to_chrome_time(now + 25 * 86400)
+    cookies_db = pdir / "Default" / "Network" / "Cookies"
+    conn = sqlite3.connect(str(cookies_db))
+    try:
+        conn.executescript(cookies._CHROME_COOKIES_DDL)
+        rows = [
+            (".meta.com", "datr", "d1", datr_created_chrome, exp_chrome),
+            (".facebook.com", "datr", "d1", datr_created_chrome, exp_chrome),
+            (".instagram.com", "datr", "d1", datr_created_chrome, exp_chrome),
+            (".facebook.com", "ps_l", "1", datr_created_chrome, exp_chrome),
+            (".muse.ai", "hatch_gw", "gw_val", datr_created_chrome, exp_chrome),
+            (".muse.ai", "hatch_sess", "sess_val", datr_created_chrome, exp_chrome),
+        ]
+        for host_k, cname, cval, ct, ex in rows:
+            conn.execute(
+                "INSERT INTO cookies (creation_utc, host_key, name, value, path, expires_utc, "
+                "is_secure, is_httponly, last_access_utc) VALUES (?, ?, ?, ?, '/', ?, 1, 1, ?)",
+                (ct, host_k, cname, cval, ex, ct),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 3. Write Chromium Default/History (urls table)
+    hist_db = pdir / "Default" / "History"
+    conn_h = sqlite3.connect(str(hist_db))
+    try:
+        conn_h.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, visit_count INTEGER)")
+        for idx, url in enumerate(
+            [
+                "https://muse.ai/thread/8899aabb",
+                "https://www.nytimes.com/section/technology",
+                "https://www.wikipedia.org/wiki/Browser",
+                "https://www.amazon.com/dp/B08N5WRWNW",
+            ],
+            start=1,
+        ):
+            conn_h.execute("INSERT INTO urls VALUES (?, ?, 3)", (idx, url))
+        conn_h.commit()
+    finally:
+        conn_h.close()
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    prof = Profile(
+        name="chrome_live",
+        proxy="http://user:pass@sp02-usa101.nguonproxy.com:10555",
+        os_type="windows",
+        timezone="America/New_York",
+        locale="en-US",
+        engine="chrome",
+    )
+    snap = mon.snapshot([prof], running_names=set())
+    info = snap.profiles["chrome_live"]
+    assert info.hatch_gw is True
+    assert info.hatch_sess is True
+    assert info.has_ps_l is True
+    assert info.has_thread_url is True
+    assert info.has_cache2 is True
+    assert 14.5 <= info.datr_age_days <= 15.5
+    assert info.datr_domains == 3
+    assert info.history_pages == 4
+    assert info.ext_domains == 3
+    assert info.trust_score > 0
+    disk = mon._inspect_profile_disk("chrome_live", is_running=False)
+    assert disk["fp_hash"]
+    assert "Win32|" in disk["fp_hw_sig"]
+    assert "12 CPU" in disk["device_label"]
 
 
 def test_prefetch_skips_an_installed_engine(monkeypatch):

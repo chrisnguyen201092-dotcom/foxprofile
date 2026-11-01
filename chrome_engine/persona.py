@@ -2,7 +2,8 @@
 
 fingerprint-chromium derives most of the device from one 32-bit seed (GPU,
 canvas/audio noise, fonts, client rects); the persona adds what the seed does
-not choose: OS, OS version, browser brand, CPU cores, timezone and language.
+not choose: OS, OS version, browser brand, CPU cores, timezone, language, and
+optional hardware overrides (GPU vendor/renderer, brand version, screen size).
 It is generated once and stored in the profile directory, so a profile shows
 the same device on every launch, like Camoufox's fingerprint.json.
 """
@@ -34,9 +35,100 @@ _CORES: dict[str, list[tuple[int, float]]] = {
     "macos": [(8, 0.45), (10, 0.25), (12, 0.20), (14, 0.10)],
     "linux": [(4, 0.20), (8, 0.35), (12, 0.20), (16, 0.25)],
 }
+_SCREENS: dict[str, list[tuple[tuple[int, int], float]]] = {
+    "windows": [((1920, 1080), 0.55), ((2560, 1440), 0.25), ((1536, 864), 0.20)],
+    "macos": [((1440, 900), 0.35), ((1512, 982), 0.35), ((1728, 1117), 0.30)],
+    "linux": [((1920, 1080), 0.65), ((2560, 1440), 0.25), ((1366, 768), 0.10)],
+}
+_GPUS: dict[str, list[tuple[tuple[str, str], float]]] = {
+    "windows": [
+        (
+            (
+                "Google Inc. (NVIDIA)",
+                "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            ),
+            0.30,
+        ),
+        (
+            (
+                "Google Inc. (NVIDIA)",
+                "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            ),
+            0.25,
+        ),
+        (
+            (
+                "Google Inc. (Intel)",
+                "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            ),
+            0.25,
+        ),
+        (
+            (
+                "Google Inc. (AMD)",
+                "ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            ),
+            0.20,
+        ),
+    ],
+    "macos": [
+        (
+            (
+                "Google Inc. (Apple)",
+                "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
+            ),
+            0.30,
+        ),
+        (
+            (
+                "Google Inc. (Apple)",
+                "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+            ),
+            0.35,
+        ),
+        (
+            (
+                "Google Inc. (Apple)",
+                "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)",
+            ),
+            0.25,
+        ),
+        (
+            (
+                "Google Inc. (Apple)",
+                "ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Pro, Unspecified Version)",
+            ),
+            0.10,
+        ),
+    ],
+    "linux": [
+        (
+            (
+                "Google Inc. (Intel)",
+                "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)",
+            ),
+            0.40,
+        ),
+        (
+            (
+                "Google Inc. (AMD)",
+                "ANGLE (AMD, AMD Radeon Graphics (radeonsi, renoir, LLVM 15.0.7), OpenGL 4.6)",
+            ),
+            0.35,
+        ),
+        (
+            (
+                "Google Inc. (NVIDIA)",
+                "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650/PCIe/SSE2, OpenGL 4.6.0)",
+            ),
+            0.25,
+        ),
+    ],
+}
 
 _LOCALE = re.compile(r"^[a-z]{2,3}(-[A-Z]{2})?$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+_BRAND_VERSION = re.compile(r"^\d+(\.\d+){1,3}$")
 
 # How well a persona OS can be presented on a host OS. fingerprint-chromium
 # spoofs navigator, client hints and the WebGL vendor/renderer everywhere, but
@@ -72,6 +164,11 @@ class Persona:
     # None: follow the proxy's exit IP (or the host when there is no proxy).
     timezone: str | None = None
     locale: str | None = None
+    brand_version: str | None = None
+    gpu_vendor: str | None = None
+    gpu_renderer: str | None = None
+    screen_width: int | None = None
+    screen_height: int | None = None
 
     def __post_init__(self) -> None:
         validate(self)
@@ -79,6 +176,21 @@ class Persona:
     def with_geo(self, timezone: str | None, locale: str | None) -> Persona:
         """Fill in timezone / locale only where the persona leaves them open."""
         return replace(self, timezone=self.timezone or timezone, locale=self.locale or locale)
+
+    def effective_screen(self) -> tuple[int, int]:
+        """Return pinned (width, height) or deterministic per-seed screen dimensions."""
+        if self.screen_width and self.screen_height:
+            return (self.screen_width, self.screen_height)
+        rng = Random(f"{self.seed}:{self.platform}:screen")
+        return _pick(rng, _SCREENS[self.platform])
+
+    def effective_gpu(self) -> tuple[str, str]:
+        """Return pinned (vendor, renderer) or deterministic per-seed GPU tuple."""
+        if self.gpu_vendor and self.gpu_renderer:
+            return (self.gpu_vendor, self.gpu_renderer)
+        rng = Random(f"{self.seed}:{self.platform}:gpu")
+        v, r = _pick(rng, _GPUS[self.platform])
+        return (self.gpu_vendor or v, self.gpu_renderer or r)
 
     def to_args(self) -> list[str]:
         """fingerprint-chromium switches for this persona."""
@@ -89,6 +201,12 @@ class Persona:
             f"--fingerprint-brand={self.brand}",
             f"--fingerprint-hardware-concurrency={self.hardware_concurrency}",
         ]
+        if self.brand_version:
+            args.append(f"--fingerprint-brand-version={self.brand_version}")
+        if self.gpu_vendor:
+            args.append(f"--fingerprint-gpu-vendor={self.gpu_vendor}")
+        if self.gpu_renderer:
+            args.append(f"--fingerprint-gpu-renderer={self.gpu_renderer}")
         if self.timezone:
             args.append(f"--timezone={self.timezone}")
         if self.locale:
@@ -97,7 +215,22 @@ class Persona:
         return args
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        return {
+            k: v
+            for k, v in data.items()
+            if v is not None
+            or k
+            in (
+                "seed",
+                "platform",
+                "platform_version",
+                "brand",
+                "hardware_concurrency",
+                "timezone",
+                "locale",
+            )
+        }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Persona:
@@ -122,6 +255,27 @@ def validate(p: Persona) -> None:
         _check_timezone(p.timezone)
     if p.locale is not None and not _LOCALE.match(p.locale):
         raise PersonaError("locale must look like en-US or vi-VN")
+    if p.brand_version is not None and not _BRAND_VERSION.match(p.brand_version):
+        raise PersonaError("brand_version must look like 148.0.7778.215")
+    if p.gpu_vendor is not None and (not isinstance(p.gpu_vendor, str) or not p.gpu_vendor.strip()):
+        raise PersonaError("gpu_vendor must be a non-empty string")
+    if p.gpu_renderer is not None and (
+        not isinstance(p.gpu_renderer, str) or not p.gpu_renderer.strip()
+    ):
+        raise PersonaError("gpu_renderer must be a non-empty string")
+    if (p.screen_width is None) != (p.screen_height is None):
+        raise PersonaError("screen_width and screen_height must be set together")
+    if (
+        p.screen_width is not None
+        and p.screen_height is not None
+        and (
+            not isinstance(p.screen_width, int)
+            or not isinstance(p.screen_height, int)
+            or not 320 <= p.screen_width <= 7680
+            or not 240 <= p.screen_height <= 4320
+        )
+    ):
+        raise PersonaError("screen_width and screen_height must be valid dimensions")
 
 
 def _check_timezone(name: str) -> None:
@@ -155,6 +309,12 @@ def generate(
     brand: str = "Chrome",
     timezone: str | None = None,
     locale: str | None = None,
+    *,
+    brand_version: str | None = None,
+    gpu_vendor: str | None = None,
+    gpu_renderer: str | None = None,
+    screen_width: int | None = None,
+    screen_height: int | None = None,
 ) -> Persona:
     """A new persona. The same seed and platform always give the same persona."""
     if platform not in PLATFORMS:
@@ -169,6 +329,11 @@ def generate(
         hardware_concurrency=_pick(rng, _CORES[platform]),
         timezone=timezone,
         locale=locale,
+        brand_version=brand_version,
+        gpu_vendor=gpu_vendor,
+        gpu_renderer=gpu_renderer,
+        screen_width=screen_width,
+        screen_height=screen_height,
     )
 
 

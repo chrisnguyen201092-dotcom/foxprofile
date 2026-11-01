@@ -380,6 +380,13 @@ def check(persona: Persona, fp: dict[str, Any]) -> list[Issue]:
     )
     brands = [b.get("brand") for b in ua_data.get("brands") or []]
     expect(_BRAND[persona.brand] in brands, "brand", f"brands are {brands}")
+    if persona.brand_version:
+        expect(
+            persona.brand_version in ua
+            or persona.brand_version in json.dumps(ua_data.get("fullVersionList") or []),
+            "brand_version",
+            f"brand_version {persona.brand_version!r} is missing from User-Agent / userAgentData",
+        )
 
     headers = fp.get("headers") or {}
     expect(
@@ -411,6 +418,18 @@ def check(persona: Persona, fp: dict[str, Any]) -> list[Issue]:
             "webgl_renderer",
             f"WebGL renderer {webgl['renderer']!r} does not fit {persona.platform}",
         )
+        if persona.gpu_renderer:
+            expect(
+                webgl.get("renderer") == persona.gpu_renderer,
+                "webgl_renderer_pin",
+                f"WebGL renderer is {webgl.get('renderer')!r}, persona pinned {persona.gpu_renderer!r}",
+            )
+        if persona.gpu_vendor:
+            expect(
+                webgl.get("vendor") == persona.gpu_vendor,
+                "webgl_vendor",
+                f"WebGL vendor is {webgl.get('vendor')!r}, persona pinned {persona.gpu_vendor!r}",
+            )
     else:
         issues.append(Issue("webgl_unavailable", str(webgl.get("error"))))
 
