@@ -238,8 +238,17 @@ class FloatingProfileTabBar:
         last_rendered: list[object] = [None]
         photo_cache: dict[tuple[str, float], object] = {}
         active_menu: list[object] = [None]
+        snip_active: list[bool] = [False]
+        file_dialog_active: list[bool] = [False]
         poll_tick: list[int] = [0]
-        last_av_click: dict[str, object] = {"name": "", "ts": 0.0}
+        last_av_click: dict[str, object] = {"name": "", "ts": 0.0, "after_id": None}
+
+        def _cancel_pending_tab_select() -> None:
+            aid = last_av_click.get("after_id")
+            if aid is not None:
+                with contextlib.suppress(Exception):
+                    root.after_cancel(aid)  # type: ignore[arg-type]
+                last_av_click["after_id"] = None
 
         def _close_popup_menu() -> None:
             if active_menu[0] is not None:
@@ -248,6 +257,7 @@ class FloatingProfileTabBar:
                 active_menu[0] = None
 
         def _notify_avatar_updated() -> None:
+            photo_cache.clear()
             last_rendered[0] = None
             if self._on_avatar_changed is not None:
                 with contextlib.suppress(Exception):
@@ -270,19 +280,25 @@ class FloatingProfileTabBar:
 
         def _open_screen_snipper(pname: str) -> None:
             """Interactive full-screen crosshair selector to snip the Muse avatar from screen."""
+            _cancel_pending_tab_select()
             _close_popup_menu()
+            snip_active[0] = True
             self._on_select_tab(pname)
 
             def _launch_overlay() -> None:
-                snip = tk.Toplevel(root)
-                snip.overrideredirect(True)
-                scr_w = root.winfo_screenwidth()
-                scr_h = root.winfo_screenheight()
-                snip.geometry(f"{scr_w}x{scr_h}+0+0")
-                with contextlib.suppress(Exception):
-                    snip.attributes("-topmost", True)
-                    snip.attributes("-alpha", 0.28)
-                snip.configure(bg="#09090B", cursor="crosshair")
+                try:
+                    snip = tk.Toplevel(root)
+                    snip.overrideredirect(True)
+                    scr_w = root.winfo_screenwidth()
+                    scr_h = root.winfo_screenheight()
+                    snip.geometry(f"{scr_w}x{scr_h}+0+0")
+                    with contextlib.suppress(Exception):
+                        snip.attributes("-topmost", True)
+                        snip.attributes("-alpha", 0.28)
+                    snip.configure(bg="#09090B", cursor="crosshair")
+                except Exception:
+                    snip_active[0] = False
+                    return
 
                 canvas = tk.Canvas(
                     snip,
@@ -313,6 +329,7 @@ class FloatingProfileTabBar:
                 coords = {"x1": 0, "y1": 0, "rect": None, "oval": None}
 
                 def _cancel(_e: object = None) -> None:
+                    snip_active[0] = False
                     with contextlib.suppress(Exception):
                         snip.destroy()
 
@@ -348,7 +365,15 @@ class FloatingProfileTabBar:
                     y2 = int(getattr(e, "y_root", 0))
                     canvas.coords(coords["rect"], coords["x1"], coords["y1"], x2, y2)
                     if coords["oval"]:
-                        canvas.coords(coords["oval"], coords["x1"], coords["y1"], x2, y2)
+                        # Preview the exact inscribed square circle that will be cropped
+                        left, right = min(int(coords["x1"]), x2), max(int(coords["x1"]), x2)
+                        top, bottom = min(int(coords["y1"]), y2), max(int(coords["y1"]), y2)
+                        w = right - left
+                        h = bottom - top
+                        side = min(w, h)
+                        cx1 = left + (w - side) // 2
+                        cy1 = top + (h - side) // 2
+                        canvas.coords(coords["oval"], cx1, cy1, cx1 + side, cy1 + side)
 
                 def _on_release(e: object) -> None:
                     x1 = int(coords["x1"])
@@ -356,14 +381,26 @@ class FloatingProfileTabBar:
                     x2 = int(getattr(e, "x_root", 0))
                     y2 = int(getattr(e, "y_root", 0))
                     with contextlib.suppress(Exception):
+                        canvas.delete("all")
+                        snip.withdraw()
                         snip.destroy()
-                    root.update_idletasks()
-                    if (
-                        abs(x2 - x1) >= 10
-                        and abs(y2 - y1) >= 10
-                        and save_avatar_from_screen_rect(pname, x1, y1, x2, y2)
-                    ):
-                        _notify_avatar_updated()
+                    with contextlib.suppress(Exception):
+                        root.update_idletasks()
+                        root.update()
+
+                    def _do_capture() -> None:
+                        try:
+                            if (
+                                abs(x2 - x1) >= 10
+                                and abs(y2 - y1) >= 10
+                                and save_avatar_from_screen_rect(pname, x1, y1, x2, y2)
+                            ):
+                                _notify_avatar_updated()
+                        finally:
+                            snip_active[0] = False
+
+                    # Wait 80ms so DWM completely removes the dark overlay before BitBlt
+                    root.after(80, _do_capture)
 
                 canvas.bind("<ButtonPress-1>", _on_press)
                 canvas.bind("<B1-Motion>", _on_motion)
@@ -372,10 +409,11 @@ class FloatingProfileTabBar:
                 snip.bind("<Escape>", _cancel)
                 snip.focus_force()
 
-            root.after(120, _launch_overlay)
+            root.after(200, _launch_overlay)
 
         def _open_avatar_menu(event: object, pname: str) -> None:
             """Show FoxProfile-themed popup menu to set/change `pname`'s circular avatar."""
+            _cancel_pending_tab_select()
             _close_popup_menu()
             rx = int(getattr(event, "x_root", root.winfo_x()))
             ry = int(getattr(event, "y_root", root.winfo_y() + root.winfo_height()))
@@ -386,6 +424,7 @@ class FloatingProfileTabBar:
                 pop.attributes("-topmost", True)
             pop.configure(bg=_BG_RAIL)
             active_menu[0] = pop
+            opened_at = time.monotonic()
 
             box = tk.Frame(
                 pop,
@@ -439,13 +478,17 @@ class FloatingProfileTabBar:
             _add_item(get_string("avatar_menu_paste"), _do_paste)
 
             def _do_file() -> None:
-                fpath = filedialog.askopenfilename(
-                    parent=root,
-                    title=f"Avatar - {pname}",
-                    filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")],
-                )
-                if fpath and save_avatar_from_file(pname, fpath):
-                    _notify_avatar_updated()
+                file_dialog_active[0] = True
+                try:
+                    fpath = filedialog.askopenfilename(
+                        parent=root,
+                        title=f"Avatar - {pname}",
+                        filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif")],
+                    )
+                    if fpath and save_avatar_from_file(pname, fpath):
+                        _notify_avatar_updated()
+                finally:
+                    file_dialog_active[0] = False
 
             _add_item(get_string("avatar_menu_file"), _do_file)
 
@@ -465,7 +508,19 @@ class FloatingProfileTabBar:
             py = max(6, min(ry + 8, scr_h - ph - 6))
             pop.geometry(f"{pw}x{ph}+{px}+{py}")
             _apply_win32_toolwindow(pop.winfo_id())
-            pop.bind("<FocusOut>", lambda _e: _close_popup_menu())
+            with contextlib.suppress(Exception):
+                pop.lift()
+                pop.focus_force()
+
+            def _on_pop_focus_out(_e: object) -> None:
+                if file_dialog_active[0]:
+                    return
+                if (time.monotonic() - opened_at) < 0.25:
+                    return
+                _close_popup_menu()
+
+            pop.bind("<FocusOut>", _on_pop_focus_out)
+            pop.bind("<Escape>", lambda _e: _close_popup_menu())
 
         win32_user32 = None
         if sys.platform == "win32":
@@ -667,15 +722,24 @@ class FloatingProfileTabBar:
                 now = time.monotonic()
                 prev_ts = float(last_av_click.get("ts", 0.0))  # type: ignore[arg-type]
                 if last_av_click.get("name") == n and (now - prev_ts) <= 0.45:
+                    _cancel_pending_tab_select()
                     last_av_click["ts"] = 0.0
                     _open_avatar_menu(event, n)
                     return
                 last_av_click["name"] = n
                 last_av_click["ts"] = now
+                _cancel_pending_tab_select()
                 _close_popup_menu()
-                self._on_select_tab(n)
+
+                def _delayed_select() -> None:
+                    last_av_click["after_id"] = None
+                    if active_menu[0] is None and not snip_active[0]:
+                        self._on_select_tab(n)
+
+                last_av_click["after_id"] = root.after(220, _delayed_select)
 
             def _on_avatar_double_click(event: object, n: str = pname) -> None:
+                _cancel_pending_tab_select()
                 last_av_click["ts"] = 0.0
                 if active_menu[0] is None:
                     _open_avatar_menu(event, n)
@@ -683,6 +747,7 @@ class FloatingProfileTabBar:
             av_lbl.pack(side="left", padx=(2, 2))
             av_lbl.bind("<Button-1>", _on_avatar_click)
             av_lbl.bind("<Double-Button-1>", _on_avatar_double_click)
+            av_lbl.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
 
             btn_select = tk.Label(
                 tab_frame,
@@ -698,7 +763,11 @@ class FloatingProfileTabBar:
             btn_select.pack(side="left", fill="x" if vertical else "none", expand=vertical)
             btn_select.bind(
                 "<Button-1>",
-                lambda _e, n=pname: (_close_popup_menu(), self._on_select_tab(n)),
+                lambda _e, n=pname: (_cancel_pending_tab_select(), _close_popup_menu(), self._on_select_tab(n)),
+            )
+            btn_select.bind(
+                "<Button-3>",
+                lambda e, n=pname: _open_avatar_menu(e, n),
             )
 
             btn_close = tk.Label(
@@ -856,7 +925,12 @@ class FloatingProfileTabBar:
                 root.after(150, _poll)
                 return
 
-            if drag_state["dragging"]:
+            if (
+                drag_state["dragging"]
+                or active_menu[0] is not None
+                or snip_active[0]
+                or file_dialog_active[0]
+            ):
                 root.after(80, _poll)
                 return
 

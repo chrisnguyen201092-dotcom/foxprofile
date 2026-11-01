@@ -4795,3 +4795,73 @@ def test_running_tabs_bar_and_floating_tab_bar_single_stage(tmp_path, isolated_p
 
 
 
+
+def test_avatar_capture_validation_and_win32_pipeline(tmp_path) -> None:
+    """Verify blank-avatar rejection, Muse box content check, file import, and 64px cache-busting."""
+    import sys
+
+    from src.services.avatar_store import (
+        _is_valid_avatar_rgba,
+        apply_circular_mask_bgra_to_rgba,
+        encode_rgba_png,
+        find_muse_connected_avatar_box_bgra,
+        get_avatar_path,
+        remove_avatar,
+        save_avatar_from_file,
+    )
+
+    # 1. All-black buffer (e.g. failed BitBlt / uninitialized DIB) is rejected
+    black_64 = apply_circular_mask_bgra_to_rgba(b"\x00\x00\x00\xff" * (64 * 64), 64)
+    assert _is_valid_avatar_rgba(black_64, strict_variance=False) is False
+
+    # 2. Blank white circle (RGB 252,252,252 like unloaded Muse card) is rejected in strict auto-capture
+    white_64 = apply_circular_mask_bgra_to_rgba(b"\xfc\xfc\xfc\xff" * (64 * 64), 64)
+    assert _is_valid_avatar_rgba(white_64, strict_variance=True) is False
+
+    # 3. Genuine textured avatar buffer passes both normal and strict validation
+    rich_bgra = bytearray(64 * 64 * 4)
+    for y in range(64):
+        for x in range(64):
+            i = (y * 64 + x) * 4
+            rich_bgra[i] = (x * 4) & 0xFF
+            rich_bgra[i + 1] = (y * 4) & 0xFF
+            rich_bgra[i + 2] = ((x + y) * 3) & 0xFF
+            rich_bgra[i + 3] = 255
+    rich_64 = apply_circular_mask_bgra_to_rgba(bytes(rich_bgra), 64)
+    assert _is_valid_avatar_rgba(rich_64, strict_variance=False) is True
+    assert _is_valid_avatar_rgba(rich_64, strict_variance=True) is True
+
+    # 4. find_muse_connected_avatar_box_bgra rejects blank white box above green badge, accepts textured box
+    fw, fh = 400, 320
+    blank_frame = bytearray(b"\xfc\xfc\xfc\xff" * (fw * fh))
+    for yy in range(214, 228):
+        for xx in range(94, 108):
+            idx = (yy * fw + xx) * 4
+            blank_frame[idx] = 20
+            blank_frame[idx + 1] = 200
+            blank_frame[idx + 2] = 20
+            blank_frame[idx + 3] = 255
+    assert find_muse_connected_avatar_box_bgra(bytes(blank_frame), fw, fh) is None
+
+    for yy in range(40, 175):
+        for xx in range(80, 215):
+            idx = (yy * fw + xx) * 4
+            blank_frame[idx] = (xx * 5) & 0xFF
+            blank_frame[idx + 1] = (yy * 3) & 0xFF
+            blank_frame[idx + 2] = ((xx ^ yy) * 4) & 0xFF
+            blank_frame[idx + 3] = 255
+    box = find_muse_connected_avatar_box_bgra(bytes(blank_frame), fw, fh)
+    assert box is not None
+
+    # 5. End-to-end Win32 GDI+ save_avatar_from_file & versioned 64px path
+    if sys.platform == "win32":
+        av_dir = str(tmp_path / "avatars_w32")
+        src_png = tmp_path / "sample_src.png"
+        src_png.write_bytes(encode_rgba_png(64, 64, rich_64))
+        assert save_avatar_from_file("#6  Ý Lan", str(src_png), avatars_dir=av_dir) is True
+        p22 = get_avatar_path("#6  Ý Lan", 22, avatars_dir=av_dir)
+        p64 = get_avatar_path("#6  Ý Lan", 64, avatars_dir=av_dir)
+        assert p22 is not None and p22.endswith("_22.png")
+        assert p64 is not None and "_64_" in p64 and p64.endswith(".png")
+        assert remove_avatar("#6  Ý Lan", avatars_dir=av_dir) is True
+        assert get_avatar_path("#6  Ý Lan", 64, avatars_dir=av_dir) is None
