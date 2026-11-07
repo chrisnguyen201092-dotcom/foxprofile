@@ -24,15 +24,15 @@ class APIServer:
         self._stop_requested = False
 
     def _run(self) -> None:
-        import uvicorn
-
         app_instance = (
             self._app()
             if callable(self._app) and not hasattr(self._app, "router")
             else self._app
         )
-        if self._stop_requested:
+        if self._stop_requested or app_instance is None:
             return
+        import uvicorn
+
         config = uvicorn.Config(
             app=app_instance,
             host=API_HOST,

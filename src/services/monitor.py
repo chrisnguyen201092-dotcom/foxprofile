@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import functools
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -36,6 +38,7 @@ from ..models.profile import (
 )
 from ..utils.totp import (
     is_gmail_address,
+    is_mailtemp_address,
     normalize_gmail_app_password,
     split_mail_token,
 )
@@ -100,6 +103,18 @@ _BRACKET_EVENT_TOKENS = (
     "BROWSER_CLOSED",
     "LAUNCH_CANCELLED",
     "LAUNCH_FAILED:",
+)
+_WATCHED_PROFILE_ENTRIES = frozenset(
+    {
+        "tabs.json",
+        "cookies.sqlite",
+        "places.sqlite",
+        "prefs.js",
+        "fingerprint.json",
+        "chrome_persona.json",
+        "cache2",
+        "Default",
+    }
 )
 
 _MULTI_PART_TLDS = frozenset(
@@ -190,6 +205,7 @@ def _is_muse_thread_url(url: str) -> bool:
     return bool(tail and tail.lower() != "new")
 
 
+@functools.lru_cache(maxsize=2048)
 def _extract_root_domain(host: str) -> str:
     """Normalize a hostname to its registrable root domain (eTLD+1), e.g. 'www.amazon.com' -> 'amazon.com'."""
     h = (host or "").strip().lower().strip(".")
@@ -206,6 +222,7 @@ def _extract_root_domain(host: str) -> str:
     return last_two
 
 
+@functools.lru_cache(maxsize=2048)
 def extract_proxy_port(proxy_str: str | None) -> str:
     if not proxy_str:
         return ""
@@ -216,6 +233,7 @@ def extract_proxy_port(proxy_str: str | None) -> str:
     return f":{m.group(1)}" if m else ""
 
 
+@functools.lru_cache(maxsize=2048)
 def extract_proxy_endpoint(proxy_str: str | None) -> str:
     if not proxy_str:
         return ""
@@ -234,6 +252,7 @@ def extract_proxy_endpoint(proxy_str: str | None) -> str:
     return f"{host}:{m.group(1)}" if host else f":{m.group(1)}"
 
 
+@functools.lru_cache(maxsize=2048)
 def extract_proxy_cluster(proxy_str: str | None) -> str:
     ep = extract_proxy_endpoint(proxy_str)
     if not ep or ":" not in ep:
@@ -249,13 +268,12 @@ def is_gateway_ipv6_cluster(cluster: str) -> bool:
     return bool(cluster and cluster[0].isdigit())
 
 
+@functools.lru_cache(maxsize=2048)
 def _ipv6_prefix_64(ip: str | None) -> str:
     clean = (ip or "").strip().lower()
     if ":" not in clean:
         return ""
     try:
-        import ipaddress
-
         addr = ipaddress.IPv6Address(clean)
         exploded = addr.exploded.split(":")
         return ":".join(exploded[:4])
@@ -1462,9 +1480,10 @@ class MonitorService:
         profiles: list[Profile],
         pool_token_map: dict[str, str] | None = None,
     ) -> list[tuple[str, str, str]]:
-        """Return `[(profile_name, email, mail_token), ...]` for active `Live` profiles eligible for daily mail check."""
+        """Return `[(profile_name, email, mail_token), ...]` for active `Live` / `Theo dõi` profiles eligible for daily mail check."""
         has_live_page = any(
-            any(pg.casefold() == "live" for pg in (p.pages or [])) for p in profiles
+            any(pg.casefold() in ("live", "theo dõi", "theo doi") for pg in (p.pages or []))
+            for p in profiles
         )
         tok_lookup = pool_token_map or {}
         targets: list[tuple[str, str, str]] = []
@@ -1476,7 +1495,9 @@ class MonitorService:
                 or is_ban_page(p.group)
             ):
                 continue
-            if has_live_page and not any(pg.casefold() == "live" for pg in (p.pages or [])):
+            if has_live_page and not any(
+                pg.casefold() in ("live", "theo dõi", "theo doi") for pg in (p.pages or [])
+            ):
                 continue
             em = (p.email or "").strip()
             if not em or em.lower() in self._mail_dead_tokens:
@@ -1486,6 +1507,11 @@ class MonitorService:
             )
             if not tok and is_gmail_address(em):
                 tok = normalize_gmail_app_password(getattr(p, "password", None))
+            if is_mailtemp_address(em):
+                if not tok:
+                    tok = (getattr(p, "password", None) or "").strip() or "webmail"
+                targets.append((p.name, em, tok))
+                continue
             rt, _ = split_mail_token(tok)
             if not rt:
                 continue
@@ -1941,6 +1967,10 @@ class MonitorService:
         if hist is None:
             hist = self._refresh_log_history()
         h = hist.get(profile_name, {})
+        h_sessions = h.get("sessions")
+        live_sessions = self._live_sessions.get(profile_name)
+        if not h_sessions and not live_sessions:
+            return []
         failed_ends: list[dt.datetime] = list(h.get("failed_ends", []))
         port = self._last_used_ports.get(profile_name, "") or fallback_port
         merged: list[dict[str, Any]] = []
@@ -1953,9 +1983,7 @@ class MonitorService:
                 return dt.datetime.fromisoformat(val)
             return None
 
-        candidates = list(h.get("sessions", [])) + list(
-            self._live_sessions.get(profile_name, [])
-        )
+        candidates = list(h_sessions or []) + list(live_sessions or [])
         for s in candidates:
             st = str(s.get("start", "")).strip()
             en = str(s.get("end", "")).strip()
@@ -2127,64 +2155,34 @@ class MonitorService:
                     continue
                 relevant_lines = []
                 for line in raw_lines:
-                    m = _RE_LOG_LINE.match(line)
-                    if not m:
+                    if len(line) < 26 or not line[0].isdigit():
                         continue
-                    msg = m.group("msg").strip()
+                    sep_parts = line.split(" - ", 3)
+                    if len(sep_parts) == 4 and len(sep_parts[0]) == 19:
+                        ts_part = sep_parts[0]
+                        msg = sep_parts[3].strip()
+                    else:
+                        m = _RE_LOG_LINE.match(line)
+                        if not m:
+                            continue
+                        ts_part = m.group("ts")
+                        msg = m.group("msg").strip()
                     if not msg or not msg.startswith(_LOG_MSG_PREFIXES):
                         continue
-                    if msg.startswith("[") and not any(
+                    if msg[0] == "[" and not any(
                         tok in msg for tok in _BRACKET_EVENT_TOKENS
                     ):
                         continue
-                    relevant_lines.append((m.group("ts"), msg))
+                    relevant_lines.append((ts_part, msg))
                 self._log_file_events_cache[lf.name] = (lf_mtime, lf_size, relevant_lines)
 
             for ts_str, msg in relevant_lines:
-                mr = _RE_RENAME_PROFILE.match(msg)
-                if mr:
-                    old_p = mr.group("old").strip()
-                    new_p = mr.group("new").strip()
-                    if old_p != new_p:
-                        old_prefix = f"{old_p} ("
-                        match_keys = [
-                            k
-                            for k in list(hist.keys())
-                            if k == old_p or (k.startswith(old_prefix) and k.endswith(")"))
-                        ]
-                        if match_keys:
-                            nh = _ensure(new_p)
-                            new_port = self._last_used_ports.get(new_p, "")
-                            existing_starts = {s["start"] for s in nh["sessions"]}
-                            for mk in match_keys:
-                                oh = hist.pop(mk)
-                                for s_item in oh["sessions"]:
-                                    if s_item["start"] not in existing_starts:
-                                        copied = dict(s_item)
-                                        if new_port:
-                                            copied["port"] = new_port
-                                        nh["sessions"].append(copied)
-                                        existing_starts.add(s_item["start"])
-                                nh["today_seconds"] += oh["today_seconds"]
-                                nh["failed_ends"].extend(oh.get("failed_ends", []))
-                                if oh["last_closed"] and (
-                                    not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
-                                ):
-                                    nh["last_closed"] = oh["last_closed"]
-                                if oh["_open_start"] and not nh["_open_start"]:
-                                    nh["_open_start"] = oh["_open_start"]
-                            nh["sessions"].sort(key=lambda item: str(item.get("start", "")))
-                    continue
-
-                mt = _RE_TRASH_PROFILE.match(msg)
-                if mt:
-                    hist.pop(mt.group("prof").strip(), None)
-                    continue
-
-                mb = _RE_BRACKET_PROFILE.match(msg)
-                if mb:
-                    pname = mb.group("prof").strip()
-                    rest = mb.group("rest").strip()
+                if msg[0] == "[":
+                    end_br = msg.find("]")
+                    if end_br <= 1:
+                        continue
+                    pname = msg[1:end_br].strip()
+                    rest = msg[end_br + 1 :].strip()
                     if (
                         rest.startswith("Starting browser for ")
                         or rest.startswith("\u0110ang kh\u1edfi \u0111\u1ed9ng tr\u00ecnh duy\u1ec7t cho ")
@@ -2214,31 +2212,82 @@ class MonitorService:
                             _abort_failed_open(h, ts)
                     continue
 
-                mst = _RE_STARTING.match(msg)
-                if mst:
-                    try:
-                        ts = dt.datetime.fromisoformat(ts_str)
-                    except ValueError:
-                        continue
-                    pname = mst.group("prof").strip()
-                    h = _ensure(pname)
-                    is_ready_line = msg.startswith("Browser started for profile:")
-                    if h["_open_start"] is None or (
-                        not is_ready_line
-                        and (ts - h["_open_start"]).total_seconds() > 120.0
-                    ):
-                        h["_open_start"] = ts
+                if msg.startswith("Updated profile:"):
+                    mr = _RE_RENAME_PROFILE.match(msg)
+                    if mr:
+                        old_p = mr.group("old").strip()
+                        new_p = mr.group("new").strip()
+                        if old_p != new_p:
+                            old_prefix = f"{old_p} ("
+                            match_keys = [
+                                k
+                                for k in list(hist.keys())
+                                if k == old_p or (k.startswith(old_prefix) and k.endswith(")"))
+                            ]
+                            if match_keys:
+                                nh = _ensure(new_p)
+                                new_port = self._last_used_ports.get(new_p, "")
+                                existing_starts = {s["start"] for s in nh["sessions"]}
+                                for mk in match_keys:
+                                    oh = hist.pop(mk)
+                                    for s_item in oh["sessions"]:
+                                        if s_item["start"] not in existing_starts:
+                                            copied = dict(s_item)
+                                            if new_port:
+                                                copied["port"] = new_port
+                                            nh["sessions"].append(copied)
+                                            existing_starts.add(s_item["start"])
+                                    nh["today_seconds"] += oh["today_seconds"]
+                                    nh["failed_ends"].extend(oh.get("failed_ends", []))
+                                    if oh["last_closed"] and (
+                                        not nh["last_closed"] or oh["last_closed"] > nh["last_closed"]
+                                    ):
+                                        nh["last_closed"] = oh["last_closed"]
+                                    if oh["_open_start"] and not nh["_open_start"]:
+                                        nh["_open_start"] = oh["_open_start"]
+                                nh["sessions"].sort(key=lambda item: str(item.get("start", "")))
                     continue
 
-                mlf = _RE_LAUNCH_FAILED.match(msg)
-                if mlf:
-                    try:
-                        ts_fail = dt.datetime.fromisoformat(ts_str)
-                    except ValueError:
-                        ts_fail = None
-                    pname = mlf.group("prof").strip()
-                    h = _ensure(pname)
-                    _abort_failed_open(h, ts_fail)
+                if msg.startswith(("Moved profile to trash:", "Deleted profile:")):
+                    mt = _RE_TRASH_PROFILE.match(msg)
+                    if mt:
+                        hist.pop(mt.group("prof").strip(), None)
+                    continue
+
+                if msg.startswith(
+                    (
+                        "Starting browser for profile:",
+                        "Browser started for profile:",
+                        "\u0110ang kh\u1edfi ch\u1ea1y:",
+                        "Launching:",
+                    )
+                ):
+                    mst = _RE_STARTING.match(msg)
+                    if mst:
+                        try:
+                            ts = dt.datetime.fromisoformat(ts_str)
+                        except ValueError:
+                            continue
+                        pname = mst.group("prof").strip()
+                        h = _ensure(pname)
+                        is_ready_line = msg.startswith("Browser started for profile:")
+                        if h["_open_start"] is None or (
+                            not is_ready_line
+                            and (ts - h["_open_start"]).total_seconds() > 120.0
+                        ):
+                            h["_open_start"] = ts
+                    continue
+
+                if msg.startswith(("Launch failed for profile ", "Error starting browser for ")):
+                    mlf = _RE_LAUNCH_FAILED.match(msg)
+                    if mlf:
+                        try:
+                            ts_fail = dt.datetime.fromisoformat(ts_str)
+                        except ValueError:
+                            ts_fail = None
+                        pname = mlf.group("prof").strip()
+                        h = _ensure(pname)
+                        _abort_failed_open(h, ts_fail)
                     continue
 
                 ms = (
@@ -2315,7 +2364,54 @@ class MonitorService:
         pdir = self._data_dir / name
         now_ts = time.time()
         cached = self._disk_cache.get(name)
-        if not pdir.exists():
+
+        tabs_file = pdir / "tabs.json"
+        tabs_mtime = 0.0
+        cookies_db = pdir / "cookies.sqlite"
+        cookies_mtime = 0.0
+        is_chrome_cookies = False
+        places_db = pdir / "places.sqlite"
+        places_mtime = 0.0
+        is_chrome_history = False
+        prefs_mtime = 0.0
+        fp_file = pdir / "fingerprint.json"
+        fp_mtime = 0.0
+        ch_fp_mtime = 0.0
+        is_chrome_persona = False
+        has_cache2 = False
+        has_default_dir = False
+
+        try:
+            with os.scandir(pdir) as it:
+                for entry in it:
+                    ename = entry.name
+                    if ename not in _WATCHED_PROFILE_ENTRIES:
+                        continue
+                    if ename == "tabs.json":
+                        with contextlib.suppress(OSError):
+                            tabs_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "cookies.sqlite":
+                        with contextlib.suppress(OSError):
+                            cookies_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "places.sqlite":
+                        with contextlib.suppress(OSError):
+                            places_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "prefs.js":
+                        with contextlib.suppress(OSError):
+                            prefs_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "fingerprint.json":
+                        with contextlib.suppress(OSError):
+                            fp_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "chrome_persona.json":
+                        with contextlib.suppress(OSError):
+                            ch_fp_mtime = entry.stat(follow_symlinks=False).st_mtime
+                    elif ename == "cache2":
+                        with contextlib.suppress(OSError):
+                            has_cache2 = entry.is_dir(follow_symlinks=False)
+                    elif ename == "Default":
+                        with contextlib.suppress(OSError):
+                            has_default_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
             return {
                 "has_thread_url": False,
                 "tab_count": 0,
@@ -2342,46 +2438,24 @@ class MonitorService:
                 "fp_hw_sig": "",
             }
 
-        def _stat_mtime(p: pathlib.Path) -> float:
-            try:
-                return p.stat().st_mtime
-            except OSError:
-                return 0.0
-
-        tabs_file = pdir / "tabs.json"
-        tabs_mtime = _stat_mtime(tabs_file)
-
-        cookies_db = pdir / "cookies.sqlite"
-        cookies_mtime = _stat_mtime(cookies_db)
-        is_chrome_cookies = False
-
-        places_db = pdir / "places.sqlite"
-        places_mtime = _stat_mtime(places_db)
-        is_chrome_history = False
-
-        prefs_file = pdir / "prefs.js"
-        prefs_mtime = _stat_mtime(prefs_file)
-
-        fp_file = pdir / "fingerprint.json"
-        fp_mtime = _stat_mtime(fp_file)
-        is_chrome_persona = False
-        if fp_mtime == 0.0:
-            _ch_persona = pdir / "chrome_persona.json"
-            _ch_fp_mtime = _stat_mtime(_ch_persona)
-            if _ch_fp_mtime > 0.0:
-                fp_file = _ch_persona
-                fp_mtime = _ch_fp_mtime
-                is_chrome_persona = True
-
-        has_cache2 = (pdir / "cache2").is_dir()
+        if fp_mtime == 0.0 and ch_fp_mtime > 0.0:
+            fp_file = pdir / "chrome_persona.json"
+            fp_mtime = ch_fp_mtime
+            is_chrome_persona = True
 
         # Only probe Chromium `Default/` paths when Camoufox files are absent
-        if (
+        if has_default_dir and (
             cookies_mtime == 0.0
             or places_mtime == 0.0
             or prefs_mtime == 0.0
             or not has_cache2
-        ) and (pdir / "Default").is_dir():
+        ):
+            def _stat_mtime(p: pathlib.Path) -> float:
+                try:
+                    return p.stat().st_mtime
+                except OSError:
+                    return 0.0
+
             default_dir = pdir / "Default"
             if cookies_mtime == 0.0:
                 for _cand in (
@@ -2405,7 +2479,6 @@ class MonitorService:
                 _ch_prefs = default_dir / "Preferences"
                 _prm = _stat_mtime(_ch_prefs)
                 if _prm > 0.0:
-                    prefs_file = _ch_prefs
                     prefs_mtime = _prm
             if not has_cache2:
                 has_cache2 = (
@@ -3185,19 +3258,9 @@ class MonitorService:
             cookie_domains = int(disk.get("cookie_domains") or 0)
             history_pages = int(disk.get("history_pages") or 0)
             history_domains = int(disk.get("history_domains") or 0)
-            cal_age_days = compute_days_since(p.created_at) or 0
+            cal_age_days = compute_days_since(p.created_at)
             sess_cnt, active_days, total_mins = sess_stats_map.get(p.name, (0, 0, 0))
-            if datr_age_days > 0.0:
-                # Use full 24-hour days since login (`int(datr_age_days)`) unless the user
-                # manually set an older historical `created_at` (>3 days older than cookie).
-                if cal_age_days - datr_age_days > 3.0:
-                    age_days = cal_age_days
-                else:
-                    age_days = int(datr_age_days)
-            elif cookie_count == 0 and sess_cnt == 0 and history_pages == 0 and cal_age_days <= 3:
-                age_days = 0
-            else:
-                age_days = cal_age_days
+            age_days = cal_age_days if cal_age_days is not None else int(datr_age_days)
             eff_datr_age = (
                 max(0.1, round(datr_age_days, 1))
                 if datr_age_days > 0

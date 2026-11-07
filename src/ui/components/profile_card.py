@@ -770,10 +770,12 @@ def _device(
     engine_name = "Chrome" if chrome else "Camoufox"
     raw_created = getattr(profile, "created_at", None)
     cal_days = compute_days_since(raw_created)
-    if monitor_info is not None and raw_created is not None:
-        age_days: int | None = monitor_info.age_days
+    if cal_days is not None:
+        age_days: int | None = cal_days
+    elif monitor_info is not None:
+        age_days = monitor_info.age_days
     else:
-        age_days = cal_days
+        age_days = None
     ban_days = compute_days_since(getattr(profile, "banned_at", None))
 
     if age_days is not None or ban_days is not None:

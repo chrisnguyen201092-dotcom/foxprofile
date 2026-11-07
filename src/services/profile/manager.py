@@ -91,6 +91,8 @@ class ProfileManager:
         self.mail_pool: list[str] = []
         self.status_tags: list[dict[str, str]] = default_status_tags()
         self._disk_mtime: float = 0.0
+        self._trash_mtime: float = -1.0
+        self._trash_cache: dict[str, dict] = {}
         set_active_status_tags(self.status_tags)
         self._load_profiles()
         pathlib.Path(DATA_DIR).mkdir(exist_ok=True, parents=True)
@@ -182,11 +184,20 @@ class ProfileManager:
 
     def _load_trash_dict(self) -> dict[str, dict]:
         path = self._trash_file()
-        if not path.exists():
+        try:
+            st_mtime = path.stat().st_mtime
+        except OSError:
+            self._trash_mtime = -1.0
+            self._trash_cache = {}
             return {}
+        if st_mtime == self._trash_mtime:
+            return {k: dict(v) for k, v in self._trash_cache.items()}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            clean = data if isinstance(data, dict) else {}
+            self._trash_mtime = st_mtime
+            self._trash_cache = {k: dict(v) for k, v in clean.items() if isinstance(v, dict)}
+            return {k: dict(v) for k, v in self._trash_cache.items()}
         except Exception:
             return {}
 
@@ -196,6 +207,9 @@ class ProfileManager:
         try:
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             _replace(tmp, path)
+            with contextlib.suppress(OSError):
+                self._trash_mtime = path.stat().st_mtime
+                self._trash_cache = {k: dict(v) for k, v in data.items() if isinstance(v, dict)}
         except Exception as e:
             logger.exception("Error saving trash profiles: %s", e)
             with contextlib.suppress(OSError):
@@ -463,6 +477,55 @@ class ProfileManager:
                     continue
                 prof = self.profiles.get(name)
                 if prof is None:
+                    if (
+                        validate_profile_name(name)[0]
+                        and p_data.get("name") == name
+                        and self._find_by_casefold(name) is None
+                    ):
+                        pages = self._register_pages(p_data.get("pages"))
+                        status_val = valid_or_none(p_data.get("status"), validate_status)
+                        created_val = parse_flexible_date(p_data.get("created_at"))
+                        if not created_val:
+                            created_val = self._infer_created_at(name)
+                        banned_val = parse_flexible_date(p_data.get("banned_at"))
+                        if not banned_val and (
+                            is_ban_status(status_val) or has_ban_page(pages)
+                        ):
+                            banned_val = self._infer_banned_at(name)
+                        self.profiles[name] = Profile(
+                            name=name,
+                            proxy=p_data.get("proxy") or None,
+                            os_type=p_data.get(
+                                "os_type",
+                                p_data.get("config", {}).get("os", "windows"),
+                            ),
+                            timezone=valid_or_none(p_data.get("timezone"), validate_timezone),
+                            locale=valid_or_none(p_data.get("locale"), validate_locale),
+                            engine=_engine_or_default(p_data.get("engine")),
+                            color=valid_or_none(p_data.get("color"), validate_color),
+                            group=valid_or_none(p_data.get("group"), validate_group),
+                            notes=valid_or_none(p_data.get("notes"), validate_notes),
+                            pages=pages,
+                            status=status_val,
+                            pinned=bool(p_data.get("pinned", False)),
+                            created_at=created_val,
+                            banned_at=banned_val,
+                            email=valid_or_none(p_data.get("email"), validate_email),
+                            password=valid_or_none(p_data.get("password"), validate_password),
+                            two_fa=normalize_totp_secret(
+                                valid_or_none(p_data.get("two_fa"), validate_two_fa)
+                            )
+                            or None,
+                            recovery_email=valid_or_none(
+                                p_data.get("recovery_email"),
+                                validate_email,
+                            ),
+                            mail_token=valid_or_none(
+                                p_data.get("mail_token"),
+                                validate_mail_token,
+                            ),
+                        )
+                        merged += 1
                     continue
                 d_email = valid_or_none(p_data.get("email"), validate_email)
                 d_pass = valid_or_none(p_data.get("password"), validate_password)
@@ -472,7 +535,23 @@ class ProfileManager:
                 )
                 d_rec = valid_or_none(p_data.get("recovery_email"), validate_email)
                 d_tok = valid_or_none(p_data.get("mail_token"), validate_mail_token)
+                d_created = parse_flexible_date(p_data.get("created_at"))
+                d_notes = valid_or_none(p_data.get("notes"), validate_notes)
+                d_color = valid_or_none(p_data.get("color"), validate_color)
+                d_group = valid_or_none(p_data.get("group"), validate_group)
                 changed = False
+                if d_created and prof.created_at != d_created:
+                    prof.created_at = d_created
+                    changed = True
+                if d_notes and prof.notes != d_notes:
+                    prof.notes = d_notes
+                    changed = True
+                if d_color and prof.color != d_color:
+                    prof.color = d_color
+                    changed = True
+                if d_group and prof.group != d_group:
+                    prof.group = d_group
+                    changed = True
                 if d_email and prof.email != d_email:
                     prof.email = d_email
                     changed = True
@@ -490,6 +569,10 @@ class ProfileManager:
                     changed = True
                 if changed:
                     merged += 1
+            disk_order = [k for k in data if k in self.profiles]
+            if len(disk_order) == len(self.profiles) and disk_order != list(self.profiles.keys()):
+                self.profiles = {k: self.profiles[k] for k in disk_order}
+                merged += 1
             self._disk_mtime = disk_mtime
         return merged
 
@@ -500,11 +583,12 @@ class ProfileManager:
             self.sync_credentials_from_disk()
         tmp = path.with_suffix(".json.tmp")
         try:
+            serialized = json.dumps(
+                {name: p.to_dict() for name, p in self.profiles.items()},
+                indent=4,
+            )
             tmp.write_text(
-                json.dumps(
-                    {name: p.to_dict() for name, p in self.profiles.items()},
-                    indent=4,
-                ),
+                serialized,
                 encoding="utf-8",
             )
             _replace(tmp, path)
@@ -525,8 +609,7 @@ class ProfileManager:
                 )
                 _replace(pages_tmp, pages_path)
             logger.debug("Profiles saved")
-            if path.exists():
-                self._write_config_backup(path.read_text(encoding="utf-8"))
+            self._write_config_backup(serialized)
         except Exception as e:
             logger.exception("Error saving profiles: %s", e)
             with contextlib.suppress(OSError):
@@ -879,6 +962,8 @@ class ProfileManager:
 
     def delete_profile(self, name: str) -> bool:
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             if name not in self.profiles:
                 return False
             del self.profiles[name]
@@ -924,6 +1009,8 @@ class ProfileManager:
 
     def trash_profile(self, name: str) -> bool:
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             if name not in self.profiles:
                 return False
             profile = self.profiles.pop(name)
@@ -2114,6 +2201,8 @@ class ProfileManager:
 
     def list_profiles(self) -> list[Profile]:
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             return list(self.profiles.values())
 
     def export_profile(

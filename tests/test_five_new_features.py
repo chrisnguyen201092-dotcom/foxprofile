@@ -4865,3 +4865,37 @@ def test_avatar_capture_validation_and_win32_pipeline(tmp_path) -> None:
         assert p64 is not None and "_64_" in p64 and p64.endswith(".png")
         assert remove_avatar("#6  Ý Lan", avatars_dir=av_dir) is True
         assert get_avatar_path("#6  Ý Lan", 64, avatars_dir=av_dir) is None
+
+
+def test_startup_and_snapshot_optimizations(isolated_pm, tmp_path) -> None:
+    """Verify APIServer deferred cancellation, MonitorService scandir + lru_cache, and trash mtime caching."""
+    from src.api.server import APIServer
+    from src.services.monitor import (
+        _ipv6_prefix_64,
+        extract_proxy_cluster,
+        extract_proxy_endpoint,
+        extract_proxy_port,
+    )
+
+    # 1. APIServer exits cleanly when deferred factory returns None on early shutdown
+    srv = APIServer(lambda: None)
+    srv.start()
+    assert srv._thread is not None
+    srv._thread.join(timeout=2.0)
+    assert not srv.is_running
+
+    # 2. Cached proxy & IPv6 helpers return exact results
+    px = "http://u:p@sp02-usa106.proxysystem.net:10987"
+    assert extract_proxy_port(px) == ":10987"
+    assert extract_proxy_endpoint(px) == "usa106:10987"
+    assert extract_proxy_cluster(px) == "usa106"
+    assert _ipv6_prefix_64("2606:65c0:40:2ce:46b9:d69c:a4d7:be74") == "2606:65c0:0040:02ce"
+
+    # 3. Trash mtime cache invalidates on trash/restore
+    isolated_pm.add_profile("FastTrash", px, "windows")
+    assert isolated_pm.list_trashed_profiles() == []
+    assert isolated_pm.trash_profile("FastTrash") is True
+    assert len(isolated_pm.list_trashed_profiles()) == 1
+    assert isolated_pm.restore_profile("FastTrash") is True
+    assert isolated_pm.list_trashed_profiles() == []
+

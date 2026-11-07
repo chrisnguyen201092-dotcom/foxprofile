@@ -1037,7 +1037,7 @@ class App:
                     return lbl
             else:
                 prof = self.pm.profiles.get(name) if hasattr(self, "pm") else None
-                if prof is not None and getattr(prof, "browser_engine", "camoufox") != "chrome":
+                if prof is not None and getattr(prof, "engine", "camoufox") != "chrome":
                     return ""
         info = fingerprint.summary(os.path.join(DATA_DIR, name))
         if not info:

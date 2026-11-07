@@ -678,7 +678,11 @@ def build_safe_schedule(
     for p in profiles:
         grp = (p.group or "").strip().lower()
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
-        if grp == "disconnected" or "disconnected" in pgs_lower:
+        if (
+            grp in ("disconnected", "theo dõi", "theo doi")
+            or "disconnected" in pgs_lower
+            or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
+        ):
             continue
         if not (p.proxy or "").strip():
             continue
@@ -1720,7 +1724,11 @@ def _build_fixed_work_squad_plan(
     for p in profiles:
         grp = (p.group or "").strip().lower()
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
-        if grp == "disconnected" or "disconnected" in pgs_lower:
+        if (
+            grp in ("disconnected", "theo dõi", "theo doi")
+            or "disconnected" in pgs_lower
+            or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
+        ):
             continue
         if not (p.proxy or "").strip():
             continue
@@ -2048,7 +2056,11 @@ def select_parallel_work_squad(
             continue
         grp = (p.group or "").strip().lower()
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
-        if grp == "disconnected" or "disconnected" in pgs_lower:
+        if (
+            grp in ("disconnected", "theo dõi", "theo doi")
+            or "disconnected" in pgs_lower
+            or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
+        ):
             continue
         if not (p.proxy or "").strip():
             continue

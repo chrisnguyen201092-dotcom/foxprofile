@@ -392,18 +392,15 @@ class AppHandlers:
         if not valid_names:
             return 0
         custom_pages = self._pm.list_custom_pages()
-        live_pg = next(
-            (pg for pg in custom_pages if pg.casefold() == "live"),
-            "Live",
-        )
         disc_pg = next(
             (pg for pg in custom_pages if pg.casefold() == "disconnected"),
             "Disconnected",
         )
         if not any(pg.casefold() == "disconnected" for pg in custom_pages):
             self._pm.save_custom_page(disc_pg, [])
-        if any(pg.casefold() == "live" for pg in custom_pages):
-            self._pm.remove_profiles_from_page(live_pg, valid_names)
+        for pg in custom_pages:
+            if pg.casefold() != "disconnected":
+                self._pm.remove_profiles_from_page(pg, valid_names)
         self._pm.add_profiles_to_page(disc_pg, valid_names)
         self._pm.bulk_update_group(valid_names, disc_pg)
         self._pm.bulk_update_status(valid_names, "check")

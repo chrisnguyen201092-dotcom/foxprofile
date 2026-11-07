@@ -11,10 +11,14 @@ import contextlib
 import hashlib
 import hmac
 import html
+import http.client
+import http.cookiejar
 import imaplib
 import json
 import random
 import re
+import socket
+import ssl
 import struct
 import threading
 import time
@@ -36,7 +40,7 @@ _HTML_STYLE_SCRIPT_RE = re.compile(r"<(style|script|head)[^>]*>.*?</\1>", re.IGN
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _OTP_CONTEXT_AFTER_RE = re.compile(
-    r"(?:code|mã|otp|pin|verification|confirm|security|passcode|xác\s*nhận|xác\s*minh|bảo\s*mật)"
+    r"(?:code|mã|otp|pin|verification|confirm|security|passcode|xác\s*nhận|xác\s*minh|bảo\s*mật|コード)"
     r"[^0-9a-zA-Z]{1,35}\b(\d{4,8})\b",
     re.IGNORECASE,
 )
@@ -440,6 +444,9 @@ _META_CHECKPOINT_PHRASES = (
     "30 ngày để hành động",
     "180 days to take action",
     "180 ngày để hành động",
+    "metaアカウントで対応が必要です",
+    "アカウントを一時停止しました",
+    "人間であることを確認",
 )
 
 _META_ACTIVE_AGAIN_SUBJECTS = (
@@ -753,6 +760,722 @@ def _fetch_via_gmail_imap(
     return True, first_otp, messages
 
 
+_MICROSOFT_MAIL_DOMAINS = (
+    "@hotmail.",
+    "@outlook.",
+    "@live.",
+    "@msn.",
+)
+
+_MAILTEMP_VN_DOMAINS = (
+    ".editzone.io.vn",
+    ".cutflow.io.vn",
+    ".capmanager.io.vn",
+    ".capedit.io.vn",
+    "@mailtemp.vn",
+)
+
+_LUUVAN_DOMAINS = (
+    "@lhuniverse.io.vn",
+    "@animee.tokyo",
+    ".animee.tokyo",
+    "@n0ai.cloud",
+    "@vibecoder.io.vn",
+    "@luuvan.site",
+)
+
+_TEMPMAIL_PLUS_DOMAINS = (
+    "@merepost.com",
+    "@mailto.plus",
+    "@fexpost.com",
+    "@fexbox.org",
+    "@mailbox.in.ua",
+    "@rover.info",
+    "@chitthi.in",
+    "@fextemp.com",
+    "@any.pink",
+    "@thankyou2010.com",
+)
+
+_TUAN89_DOMAINS = (
+    "@tuan89.site",
+    "@shoptoolgiare.com",
+)
+
+_GEN_EMAIL_ROW_RE = re.compile(
+    r"loadInboxClientSide\('([^']+)'\)[^>]*>\s*"
+    r"<div[^>]*>([^<]*)</div>\s*"
+    r"<div[^>]*>([^<]*)</div>\s*"
+    r"<div[^>]*>([^<]*)</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_mailtemp_address(email_addr: str | None) -> bool:
+    """Return True if `email_addr` is a non-Microsoft, non-Gmail custom domain mailbox (e.g. `mailtemp.vn` or `generator.email`)."""
+    em = (email_addr or "").strip().lower()
+    if not em or "@" not in em or is_gmail_address(em):
+        return False
+    return not any(d in em for d in _MICROSOFT_MAIL_DOMAINS)
+
+
+def is_generator_email_address(
+    email_addr: str | None,
+    mail_token: str | None = None,
+) -> bool:
+    """Return True if `email_addr` should be read via `generator.email` rather than `mailtemp.vn`."""
+    em = (email_addr or "").strip().lower()
+    if not is_mailtemp_address(em):
+        return False
+    tok_low = (mail_token or "").strip().lower()
+    if "generator.email" in tok_low:
+        return True
+    if (
+        "mailtemp.vn" in tok_low
+        or "tuan89.site" in tok_low
+        or "tinyhost.shop" in tok_low
+        or any(em.endswith(d) for d in _MAILTEMP_VN_DOMAINS)
+        or any(em.endswith(d) for d in _TUAN89_DOMAINS)
+    ):
+        return False
+    return not tok_low or tok_low == "webmail"
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        addrs = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_STREAM)
+        if not addrs:
+            raise OSError(f"Cannot resolve IPv4 for {self.host}")
+        af, socktype, proto, _, sa = addrs[0]
+        sock = socket.socket(af, socktype, proto)
+        if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+            sock.settimeout(self.timeout)
+        sock.connect(sa)
+        server_hostname = self._tunnel_host if self._tunnel_host else self.host
+        self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+def _http_get_ipv4(
+    host: str,
+    path: str,
+    headers: dict[str, str],
+    timeout: int = 12,
+) -> str:
+    """Perform a thread-safe HTTPS GET over IPv4 (`socket.AF_INET`) without modifying global `socket.getaddrinfo`."""
+    opener = urllib.request.build_opener(_IPv4HTTPSHandler(context=ssl.create_default_context()))
+    req = urllib.request.Request(f"https://{host}{path}", headers=headers)
+    with opener.open(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _fetch_via_generator_email(
+    email_addr: str,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `generator.email` over IPv4 using `inbox_ctx` cookie."""
+    clean_em = (email_addr or "").strip().lower()
+    if "@" not in clean_em:
+        return False, "Địa chỉ email không hợp lệ", []
+    user, dom = clean_em.split("@", 1)
+    ctx_base = f"{dom}/{user}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Cookie": f"inbox_ctx={ctx_base}; surl={ctx_base}",
+    }
+    try:
+        page_html = _http_get_ipv4(
+            "generator.email",
+            f"/{ctx_base}",
+            headers=headers,
+            timeout=timeout,
+        )
+    except Exception as e:
+        return False, f"Lỗi kết nối generator.email: {str(e)[:140]}", []
+
+    idx = page_html.find('id="email-table"')
+    table_chunk = page_html[idx : idx + 18000] if idx != -1 else page_html
+
+    messages: list[dict[str, str]] = []
+    rows = _GEN_EMAIL_ROW_RE.findall(table_chunk)
+    for row_idx, (msg_ctx, raw_from, raw_subj, raw_time) in enumerate(rows[:top]):
+        sender_str = html.unescape(raw_from).strip()
+        subj_str = html.unescape(raw_subj).strip() or "(Không có tiêu đề)"
+        time_str = html.unescape(raw_time).strip()[:16]
+        preview_str = ""
+        otp = extract_otp_from_text(subj_str, "")
+
+        subj_low = subj_str.lower()
+        needs_body_otp = (
+            top >= 5
+            and row_idx < 2
+            and not otp
+            and not any(h in subj_low for h in _NO_OTP_SUBJECT_HINTS)
+            and "did you just add" not in subj_low
+            and "did you just remove" not in subj_low
+            and any(
+                k in subj_low
+                for k in ("confirm", "code", "mã", "verify", "login", "security", "xác nhận")
+            )
+        )
+        if needs_body_otp and msg_ctx:
+            clean_ctx = msg_ctx.lstrip("/")
+            with contextlib.suppress(Exception):
+                msg_html = _http_get_ipv4(
+                    "generator.email",
+                    f"/{clean_ctx}",
+                    headers={
+                        "User-Agent": headers["User-Agent"],
+                        "Accept": headers["Accept"],
+                        "Cookie": f"inbox_ctx={clean_ctx}; surl={clean_ctx}",
+                    },
+                    timeout=min(8, timeout),
+                )
+                m_idx = msg_html.find('id="email-table"')
+                m_chunk = msg_html[m_idx : m_idx + 8000] if m_idx != -1 else msg_html
+                del_idx = m_chunk.find("Message source")
+                body_part = m_chunk[del_idx + 14 :] if del_idx != -1 else m_chunk
+                preview_str = _strip_html_to_text(body_part)[:220]
+                otp = extract_otp_from_text(subj_str, preview_str)
+
+        messages.append(
+            {
+                "subject": subj_str,
+                "sender": sender_str,
+                "time": time_str,
+                "preview": preview_str,
+                "otp": otp,
+            }
+        )
+
+    if not messages and idx != -1:
+        # Single-message view when inbox has exactly 1 message rendered directly
+        plain_table = _strip_html_to_text(table_chunk)
+        m_from = re.search(r"From:\s*([^\s]+@[^\s]+)", plain_table, re.IGNORECASE)
+        m_subj = re.search(
+            r"Subject:\s*(.+?)\s+(?:Received:|Created:|Delete Message)",
+            plain_table,
+            re.IGNORECASE,
+        )
+        m_time = re.search(r"Received:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", plain_table)
+        if m_from or m_subj:
+            subj_s = (m_subj.group(1).strip() if m_subj else "(Không có tiêu đề)")
+            sender_s = (m_from.group(1).strip() if m_from else "")
+            time_s = (m_time.group(1).strip() if m_time else "")
+            del_idx = plain_table.find("Message source")
+            prev_s = (
+                plain_table[del_idx + 14 :].strip()[:220]
+                if del_idx != -1
+                else plain_table[:220]
+            )
+            otp_s = extract_otp_from_text(subj_s, prev_s)
+            messages.append(
+                {
+                    "subject": subj_s,
+                    "sender": sender_s,
+                    "time": time_s,
+                    "preview": prev_s,
+                    "otp": otp_s,
+                }
+            )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+def _fetch_via_mailtemp_api(
+    email_addr: str,
+    mail_token: str | None,
+    *,
+    password: str | None = None,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `mailtemp.vn` (`/api/site/unlock` + `/api/site/inbox`)."""
+    clean_em = (email_addr or "").strip().lower()
+    raw_tok = (mail_token or "").strip()
+    raw_pw = (password or "").strip()
+
+    token_part = ""
+    pw_part = raw_pw
+    if "|" in raw_tok:
+        p1, p2 = raw_tok.split("|", 1)
+        token_part = p1.strip()
+        if not pw_part:
+            pw_part = p2.strip()
+    elif len(raw_tok) >= 20:
+        token_part = raw_tok
+    elif raw_tok and not pw_part:
+        pw_part = raw_tok
+
+    def _call_inbox(mbox_token: str) -> dict[str, Any]:
+        inbox_url = f"https://mailtemp.vn/api/site/inbox?address={urllib.parse.quote(clean_em)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        if mbox_token:
+            headers["x-mailbox-token"] = mbox_token
+        req = urllib.request.Request(inbox_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    inbox_data: dict[str, Any] | None = None
+    try:
+        if token_part:
+            try:
+                inbox_data = _call_inbox(token_part)
+            except urllib.error.HTTPError as he:
+                if he.code not in (401, 403) or not pw_part:
+                    raise
+        if inbox_data is None:
+            if pw_part:
+                unlock_req = urllib.request.Request(
+                    "https://mailtemp.vn/api/site/unlock",
+                    data=json.dumps({"address": clean_em, "password": pw_part}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(unlock_req, timeout=timeout) as u_resp:
+                    u_json = json.loads(u_resp.read().decode("utf-8", errors="replace"))
+                    token_part = str(
+                        u_json.get("token")
+                        or (u_json.get("data") or {}).get("token")
+                        or ""
+                    ).strip()
+            inbox_data = _call_inbox(token_part)
+    except urllib.error.HTTPError as e:
+        return False, f"Lỗi xác thực hộp thư mailtemp.vn (HTTP {e.code})", []
+    except Exception as e:
+        return False, f"Lỗi kết nối mailtemp.vn: {str(e)[:140]}", []
+
+    raw_msgs = (inbox_data or {}).get("messages") or []
+    messages: list[dict[str, str]] = []
+    for item in raw_msgs[:top]:
+        if not isinstance(item, dict):
+            continue
+        subj = str(item.get("subject") or "(Không có tiêu đề)").strip()
+        from_addr = str(item.get("from") or "").strip()
+        from_name = str(item.get("fromName") or "").strip()
+        sender_str = f"{from_name} <{from_addr}>".strip() if from_name else from_addr
+        raw_dt = str(item.get("receivedAt") or "").strip()
+        date_str = raw_dt[:16].replace("T", " ") if len(raw_dt) >= 16 else raw_dt
+        preview_str = str(item.get("preview") or "").strip()
+        otp = str(item.get("code") or "").strip() or extract_otp_from_text(subj, preview_str)
+        messages.append(
+            {
+                "subject": subj,
+                "sender": sender_str,
+                "time": date_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+def _fetch_via_luuvan_api(
+    email_addr: str,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `luuvan.site` (`/api/public/inbox` + `/api/public/messages/<id>`)."""
+    clean_em = (email_addr or "").strip().lower()
+    if "@" not in clean_em:
+        return False, "Địa chỉ email không hợp lệ", []
+    inbox_url = f"https://luuvan.site/api/public/inbox?address={urllib.parse.quote(clean_em)}"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(inbox_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return False, f"Lỗi kết nối luuvan.site: {str(e)[:140]}", []
+
+    raw_msgs = (data or {}).get("messages") or []
+    messages: list[dict[str, str]] = []
+    for row_idx, item in enumerate(raw_msgs[:top]):
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        subj = str(item.get("subject") or "(Không có tiêu đề)").strip()
+        sender_str = str(item.get("from") or "").strip()
+        raw_dt = str(item.get("receivedAt") or "").strip()
+        date_str = raw_dt[:16].replace("T", " ") if len(raw_dt) >= 16 else raw_dt
+        preview_str = str(item.get("preview") or "").strip()
+        otp = extract_otp_from_text(subj, preview_str)
+
+        subj_low = subj.lower()
+        needs_body_otp = (
+            top >= 5
+            and row_idx < 2
+            and not otp
+            and not any(h in subj_low for h in _NO_OTP_SUBJECT_HINTS)
+            and "did you just add" not in subj_low
+            and "did you just remove" not in subj_low
+            and "電話番号を追加" not in subj
+            and "電話番号を削除" not in subj
+            and any(
+                k in subj_low
+                for k in (
+                    "confirm",
+                    "code",
+                    "mã",
+                    "verify",
+                    "login",
+                    "security",
+                    "xác nhận",
+                    "認証",
+                    "コード",
+                )
+            )
+        )
+        if needs_body_otp and mid:
+            with contextlib.suppress(Exception):
+                msg_url = (
+                    f"https://luuvan.site/api/public/messages/{urllib.parse.quote(mid)}"
+                    f"?address={urllib.parse.quote(clean_em)}"
+                )
+                m_req = urllib.request.Request(msg_url, headers=headers)
+                with urllib.request.urlopen(m_req, timeout=min(8, timeout)) as m_resp:
+                    m_data = json.loads(m_resp.read().decode("utf-8", errors="replace"))
+                    m_obj = (m_data or {}).get("message") or {}
+                    raw_body = str(m_obj.get("text") or m_obj.get("html") or "")
+                    preview_str = _strip_html_to_text(raw_body)[:220]
+                    otp = extract_otp_from_text(subj, preview_str)
+
+        messages.append(
+            {
+                "subject": subj,
+                "sender": sender_str,
+                "time": date_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+def _fetch_via_tempmail_plus_api(
+    email_addr: str,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `tempmail.plus` (`/api/mails`)."""
+    clean_em = (email_addr or "").strip().lower()
+    if "@" not in clean_em:
+        return False, "Địa chỉ email không hợp lệ", []
+    list_url = (
+        f"https://tempmail.plus/api/mails?email={urllib.parse.quote(clean_em)}"
+        f"&limit={max(4, int(top))}&epin="
+    )
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(list_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return False, f"Lỗi kết nối tempmail.plus: {str(e)[:140]}", []
+
+    raw_msgs = (data or {}).get("mail_list") or []
+    messages: list[dict[str, str]] = []
+    for row_idx, item in enumerate(raw_msgs[:top]):
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("mail_id") or "").strip()
+        subj = str(item.get("subject") or "(Không có tiêu đề)").strip()
+        from_addr = str(item.get("from_mail") or "").strip()
+        from_name = str(item.get("from_name") or "").strip()
+        sender_str = f"{from_name} <{from_addr}>".strip() if from_name else from_addr
+        date_str = str(item.get("time") or "").strip()[:16]
+        preview_str = ""
+        otp = extract_otp_from_text(subj, "")
+
+        if top >= 5 and row_idx < 2 and not otp and mid:
+            with contextlib.suppress(Exception):
+                msg_url = (
+                    f"https://tempmail.plus/api/mails/{urllib.parse.quote(mid)}"
+                    f"?email={urllib.parse.quote(clean_em)}&epin="
+                )
+                m_req = urllib.request.Request(msg_url, headers=headers)
+                with urllib.request.urlopen(m_req, timeout=min(8, timeout)) as m_resp:
+                    m_data = json.loads(m_resp.read().decode("utf-8", errors="replace"))
+                    raw_body = str((m_data or {}).get("text") or (m_data or {}).get("html") or "")
+                    preview_str = _strip_html_to_text(raw_body)[:220]
+                    otp = extract_otp_from_text(subj, preview_str)
+
+        messages.append(
+            {
+                "subject": subj,
+                "sender": sender_str,
+                "time": date_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+_TEMPMAIL_ID_VN_ROW_RE = re.compile(
+    r'<tr[^>]*class="[^"]*fi-ta-row[^"]*"[^>]*>(.*?)</tr>',
+    re.IGNORECASE | re.DOTALL,
+)
+_TEMPMAIL_ID_VN_SUBJ_RE = re.compile(
+    r"fi-ta-cell-subject.*?<div[^>]*fi-ta-text[^>]*>(.*?)</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TEMPMAIL_ID_VN_FROM_RE = re.compile(
+    r"fi-ta-cell-sender-name.*?<p[^>]*fi-ta-text-item[^>]*>(.*?)</p>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TEMPMAIL_ID_VN_TIME_RE = re.compile(
+    r"fi-ta-cell-created-at.*?<div[^>]*fi-ta-text[^>]*>(.*?)</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TEMPMAIL_ID_VN_HREF_RE = re.compile(
+    r'href="(https://tempmail\.id\.vn/guest/message/[^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _fetch_via_tempmail_id_vn(
+    email_addr: str,
+    mail_token: str | None,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `tempmail.id.vn` guest inbox URL."""
+    raw_tok = (mail_token or "").strip()
+    m_url = re.search(
+        r"https?://tempmail\.id\.vn/guest/inbox/[0-9a-fA-F\-]+",
+        raw_tok,
+        re.IGNORECASE,
+    )
+    if m_url:
+        inbox_url = m_url.group(0)
+    elif _UUID_RE.match(raw_tok):
+        inbox_url = f"https://tempmail.id.vn/guest/inbox/{raw_tok}"
+    else:
+        return False, "Thiếu link hộp thư tempmail.id.vn hợp lệ", []
+
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        req = urllib.request.Request(inbox_url, headers=headers)
+        with opener.open(req, timeout=timeout) as resp:
+            page_html = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return False, f"Lỗi kết nối tempmail.id.vn: {str(e)[:140]}", []
+
+    rows = _TEMPMAIL_ID_VN_ROW_RE.findall(page_html)
+    messages: list[dict[str, str]] = []
+    for row_idx, rw in enumerate(rows[:top]):
+        s_m = _TEMPMAIL_ID_VN_SUBJ_RE.search(rw)
+        f_m = _TEMPMAIL_ID_VN_FROM_RE.search(rw)
+        t_m = _TEMPMAIL_ID_VN_TIME_RE.search(rw)
+        h_m = _TEMPMAIL_ID_VN_HREF_RE.search(rw)
+
+        subj_str = (
+            html.unescape(_HTML_TAG_RE.sub("", s_m.group(1))).strip()
+            if s_m
+            else "(Không có tiêu đề)"
+        )
+        sender_str = (
+            html.unescape(_HTML_TAG_RE.sub("", f_m.group(1))).strip()
+            if f_m
+            else "Meta"
+        )
+        time_str = (
+            html.unescape(_HTML_TAG_RE.sub("", t_m.group(1))).strip()[:16]
+            if t_m
+            else ""
+        )
+        preview_str = ""
+        otp = extract_otp_from_text(subj_str, "")
+
+        subj_low = subj_str.lower()
+        needs_body_otp = (
+            top >= 5
+            and row_idx < 2
+            and not otp
+            and h_m is not None
+            and not any(h in subj_low for h in _NO_OTP_SUBJECT_HINTS)
+            and "did you just add" not in subj_low
+            and "did you just remove" not in subj_low
+            and "電話番号を追加" not in subj_str
+            and "電話番号を削除" not in subj_str
+            and any(
+                k in subj_low
+                for k in (
+                    "confirm",
+                    "code",
+                    "mã",
+                    "verify",
+                    "login",
+                    "security",
+                    "xác nhận",
+                    "認証",
+                    "コード",
+                )
+            )
+        )
+        if needs_body_otp and h_m is not None:
+            with contextlib.suppress(Exception):
+                m_req = urllib.request.Request(
+                    h_m.group(1),
+                    headers={**headers, "Referer": inbox_url},
+                )
+                with opener.open(m_req, timeout=min(8, timeout)) as m_resp:
+                    m_html = m_resp.read().decode("utf-8", errors="replace")
+                    srcdoc_m = re.search(r'srcdoc="([^"]+)"', m_html, re.IGNORECASE)
+                    raw_body = html.unescape(srcdoc_m.group(1)) if srcdoc_m else m_html
+                    preview_str = _strip_html_to_text(raw_body)[:220]
+                    otp = extract_otp_from_text(subj_str, preview_str)
+
+        messages.append(
+            {
+                "subject": subj_str,
+                "sender": sender_str,
+                "time": time_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+def _fetch_via_tuan89_api(
+    email_addr: str,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `tuan89.site` (`/api/temp-mail/inbox` + `/api/temp-mail/message`)."""
+    clean_em = (email_addr or "").strip().lower()
+    if "@" not in clean_em:
+        return False, "Địa chỉ email không hợp lệ", []
+    inbox_url = (
+        f"https://tuan89.site/api/temp-mail/inbox?email={urllib.parse.quote(clean_em)}"
+    )
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(inbox_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return False, f"Lỗi kết nối tuan89.site: {str(e)[:140]}", []
+
+    if not isinstance(data, dict) or not data.get("success", True):
+        err_m = str((data or {}).get("message") or "Hộp thư không tồn tại trên tuan89.site")
+        return False, err_m, []
+
+    raw_msgs = (data or {}).get("messages") or []
+    messages: list[dict[str, str]] = []
+    for row_idx, item in enumerate(raw_msgs[:top]):
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        subj = str(item.get("subject") or "(Không có tiêu đề)").strip()
+        from_name = str(item.get("sender_name") or "").strip()
+        from_addr = str(item.get("from_email") or "").strip()
+        sender_str = f"{from_name} <{from_addr}>".strip() if from_name and from_addr else (from_name or from_addr)
+        date_str = str(item.get("received_at") or "").strip()[:16]
+        preview_str = str(item.get("snippet") or "").strip()
+        otp = str(item.get("otp_code") or "").strip() or extract_otp_from_text(subj, preview_str)
+
+        if top >= 5 and row_idx < 2 and not otp and mid:
+            with contextlib.suppress(Exception):
+                msg_url = (
+                    f"https://tuan89.site/api/temp-mail/message?id={urllib.parse.quote(mid)}"
+                    f"&email={urllib.parse.quote(clean_em)}"
+                )
+                m_req = urllib.request.Request(msg_url, headers=headers)
+                with urllib.request.urlopen(m_req, timeout=min(8, timeout)) as m_resp:
+                    m_data = json.loads(m_resp.read().decode("utf-8", errors="replace"))
+                    m_obj = (m_data or {}).get("message") or {}
+                    raw_body = str(m_obj.get("body_text") or m_obj.get("body_html") or "")
+                    preview_str = _strip_html_to_text(raw_body)[:220]
+                    otp = str(m_obj.get("otp_code") or "").strip() or extract_otp_from_text(subj, preview_str)
+
+        messages.append(
+            {
+                "subject": subj,
+                "sender": sender_str,
+                "time": date_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
+def _fetch_via_tinyhost_api(
+    email_addr: str,
+    *,
+    top: int = 8,
+    timeout: int = 12,
+) -> tuple[bool, str, list[dict[str, str]]]:
+    """Read latest messages from `tinyhost.shop` (`/api/email/<domain>/<user>/`)."""
+    clean_em = (email_addr or "").strip().lower()
+    if "@" not in clean_em:
+        return False, "Địa chỉ email không hợp lệ", []
+    user, dom = clean_em.split("@", 1)
+    inbox_url = (
+        f"https://tinyhost.shop/api/email/{urllib.parse.quote(dom)}/{urllib.parse.quote(user)}/"
+        f"?page=1&limit={max(4, int(top))}&include_total=false"
+    )
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(inbox_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        return False, f"Lỗi kết nối tinyhost.shop: {str(e)[:140]}", []
+
+    raw_msgs = (data or {}).get("emails") or []
+    messages: list[dict[str, str]] = []
+    for item in raw_msgs[:top]:
+        if not isinstance(item, dict):
+            continue
+        subj = str(item.get("subject") or "(Không có tiêu đề)").strip()
+        sender_str = str(item.get("sender") or "").strip()
+        raw_dt = str(item.get("date") or "").strip()
+        date_str = raw_dt[:16].replace("T", " ") if len(raw_dt) >= 16 else raw_dt
+        raw_body = str(item.get("body") or item.get("html_body") or "")
+        preview_str = _strip_html_to_text(raw_body)[:220]
+        otp = extract_otp_from_text(subj, preview_str)
+        messages.append(
+            {
+                "subject": subj,
+                "sender": sender_str,
+                "time": date_str,
+                "preview": preview_str[:220],
+                "otp": otp,
+            }
+        )
+
+    first_otp = next((m["otp"] for m in messages if m.get("otp")), "")
+    return True, first_otp, messages
+
+
 def fetch_hotmail_messages(
     email_addr: str | None,
     mail_token: str | None,
@@ -761,13 +1484,44 @@ def fetch_hotmail_messages(
     *,
     password: str | None = None,
 ) -> tuple[bool, str, list[dict[str, str]]]:
-    """Read latest emails and extract OTP codes via Microsoft OAuth2 (Hotmail) or Google App Password (Gmail)."""
+    """Read latest emails and extract OTP codes via Microsoft OAuth2 (Hotmail), Google App Password (Gmail), or mailtemp.vn."""
     clean_em = (email_addr or "").strip()
     if is_gmail_address(clean_em):
         app_pw = (mail_token or "").strip() or (password or "").strip()
         if "|" in app_pw:
             app_pw = app_pw.split("|", 1)[0].strip()
         return _fetch_via_gmail_imap(clean_em, app_pw, top=top, timeout=timeout)
+
+    if is_mailtemp_address(clean_em):
+        em_low = clean_em.lower()
+        tok_low = (mail_token or "").strip().lower()
+        if "tempmail.id.vn" in tok_low:
+            return _fetch_via_tempmail_id_vn(
+                clean_em,
+                mail_token,
+                top=top,
+                timeout=timeout,
+            )
+        if "tinyhost.shop" in tok_low:
+            return _fetch_via_tinyhost_api(clean_em, top=top, timeout=timeout)
+        if "tuan89.site" in tok_low or any(em_low.endswith(d) for d in _TUAN89_DOMAINS):
+            return _fetch_via_tuan89_api(clean_em, top=top, timeout=timeout)
+        if "luuvan.site" in tok_low or any(em_low.endswith(d) for d in _LUUVAN_DOMAINS):
+            return _fetch_via_luuvan_api(clean_em, top=top, timeout=timeout)
+        if "tempmail.plus" in tok_low or any(em_low.endswith(d) for d in _TEMPMAIL_PLUS_DOMAINS):
+            return _fetch_via_tempmail_plus_api(clean_em, top=top, timeout=timeout)
+        if is_generator_email_address(clean_em, mail_token):
+            return _fetch_via_generator_email(clean_em, top=top, timeout=timeout)
+        ok_mt, otp_mt, msgs_mt = _fetch_via_mailtemp_api(
+            clean_em,
+            mail_token,
+            password=password,
+            top=top,
+            timeout=timeout,
+        )
+        if not ok_mt and not any(em_low.endswith(d) for d in _MAILTEMP_VN_DOMAINS):
+            return _fetch_via_generator_email(clean_em, top=top, timeout=timeout)
+        return ok_mt, otp_mt, msgs_mt
 
     rt, cid = split_mail_token(mail_token)
     if not rt:

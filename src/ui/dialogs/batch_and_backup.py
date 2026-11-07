@@ -12,6 +12,7 @@ import flet as ft
 from ...core.strings import get_string
 from ...models.profile import (
     Profile,
+    compute_days_since,
     has_ban_page,
     is_ban_page,
     is_ban_status,
@@ -39,6 +40,7 @@ from ...utils.totp import (
     detect_meta_checkpoint_mail,
     fetch_hotmail_messages,
     is_gmail_address,
+    is_mailtemp_address,
     normalize_gmail_app_password,
     parse_mail_credentials_line,
     run_safe_mail_checkpoint_scan,
@@ -1590,6 +1592,11 @@ def open_mail_pool_dialog(
                 mapping[em_k] = tk_v
         return mapping
 
+    def _is_watch_page_profile(p: Profile) -> bool:
+        return any(
+            pg.casefold() in ("theo dõi", "theo doi") for pg in (p.pages or [])
+        ) or (p.group or "").strip().casefold() in ("theo dõi", "theo doi")
+
     def _is_active_live_profile(p: Profile, has_live_page: bool) -> bool:
         if (
             p.banned_at
@@ -1598,6 +1605,8 @@ def open_mail_pool_dialog(
             or is_ban_page(p.group)
         ):
             return False
+        if _is_watch_page_profile(p):
+            return True
         return not has_live_page or any(pg.casefold() == "live" for pg in (p.pages or []))
 
     def _check_mail_credentials(
@@ -1767,6 +1776,8 @@ def open_mail_pool_dialog(
         tok = (getattr(p, "mail_token", None) or "").strip() or tok_map.get(em.lower(), "")
         if not tok and is_gmail_address(em):
             tok = normalize_gmail_app_password(getattr(p, "password", None))
+        if not tok and is_mailtemp_address(em):
+            tok = (getattr(p, "password", None) or "").strip() or "webmail"
         return tok
 
     def _scan_live_only(_: ft.ControlEvent) -> None:
@@ -2300,8 +2311,31 @@ def open_mail_pool_dialog(
                 cp_sub = active_cp_hits[prof.name].get("subject", "")[:42]
                 prof_st_pair = ("error", f"🚨 DÍNH CHECKPOINT META: {cp_sub}")
             prof_st_controls: list[ft.Control] = []
+            if _is_watch_page_profile(prof):
+                age_d = compute_days_since(getattr(prof, "created_at", None)) or 0
+                ready_3w = age_d >= 21
+                w_lbl = f"Đủ 21d ({age_d}d) ✓" if ready_3w else f"Theo dõi · {age_d}/21d"
+                w_col = COLORS["success"] if ready_3w else COLORS["warning"]
+                prof_st_controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                        border_radius=4,
+                        bgcolor=ft.Colors.with_opacity(0.14, w_col),
+                        border=ft.Border.all(1, w_col),
+                        content=ft.Text(
+                            w_lbl,
+                            size=10,
+                            font_family=FONT_SEMIBOLD,
+                            color=w_col,
+                        ),
+                    )
+                )
             if has_verified_tok:
-                tok_badge_lbl = "AppPass ✓" if is_gmail_address(em_val) else "OAuth2 ✓"
+                tok_badge_lbl = (
+                    "AppPass ✓"
+                    if is_gmail_address(em_val)
+                    else ("WebMail ✓" if is_mailtemp_address(em_val) else "OAuth2 ✓")
+                )
                 prof_st_controls.append(
                     ft.Text(tok_badge_lbl, size=11, font_family=FONT_DATA, color=COLORS["text_sub"])
                 )
