@@ -4,7 +4,7 @@ import pathlib
 import zipfile
 from datetime import datetime
 
-from ...core.config import FINGERPRINT_FILE
+from ...core.config import CHROME_PERSONA_FILE, FINGERPRINT_FILE
 from ...core.logging import get_logger
 from ...models.profile import ENGINES, Profile, parse_flexible_date
 from ...utils.totp import normalize_totp_secret
@@ -22,7 +22,6 @@ from ...utils.validation import (
     validate_timezone,
     validate_two_fa,
 )
-from ..browser.fingerprint import CHROME_PERSONA_FILE
 
 logger = get_logger("profile.transfer")
 

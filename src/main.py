@@ -30,7 +30,7 @@ def main() -> None:
         # Wait for the initial Flet UI frame to finish rendering (up to 15s fallback)
         # so FastAPI/MCP imports don't compete for GIL and USB HDD I/O during window startup.
         ui_ready.wait(timeout=15.0)
-        if shutting_down.wait(timeout=0.15):
+        if shutting_down.wait(timeout=0.8):
             return None
         return _build_api_app(container)
 

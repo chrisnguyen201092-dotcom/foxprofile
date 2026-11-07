@@ -27,6 +27,7 @@ API_PORT = int(_env("API_PORT", "8000"))
 LAUNCH_WAIT_TIMEOUT = int(_env("LAUNCH_TIMEOUT", "90"))
 
 FINGERPRINT_FILE = "fingerprint.json"
+CHROME_PERSONA_FILE = "chrome_persona.json"
 
 
 def _headless(value: str) -> bool | str:

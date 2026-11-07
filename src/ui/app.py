@@ -22,7 +22,6 @@ from ..models.profile import (
     parse_schedule_tag,
     schedule_sort_key,
 )
-from ..services.browser import fingerprint
 from ..services.browser.window_title import focus_foxprofile_window
 from ..services.monitor import (
     MonitorService,
@@ -211,6 +210,23 @@ class App:
 
     def run(self) -> None:
         setup_windows_taskbar_icon()
+        snap_ready = threading.Event()
+
+        def _prewarm_snap() -> None:
+            try:
+                if self._last_monitor_snap is None and hasattr(self.monitor, "snapshot"):
+                    self._last_monitor_snap = self.monitor.snapshot(
+                        self.pm.list_profiles(),
+                        self.bl.running_profile_names() | self.state.loading,
+                        fast_init=True,
+                    )
+            except Exception:
+                pass
+            finally:
+                snap_ready.set()
+
+        self._snap_prewarm_event = snap_ready
+        threading.Thread(target=_prewarm_snap, daemon=True).start()
         try:
             ft.run(self._main, assets_dir=ASSETS_DIR)
         finally:
@@ -225,6 +241,9 @@ class App:
         self.clipboard = ft.Clipboard()
         page.services.append(self.clipboard)
         self._file_picker = fp
+        prewarm_ev = getattr(self, "_snap_prewarm_event", None)
+        if prewarm_ev is not None:
+            prewarm_ev.wait(timeout=3.0)
         self._build_ui()
         self.state._last_running_snapshot = self.bl.running_profile_names()
         if self._on_ui_ready is not None:
@@ -343,7 +362,7 @@ class App:
             border=ft.Border.all(1, ft.Colors.with_opacity(0.25, COLORS["cover_muted"])),
             alignment=ft.Alignment(0, 0),
             ink=True,
-            tooltip=get_string("trash_button", count=len(self.pm.list_trashed_profiles())),
+            tooltip=get_string("trash_button", count=0),
             on_click=lambda _: self.h.on_open_trash(),
             content=ft.Icon(
                 ft.Icons.DELETE_OUTLINE,
@@ -360,11 +379,15 @@ class App:
             tooltip=get_string("tooltip_arrange_windows"),
             on_click=lambda _: self.h.on_arrange_windows(),
         )
+        self._restore_log()
+        self._refresh_profiles(
+            reuse_snapshot=self._last_monitor_snap is not None,
+            update_page=False,
+            fast_init=True,
+        )
         self.page.title = get_string("window_title")
         self.page.controls.clear()
         self.page.add(self._build_root_layout(self.refs))
-        self._restore_log()
-        self._refresh_profiles()
 
     def _restore_log(self) -> None:
         """Refill a freshly built log pane (flush_log only returns new lines)."""
@@ -455,7 +478,7 @@ class App:
         if self.filter == "archived":
             self.filter = "all"
         self.state.current_page = 1
-        self._refresh_profiles()
+        self._refresh_profiles(reuse_snapshot=True)
 
     def _on_add_custom_page(self) -> None:
         if self.page is None:
@@ -551,20 +574,22 @@ class App:
             self.active_page = "__all__"
         self.filter = fid
         self.state.current_page = 1
-        self._refresh_profiles()
+        self._refresh_profiles(reuse_snapshot=True)
 
-    def _filter_tests(self) -> dict:
+    def _filter_tests(self, running: set[str] | None = None) -> dict:
         snap = self._last_monitor_snap
         cd_target = self.monitor.cooldown_minutes
+        run_set = running if running is not None else self.bl.running_profile_names()
+        loading_set = self.state.loading
         return {
             "all": lambda p: True,
             "archived": is_archived_profile,
             "pinned": lambda p: bool(getattr(p, "pinned", False)),
-            "running": lambda p: self.bl.is_running(p.name),
+            "running": lambda p: p.name in run_set,
             "ready_launch": lambda p: bool(
                 p.proxy
-                and not self.bl.is_running(p.name)
-                and not self.state.is_loading(p.name)
+                and p.name not in run_set
+                and p.name not in loading_set
                 and not (
                     snap
                     and p.name in snap.profiles
@@ -574,7 +599,7 @@ class App:
             "cooldown": lambda p: bool(
                 snap
                 and p.name in snap.profiles
-                and not self.bl.is_running(p.name)
+                and p.name not in run_set
                 and (
                     snap.profiles[p.name].busy_by
                     or snap.profiles[p.name].port_cooldown_by is not None
@@ -746,7 +771,13 @@ class App:
         start = (self.state.current_page - 1) * per_page
         return all_profiles, all_profiles[start : start + per_page], total
 
-    def _refresh_profiles(self, *, reuse_snapshot: bool = False) -> None:
+    def _refresh_profiles(
+        self,
+        *,
+        reuse_snapshot: bool = False,
+        update_page: bool = True,
+        fast_init: bool = False,
+    ) -> None:
         r = self.refs
         assert r is not None
         self._update_stats()
@@ -809,7 +840,17 @@ class App:
         if reuse_snapshot and self._last_monitor_snap is not None:
             snap = self._last_monitor_snap
         else:
-            snap = self.monitor.snapshot(everything, running | self.state.loading)
+            if fast_init:
+                try:
+                    snap = self.monitor.snapshot(
+                        everything,
+                        running | self.state.loading,
+                        fast_init=True,
+                    )
+                except TypeError:
+                    snap = self.monitor.snapshot(everything, running | self.state.loading)
+            else:
+                snap = self.monitor.snapshot(everything, running | self.state.loading)
             self._last_monitor_snap = snap
         ordered_running = self._ordered_running_names()
         if ordered_running:
@@ -861,17 +902,12 @@ class App:
         archived_everything = [p for p in everything if is_archived_profile(p)]
 
         custom_pages = self.pm.list_custom_pages()
-        page_counts = [
-            (
-                pg,
-                sum(
-                    1
-                    for p in everything
-                    if any(item.casefold() == pg.casefold() for item in p.pages)
-                ),
-            )
-            for pg in custom_pages
-        ]
+        pg_tally: dict[str, int] = {}
+        for p in everything:
+            for item in p.pages:
+                k = item.casefold()
+                pg_tally[k] = pg_tally.get(k, 0) + 1
+        page_counts = [(pg, pg_tally.get(pg.casefold(), 0)) for pg in custom_pages]
         effective_active_page = "__archived__" if in_archive else self.active_page
         self._pages_bar_slot.content = build_pages_bar(
             effective_active_page,
@@ -884,7 +920,7 @@ class App:
             all_tab_index=getattr(self.pm, "all_page_index", 0),
         )
 
-        tests = self._filter_tests()
+        tests = self._filter_tests(running)
         sidebar_pool = archived_everything if in_archive else active_everything
         group_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
@@ -1026,7 +1062,8 @@ class App:
         )
         r.prev_btn.disabled = self.state.current_page <= 1
         r.next_btn.disabled = self.state.current_page >= total_pages
-        self._safe_update()
+        if update_page:
+            self._safe_update()
 
     def _device_label(self, name: str) -> str:
         cached = self.monitor._disk_cache.get(name) if hasattr(self, "monitor") else None
@@ -1039,6 +1076,8 @@ class App:
                 prof = self.pm.profiles.get(name) if hasattr(self, "pm") else None
                 if prof is not None and getattr(prof, "engine", "camoufox") != "chrome":
                     return ""
+        from ..services.browser import fingerprint
+
         info = fingerprint.summary(os.path.join(DATA_DIR, name))
         if not info:
             return ""

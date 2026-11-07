@@ -841,18 +841,45 @@ def is_generator_email_address(
     return not tok_low or tok_low == "webmail"
 
 
+_SSL_DEFAULT_CTX = ssl.create_default_context()
+_IPV4_POOL_LOCK = threading.Lock()
+_IPV4_CONN_POOL: dict[str, list[_IPv4HTTPSConnection]] = {}
+
+
 class _IPv4HTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
         addrs = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_STREAM)
         if not addrs:
             raise OSError(f"Cannot resolve IPv4 for {self.host}")
         af, socktype, proto, _, sa = addrs[0]
-        sock = socket.socket(af, socktype, proto)
-        if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
-            sock.settimeout(self.timeout)
-        sock.connect(sa)
+        raw_timeout = (
+            float(self.timeout)
+            if isinstance(self.timeout, (int, float)) and self.timeout > 0
+            else 14.0
+        )
+        conn_timeout = min(4.5, max(2.5, raw_timeout / 3.0))
+        read_timeout = max(12.0, raw_timeout)
         server_hostname = self._tunnel_host if self._tunnel_host else self.host
-        self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+
+        last_err: Exception | None = None
+        for _attempt in range(3):
+            sock: socket.socket | None = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.settimeout(conn_timeout)
+                sock.connect(sa)
+                tls_sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+                tls_sock.settimeout(read_timeout)
+                self.sock = tls_sock
+                return
+            except Exception as e:
+                last_err = e
+                if sock is not None:
+                    with contextlib.suppress(Exception):
+                        sock.close()
+        if last_err is not None:
+            raise last_err
+        raise OSError(f"Cannot connect IPv4 to {self.host}")
 
 
 class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
@@ -860,24 +887,85 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
 
 
+def _checkout_ipv4_conn(host: str, timeout: int) -> tuple[_IPv4HTTPSConnection, bool]:
+    with _IPV4_POOL_LOCK:
+        bucket = _IPV4_CONN_POOL.get(host)
+        while bucket:
+            conn = bucket.pop()
+            if conn.sock is not None:
+                return conn, True
+    return (
+        _IPv4HTTPSConnection(
+            host,
+            443,
+            timeout=max(12, int(timeout)),
+            context=_SSL_DEFAULT_CTX,
+        ),
+        False,
+    )
+
+
+def _checkin_ipv4_conn(host: str, conn: _IPv4HTTPSConnection) -> None:
+    if conn.sock is None:
+        return
+    with _IPV4_POOL_LOCK:
+        bucket = _IPV4_CONN_POOL.setdefault(host, [])
+        if len(bucket) < 4:
+            bucket.append(conn)
+            return
+    with contextlib.suppress(Exception):
+        conn.close()
+
+
 def _http_get_ipv4(
     host: str,
     path: str,
     headers: dict[str, str],
-    timeout: int = 12,
+    timeout: int = 15,
 ) -> str:
-    """Perform a thread-safe HTTPS GET over IPv4 (`socket.AF_INET`) without modifying global `socket.getaddrinfo`."""
-    opener = urllib.request.build_opener(_IPv4HTTPSHandler(context=ssl.create_default_context()))
-    req = urllib.request.Request(f"https://{host}{path}", headers=headers)
-    with opener.open(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    """Perform a thread-safe Keep-Alive HTTPS GET over IPv4 (`socket.AF_INET`) with fast SYN retry and same-socket redirect handling."""
+    req_headers = {**headers, "Connection": "keep-alive"}
+    last_err: Exception | None = None
+
+    for attempt in range(2):
+        conn, reused = _checkout_ipv4_conn(host, timeout)
+        try:
+            cur_path = path
+            body_bytes = b""
+            for _redir in range(3):
+                if conn.sock is not None and hasattr(conn.sock, "settimeout"):
+                    conn.sock.settimeout(max(12.0, float(timeout)))
+                conn.request("GET", cur_path, headers=req_headers)
+                resp = conn.getresponse()
+                body_bytes = resp.read()
+                if resp.status in (301, 302, 303, 307, 308):
+                    loc = resp.getheader("Location") or ""
+                    if loc:
+                        parsed = urllib.parse.urlsplit(loc)
+                        cur_path = (parsed.path or "/") + (
+                            f"?{parsed.query}" if parsed.query else ""
+                        )
+                        continue
+                break
+            _checkin_ipv4_conn(host, conn)
+            return body_bytes.decode("utf-8", errors="replace")
+        except Exception as e:
+            last_err = e
+            with contextlib.suppress(Exception):
+                conn.close()
+            if not reused and attempt >= 1:
+                break
+
+    if last_err is not None:
+        raise last_err
+    raise TimeoutError("The read operation timed out")
 
 
 def _fetch_via_generator_email(
     email_addr: str,
     *,
     top: int = 8,
-    timeout: int = 12,
+    timeout: int = 15,
 ) -> tuple[bool, str, list[dict[str, str]]]:
     """Read latest messages from `generator.email` over IPv4 using `inbox_ctx` cookie."""
     clean_em = (email_addr or "").strip().lower()
@@ -891,12 +979,21 @@ def _fetch_via_generator_email(
         "Cookie": f"inbox_ctx={ctx_base}; surl={ctx_base}",
     }
     try:
+        # Requesting /inbox1/ directly with inbox_ctx + surl cookies returns 200 OK
+        # immediately without the 302 redirect round-trip triggered by /{ctx_base}.
         page_html = _http_get_ipv4(
             "generator.email",
-            f"/{ctx_base}",
+            "/inbox1/",
             headers=headers,
-            timeout=timeout,
+            timeout=max(15, int(timeout)),
         )
+        if 'id="email-table"' not in page_html and user not in page_html.lower():
+            page_html = _http_get_ipv4(
+                "generator.email",
+                f"/{ctx_base}",
+                headers=headers,
+                timeout=max(15, int(timeout)),
+            )
     except Exception as e:
         return False, f"Lỗi kết nối generator.email: {str(e)[:140]}", []
 
@@ -930,13 +1027,13 @@ def _fetch_via_generator_email(
             with contextlib.suppress(Exception):
                 msg_html = _http_get_ipv4(
                     "generator.email",
-                    f"/{clean_ctx}",
+                    "/inbox1/",
                     headers={
                         "User-Agent": headers["User-Agent"],
                         "Accept": headers["Accept"],
                         "Cookie": f"inbox_ctx={clean_ctx}; surl={clean_ctx}",
                     },
-                    timeout=min(8, timeout),
+                    timeout=max(10, int(timeout)),
                 )
                 m_idx = msg_html.find('id="email-table"')
                 m_chunk = msg_html[m_idx : m_idx + 8000] if m_idx != -1 else msg_html

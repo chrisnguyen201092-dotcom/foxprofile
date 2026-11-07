@@ -22,6 +22,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -1204,12 +1205,16 @@ class MonitorService:
         self._log_dir = pathlib.Path(log_dir)
         self._log_cache_key: tuple[tuple[str, float, int], ...] = ()
         self._log_file_events_cache: dict[str, tuple[float, int, list[tuple[str, str]]]] = {}
+        self._log_events_sig: tuple[tuple[str, int, tuple[str, str] | None], ...] = ()
+        self._log_events_disk_loaded: bool = False
         self._log_history: dict[str, dict[str, Any]] = {}
         self._live_started_at: dict[str, dt.datetime] = {}
         self._live_stopped_at: dict[str, dt.datetime] = {}
         self._live_sessions: dict[str, list[dict[str, Any]]] = {}
         self._disk_cache: dict[str, dict[str, Any]] = {}
+        self._verified_closed_ts: dict[str, float] = {}
         self._disk_cache_dirty: bool = False
+        self._save_lock = threading.Lock()
         self._last_free_gb_ts: float = 0.0
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
@@ -1416,34 +1421,25 @@ class MonitorService:
                         str(em).strip().lower() for em in raw_dead if str(em).strip()
                     }
 
-    def _save_settings(self) -> None:
+    def _save_settings(self, *, async_write: bool = False) -> None:
         path = self._settings_file()
         with contextlib.suppress(Exception):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if self._last_mail_scan_ts <= 0.0 and path.exists():
-                with contextlib.suppress(Exception):
-                    disk_raw = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(disk_raw, dict):
-                        disk_ts = disk_raw.get("last_mail_scan_ts")
-                        if isinstance(disk_ts, (int, float)) and disk_ts > self._last_mail_scan_ts:
-                            self._last_mail_scan_ts = float(disk_ts)
-            tmp = path.with_suffix(".json.tmp")
             payload = {
                 "cooldown_minutes": self._cooldown_minutes,
-                "last_used_ports": self._last_used_ports,
-                "last_used_endpoints": self._last_used_endpoints,
-                "ip_history": self._ip_history,
-                "ip_scores": self._ip_scores,
+                "last_used_ports": dict(self._last_used_ports),
+                "last_used_endpoints": dict(self._last_used_endpoints),
+                "ip_history": dict(self._ip_history),
+                "ip_scores": dict(self._ip_scores),
                 "session_history": {
                     k: v[-50:] for k, v in self._live_sessions.items() if v
                 },
-                "last_pairings": self._last_pairings,
-                "last_shifts": self._last_shifts,
+                "last_pairings": list(self._last_pairings),
+                "last_shifts": dict(self._last_shifts),
                 "schedule_cycle_days": self._schedule_cycle_days,
                 "sort_by": self._sort_by,
-                "fixed_work_squads": self._fixed_work_squads,
+                "fixed_work_squads": dict(self._fixed_work_squads),
                 "last_mail_scan_ts": self._last_mail_scan_ts,
-                "mail_checkpoint_hits": self._mail_checkpoint_hits,
+                "mail_checkpoint_hits": dict(self._mail_checkpoint_hits),
                 "mail_dead_tokens": sorted(self._mail_dead_tokens),
                 "disk_cache": {
                     k: v
@@ -1451,8 +1447,29 @@ class MonitorService:
                     if isinstance(v, dict) and not v.get("_is_running")
                 },
             }
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(tmp, path)
+
+            def _write_to_disk() -> None:
+                with self._save_lock, contextlib.suppress(Exception):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if payload["last_mail_scan_ts"] <= 0.0 and path.exists():
+                        with contextlib.suppress(Exception):
+                            disk_raw = json.loads(path.read_text(encoding="utf-8"))
+                            if isinstance(disk_raw, dict):
+                                disk_ts = disk_raw.get("last_mail_scan_ts")
+                                if (
+                                    isinstance(disk_ts, (int, float))
+                                    and disk_ts > payload["last_mail_scan_ts"]
+                                ):
+                                    self._last_mail_scan_ts = float(disk_ts)
+                                    payload["last_mail_scan_ts"] = float(disk_ts)
+                    tmp = path.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                    os.replace(tmp, path)
+
+            if async_write and "PYTEST_CURRENT_TEST" not in os.environ:
+                threading.Thread(target=_write_to_disk, daemon=True).start()
+            else:
+                _write_to_disk()
 
     @property
     def last_mail_scan_ts(self) -> float:
@@ -1898,9 +1915,12 @@ class MonitorService:
             self._live_sessions[new_name] = list(reversed(merged_before[:50]))
             changed = True
         self._log_cache_key = ()
+        self._log_events_sig = ()
         self._log_history.clear()
         if old_name in self._disk_cache:
             self._disk_cache[new_name] = self._disk_cache.pop(old_name)
+        self._verified_closed_ts.pop(old_name, None)
+        self._verified_closed_ts.pop(new_name, None)
         if old_name in self._last_shifts:
             self._last_shifts[new_name] = self._last_shifts.pop(old_name)
             changed = True
@@ -1922,6 +1942,7 @@ class MonitorService:
 
     def record_started(self, profile_name: str, proxy: str | None = None) -> None:
         self._live_started_at[profile_name] = dt.datetime.now()
+        self._verified_closed_ts.pop(profile_name, None)
         if proxy is not None:
             port = extract_proxy_port(proxy)
             ep = extract_proxy_endpoint(proxy)
@@ -1942,6 +1963,7 @@ class MonitorService:
     def record_stopped(self, profile_name: str) -> None:
         now = dt.datetime.now()
         self._live_stopped_at[profile_name] = now
+        self._verified_closed_ts.pop(profile_name, None)
         start_dt = self._live_started_at.pop(profile_name, None)
         if start_dt is not None:
             dur = max(0.0, (now - start_dt).total_seconds())
@@ -2065,9 +2087,64 @@ class MonitorService:
             )
         return merged[:limit]
 
+    def _log_events_cache_file(self) -> pathlib.Path:
+        return self._log_dir / ".log_events_cache.json"
+
+    def _load_log_events_cache(self) -> None:
+        if self._log_events_disk_loaded:
+            return
+        self._log_events_disk_loaded = True
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        path = self._log_events_cache_file()
+        if not path.exists():
+            return
+        with contextlib.suppress(Exception):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for fname, item in raw.items():
+                    if (
+                        isinstance(fname, str)
+                        and isinstance(item, list)
+                        and len(item) == 3
+                        and isinstance(item[0], (int, float))
+                        and isinstance(item[1], int)
+                        and isinstance(item[2], list)
+                    ):
+                        lines_list: list[tuple[str, str]] = [
+                            (str(pair[0]), str(pair[1]))
+                            for pair in item[2]
+                            if isinstance(pair, (list, tuple)) and len(pair) == 2
+                        ]
+                        self._log_file_events_cache[fname] = (
+                            float(item[0]),
+                            int(item[1]),
+                            lines_list,
+                        )
+
+    def _save_log_events_cache(self, active_names: set[str]) -> None:
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        path = self._log_events_cache_file()
+        payload = {
+            fname: [mtime, fsize, lines]
+            for fname, (mtime, fsize, lines) in self._log_file_events_cache.items()
+            if fname in active_names
+        }
+
+        def _bg_write() -> None:
+            with contextlib.suppress(Exception):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+                os.replace(tmp, path)
+
+        threading.Thread(target=_bg_write, daemon=True).start()
+
     def _refresh_log_history(self) -> dict[str, dict[str, Any]]:
         if not self._log_dir.exists():
             return self._log_history
+        self._load_log_events_cache()
         log_files = sorted(self._log_dir.glob("foxprofile_*.log"))[-30:]
         valid_logs: list[tuple[pathlib.Path, float, int]] = []
         key_parts: list[tuple[str, float, int]] = []
@@ -2080,6 +2157,61 @@ class MonitorService:
                 continue
         cache_key = tuple(key_parts)
         if cache_key == self._log_cache_key and self._log_history:
+            return self._log_history
+
+        log_cache_updated = False
+        per_file_lines: list[tuple[str, list[tuple[str, str]]]] = []
+        for lf, lf_mtime, lf_size in valid_logs:
+            cached_f = self._log_file_events_cache.get(lf.name)
+            if (
+                cached_f is not None
+                and abs(cached_f[0] - lf_mtime) < 1e-3
+                and cached_f[1] == lf_size
+            ):
+                relevant_lines = cached_f[2]
+            else:
+                try:
+                    raw_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                relevant_lines = []
+                for line in raw_lines:
+                    if len(line) < 26 or not line[0].isdigit():
+                        continue
+                    sep_parts = line.split(" - ", 3)
+                    if len(sep_parts) == 4 and len(sep_parts[0]) == 19:
+                        ts_part = sep_parts[0]
+                        msg = sep_parts[3].strip()
+                    else:
+                        m = _RE_LOG_LINE.match(line)
+                        if not m:
+                            continue
+                        ts_part = m.group("ts")
+                        msg = m.group("msg").strip()
+                    if not msg or not msg.startswith(_LOG_MSG_PREFIXES):
+                        continue
+                    if msg[0] == "[" and not any(
+                        tok in msg for tok in _BRACKET_EVENT_TOKENS
+                    ):
+                        continue
+                    if msg.startswith("Updated profile:"):
+                        mr_chk = _RE_RENAME_PROFILE.match(msg)
+                        if not mr_chk or mr_chk.group("old").strip() == mr_chk.group("new").strip():
+                            continue
+                    relevant_lines.append((ts_part, msg))
+                self._log_file_events_cache[lf.name] = (lf_mtime, lf_size, relevant_lines)
+                log_cache_updated = True
+            per_file_lines.append((lf.name, relevant_lines))
+
+        if log_cache_updated:
+            self._save_log_events_cache({lf.name for lf, _, _ in valid_logs})
+
+        events_sig = tuple(
+            (fname, len(lines), lines[-1] if lines else None)
+            for fname, lines in per_file_lines
+        )
+        if events_sig == self._log_events_sig and self._log_history:
+            self._log_cache_key = cache_key
             return self._log_history
 
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
@@ -2140,42 +2272,7 @@ class MonitorService:
                             else:
                                 h["last_closed"] = None
 
-        for lf, lf_mtime, lf_size in valid_logs:
-            cached_f = self._log_file_events_cache.get(lf.name)
-            if (
-                cached_f is not None
-                and cached_f[0] == lf_mtime
-                and cached_f[1] == lf_size
-            ):
-                relevant_lines = cached_f[2]
-            else:
-                try:
-                    raw_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
-                except OSError:
-                    continue
-                relevant_lines = []
-                for line in raw_lines:
-                    if len(line) < 26 or not line[0].isdigit():
-                        continue
-                    sep_parts = line.split(" - ", 3)
-                    if len(sep_parts) == 4 and len(sep_parts[0]) == 19:
-                        ts_part = sep_parts[0]
-                        msg = sep_parts[3].strip()
-                    else:
-                        m = _RE_LOG_LINE.match(line)
-                        if not m:
-                            continue
-                        ts_part = m.group("ts")
-                        msg = m.group("msg").strip()
-                    if not msg or not msg.startswith(_LOG_MSG_PREFIXES):
-                        continue
-                    if msg[0] == "[" and not any(
-                        tok in msg for tok in _BRACKET_EVENT_TOKENS
-                    ):
-                        continue
-                    relevant_lines.append((ts_part, msg))
-                self._log_file_events_cache[lf.name] = (lf_mtime, lf_size, relevant_lines)
-
+        for _fname, relevant_lines in per_file_lines:
             for ts_str, msg in relevant_lines:
                 if msg[0] == "[":
                     end_br = msg.find("]")
@@ -2354,16 +2451,52 @@ class MonitorService:
                 else:
                     self._live_sessions.pop(pname, None)
         if pruned_live:
-            self._save_settings()
+            self._save_settings(async_write=True)
 
         self._log_cache_key = cache_key
+        self._log_events_sig = events_sig
         self._log_history = hist
         return hist
 
-    def _inspect_profile_disk(self, name: str, is_running: bool) -> dict[str, Any]:
+    def _inspect_profile_disk(
+        self,
+        name: str,
+        is_running: bool,
+        *,
+        fast_init: bool = False,
+    ) -> dict[str, Any]:
         pdir = self._data_dir / name
         now_ts = time.time()
         cached = self._disk_cache.get(name)
+
+        if (
+            not is_running
+            and cached is not None
+            and cached.get("_cache_ver") == 5
+            and not cached.get("_is_running")
+            and (
+                fast_init
+                or (
+                    "PYTEST_CURRENT_TEST" not in os.environ
+                    and name not in self._live_stopped_at
+                    and (now_ts - self._verified_closed_ts.get(name, 0.0)) < 25.0
+                )
+            )
+        ):
+            ct_sec = float(cached.get("_datr_ctime_sec") or 0.0)
+            if 0 < ct_sec <= now_ts:
+                cached["datr_age_days"] = round((now_ts - ct_sec) / 86400.0, 2)
+            latest_exp_sec = float(cached.get("_latest_exp_sec") or 0.0)
+            if latest_exp_sec > 0:
+                rem_h = (latest_exp_sec - now_ts) / 3600.0
+                if rem_h < 0:
+                    cached["sess_exp"] = "Hết hạn"
+                elif rem_h < 24:
+                    cached["sess_exp"] = f"Còn {int(rem_h)}h"
+                else:
+                    cached["sess_exp"] = f"Còn {int(rem_h // 24)}d"
+            cached["burst_10m"] = 0
+            return cached
 
         tabs_file = pdir / "tabs.json"
         tabs_mtime = 0.0
@@ -2513,6 +2646,7 @@ class MonitorService:
                     cached["burst_10m"] = 0
                     cached["last_active_ts"] = last_active_ts
                     cached["has_cache2"] = has_cache2
+                    self._verified_closed_ts[name] = now_ts
                     return cached
             elif (
                 cached.get("_is_running") is True
@@ -2925,6 +3059,7 @@ class MonitorService:
 
         self._disk_cache[name] = result
         if not is_running:
+            self._verified_closed_ts[name] = now_ts
             self._disk_cache_dirty = True
         return result
 
@@ -2932,6 +3067,8 @@ class MonitorService:
         self,
         profiles: list[Profile],
         running_names: set[str],
+        *,
+        fast_init: bool = False,
     ) -> MonitorSnapshot:
         now = dt.datetime.now()
         now_ts = time.time()
@@ -2985,7 +3122,7 @@ class MonitorService:
         ports_seeded = False
         for p in profiles:
             is_run = p.name in running_names
-            disk = self._inspect_profile_disk(p.name, is_run)
+            disk = self._inspect_profile_disk(p.name, is_run, fast_init=fast_init)
             disk_map[p.name] = disk
 
             port = extract_proxy_port(p.proxy)
@@ -3080,7 +3217,7 @@ class MonitorService:
 
         if ports_seeded or self._disk_cache_dirty:
             self._disk_cache_dirty = False
-            self._save_settings()
+            self._save_settings(async_write=True)
 
         snap = MonitorSnapshot(
             free_gb=self._free_gb,

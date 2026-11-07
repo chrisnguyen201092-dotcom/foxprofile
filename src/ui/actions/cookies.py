@@ -9,7 +9,7 @@ import flet as ft
 from ...core.config import DATA_DIR
 from ...core.strings import get_string
 from ...interfaces.protocols import IBrowserLauncher, IProfileManager
-from ...services.browser import cookies, fingerprint
+from ...services.browser import cookies
 from ...services.browser.launcher import ProfileBusyError
 from ..dialogs import open_confirm_dialog, open_cookie_dialog
 
@@ -157,6 +157,8 @@ def manage_cookies(
             log(get_string("cookie_error", name=name, error=e))
             return
         log(get_string("cookie_imported", name=name, count=count))
+
+    from ...services.browser import fingerprint
 
     def on_reset_fingerprint() -> None:
         def _do_reset() -> None:

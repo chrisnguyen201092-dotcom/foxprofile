@@ -364,15 +364,21 @@ class ProfileManager:
             try:
                 with pathlib.Path(PROFILES_FILE).open(encoding="utf-8") as f:
                     data = json.load(f)
+                    page_canon_map: dict[str, str] = {pg.casefold(): pg for pg in self.custom_pages}
                     for name, p_data in data.items():
                         if not validate_profile_name(name)[0] or p_data.get("name") != name:
                             logger.warning("Skipping profile with unsafe name: %r", name)
                             continue
                         pages = _clean_pages(p_data.get("pages"))
+                        canon_pages: list[str] = []
                         for pg in pages:
-                            if self._find_page_by_casefold(pg) is None:
+                            pg_cf = pg.casefold()
+                            canon = page_canon_map.get(pg_cf)
+                            if canon is None:
                                 self.custom_pages.append(pg)
-                        canon_pages = [self._find_page_by_casefold(pg) or pg for pg in pages]
+                                page_canon_map[pg_cf] = pg
+                                canon = pg
+                            canon_pages.append(canon)
                         status_val = valid_or_none(p_data.get("status"), validate_status)
                         created_val = parse_flexible_date(p_data.get("created_at"))
                         if not created_val:

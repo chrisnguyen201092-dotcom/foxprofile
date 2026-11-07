@@ -151,11 +151,18 @@ def setup_windows_taskbar_icon() -> None:
 
     with contextlib.suppress(Exception):
         ico_file = pathlib.Path(icon_path)
-        ico_hash = hashlib.sha256(ico_file.read_bytes()).hexdigest()[:16]
+        ico_mtime = ico_file.stat().st_mtime
         client_root = pathlib.Path.home() / ".flet" / "client"
         if client_root.is_dir():
+            ico_hash: str | None = None
             for exe_file in client_root.glob("flet-desktop-*/flet/flet.exe"):
                 marker = exe_file.parent / ".foxprofile-icon.sha256"
+                if marker.exists():
+                    with contextlib.suppress(OSError):
+                        if marker.stat().st_mtime >= ico_mtime:
+                            continue
+                if ico_hash is None:
+                    ico_hash = hashlib.sha256(ico_file.read_bytes()).hexdigest()[:16]
                 if marker.exists() and marker.read_text(encoding="utf-8").strip() == ico_hash:
                     continue
                 if _stamp_pe_icon(exe_file, ico_file):

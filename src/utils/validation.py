@@ -25,6 +25,54 @@ _PROXY_PATTERN = re.compile(
 # language[-Script]-REGION, e.g. vi-VN, zh-Hant-TW, es-419
 _LOCALE_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[A-Z][a-z]{3})?-(?:[A-Z]{2}|\d{3})$")
 _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+_COMMON_TIMEZONES = frozenset(
+    {
+        "America/Los_Angeles",
+        "America/New_York",
+        "America/Chicago",
+        "America/Denver",
+        "America/Phoenix",
+        "America/Toronto",
+        "America/Vancouver",
+        "Asia/Ho_Chi_Minh",
+        "Asia/Bangkok",
+        "Asia/Tokyo",
+        "Asia/Singapore",
+        "Asia/Seoul",
+        "Europe/London",
+        "Europe/Paris",
+        "Europe/Berlin",
+        "Australia/Sydney",
+        "UTC",
+    }
+)
+_COMMON_LOCALES = frozenset(
+    {
+        "en-US",
+        "en-GB",
+        "en-CA",
+        "en-AU",
+        "vi-VN",
+        "fr-FR",
+        "de-DE",
+        "es-ES",
+        "ja-JP",
+        "ko-KR",
+        "zh-CN",
+        "zh-TW",
+        "pt-BR",
+        "ru-RU",
+    }
+)
+
+
+def _format_control_chars_error(value: str) -> str | None:
+    if not _CONTROL_CHAR_RE.search(value):
+        return None
+    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
+    return get_string("validation_invalid_chars", chars=", ".join(found_control))
 
 
 def validate_color(value: str) -> tuple[bool, str]:
@@ -42,9 +90,8 @@ def validate_group(value: str) -> tuple[bool, str]:
         return True, ""
     if len(value) > 48:
         return False, get_string("validation_group_too_long")
-    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(value):
+        return False, err
     return True, ""
 
 
@@ -63,9 +110,8 @@ def validate_email(value: str) -> tuple[bool, str]:
         return True, ""
     if len(value) > 120:
         return False, get_string("validation_email_too_long")
-    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(value):
+        return False, err
     return True, ""
 
 
@@ -75,9 +121,8 @@ def validate_password(value: str) -> tuple[bool, str]:
         return True, ""
     if len(value) > 160:
         return False, get_string("validation_password_too_long")
-    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(value):
+        return False, err
     return True, ""
 
 
@@ -96,9 +141,8 @@ def validate_mail_token(value: str) -> tuple[bool, str]:
         return True, ""
     if len(value) > 2048:
         return False, get_string("validation_mail_token_too_long")
-    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(value):
+        return False, err
     return True, ""
 
 
@@ -108,9 +152,8 @@ def validate_status(value: str) -> tuple[bool, str]:
         return True, ""
     if len(value) > 32:
         return False, get_string("validation_status_too_long")
-    found_control = [repr(c) for c in value if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(value):
+        return False, err
     return True, ""
 
 
@@ -126,9 +169,8 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
         return False, get_string("validation_invalid_chars", chars=", ".join(found_invalid))
 
     # Reject control characters (ASCII < 32 or DEL=127) — they cause mkdir to fail
-    found_control = [repr(c) for c in name if ord(c) < 32 or ord(c) == 127]
-    if found_control:
-        return False, get_string("validation_invalid_chars", chars=", ".join(found_control))
+    if err := _format_control_chars_error(name):
+        return False, err
 
     if name != name.strip():
         return False, get_string("validation_name_spaces")
@@ -168,7 +210,7 @@ def validate_proxy_format(proxy_str: str) -> tuple[bool, str]:
 
 def validate_timezone(value: str) -> tuple[bool, str]:
     """An IANA timezone such as Asia/Ho_Chi_Minh; empty means automatic."""
-    if not value:
+    if not value or value in _COMMON_TIMEZONES:
         return True, ""
     if value not in _timezones():
         return False, get_string("validation_invalid_timezone", value=value)
@@ -177,7 +219,7 @@ def validate_timezone(value: str) -> tuple[bool, str]:
 
 def validate_locale(value: str) -> tuple[bool, str]:
     """A language-region locale such as vi-VN; empty means automatic."""
-    if not value:
+    if not value or value in _COMMON_LOCALES:
         return True, ""
     if not _is_valid_locale_tag(value):
         return False, get_string("validation_invalid_locale", value=value)
@@ -186,6 +228,8 @@ def validate_locale(value: str) -> tuple[bool, str]:
 
 @functools.cache
 def _is_valid_locale_tag(value: str) -> bool:
+    if value in _COMMON_LOCALES:
+        return True
     if not _LOCALE_PATTERN.match(value):
         return False
     try:

@@ -1466,7 +1466,7 @@ def open_mail_credentials_dialog(
                 em_addr,
                 tok_str,
                 top=8,
-                timeout=12,
+                timeout=16,
                 password=pw_str,
             )
             refresh_inbox_btn.disabled = False

@@ -4899,3 +4899,64 @@ def test_startup_and_snapshot_optimizations(isolated_pm, tmp_path) -> None:
     assert isolated_pm.restore_profile("FastTrash") is True
     assert isolated_pm.list_trashed_profiles() == []
 
+
+def test_generator_email_direct_inbox_and_keepalive_pool(monkeypatch) -> None:
+    """Verify generator.email fetches /inbox1/ directly and reuses Keep-Alive IPv4 connections."""
+    from src.utils import totp
+
+    totp._IPV4_CONN_POOL.clear()
+    requested_paths: list[str] = []
+
+    class FakeResp:
+        def __init__(self, status: int, body: bytes, location: str = "") -> None:
+            self.status = status
+            self._body = body
+            self._loc = location
+
+        def read(self) -> bytes:
+            return self._body
+
+        def getheader(self, name: str, default: str | None = None) -> str | None:
+            if name.lower() == "location":
+                return self._loc or default
+            return default
+
+    class FakeConn:
+        def __init__(self, host: str, port: int, timeout: int = 12, context=None) -> None:
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.sock = object()
+            self._last_path = ""
+
+        def request(self, method: str, path: str, headers=None) -> None:
+            requested_paths.append(path)
+            self._last_path = path
+
+        def getresponse(self) -> FakeResp:
+            html_body = (
+                b'<div id="email-table">'
+                b"<div onclick=\"loadInboxClientSide('/polccat.site/davidanderson670/msg1')\">"
+                b"<div>security@account.meta.com</div>"
+                b"<div>849201 is your confirmation code</div>"
+                b"<div>2026-11-06 08:15</div>"
+                b"</div></div>"
+            )
+            return FakeResp(200, html_body)
+
+        def close(self) -> None:
+            self.sock = None
+
+    monkeypatch.setattr(totp, "_IPv4HTTPSConnection", FakeConn)
+    ok, otp, msgs = totp.fetch_hotmail_messages(
+        "davidanderson670@polccat.site",
+        "https://generator.email/davidanderson670@polccat.site",
+    )
+    assert ok is True
+    assert otp == "849201"
+    assert len(msgs) == 1
+    assert requested_paths == ["/inbox1/"]
+    assert len(totp._IPV4_CONN_POOL.get("generator.email", [])) == 1
+    totp._IPV4_CONN_POOL.clear()
+
+
