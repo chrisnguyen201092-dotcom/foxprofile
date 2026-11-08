@@ -4960,3 +4960,41 @@ def test_generator_email_direct_inbox_and_keepalive_pool(monkeypatch) -> None:
     totp._IPV4_CONN_POOL.clear()
 
 
+def test_detect_meta_checkpoint_mail_multilingual() -> None:
+    """Verify detect_meta_checkpoint_mail detects Meta checkpoint emails across all languages."""
+    from src.utils.totp import detect_meta_checkpoint_mail, extract_otp_from_text
+
+    multilingual_subjects = [
+        "Se requiere una acción en tu cuenta de Meta",
+        "Este necesară o acţiune privind contul tău de Meta",
+        "Este necesară o acțiune privind contul tău de Meta",
+        "Требуется выполнить действие в вашем аккаунте Meta",
+        "Tindakan diperlukan pada Akaun Meta anda",
+        "Потрібна дія щодо Вашого облікового запису Meta",
+        "Actie vereist voor je Meta-account",
+        "Kailangan ng aksyon sa iyong Meta account",
+        "Action requise sur votre compte Meta",
+        "Ação necessária na sua conta da Meta",
+        "Handlungsbedarf für dein Meta-Konto",
+    ]
+    for subj in multilingual_subjects:
+        res = detect_meta_checkpoint_mail(
+            [{"subject": subj, "time": "2026-11-07 22:45", "preview": "", "sender": "Meta"}]
+        )
+        assert res is not None, f"Failed to detect checkpoint subject: {subj}"
+        assert res["subject"] == subj
+
+    non_cp_subjects = [
+        "¿Acabas de agregar tu número de teléfono?",
+        "Tocmai ţi-ai adăugat numărul de telefon?",
+        "Это вы только что добавили номер телефона?",
+        "Це Ви щойно додали номер телефону?",
+        "Adakah anda baharu menambah nombor telefon anda?",
+        "Kakadagdag mo lang ba ng phone number mo?",
+    ]
+    for subj in non_cp_subjects:
+        assert detect_meta_checkpoint_mail([{"subject": subj, "preview": ""}]) is None
+        assert extract_otp_from_text(subj, "123456") == ""
+
+
+

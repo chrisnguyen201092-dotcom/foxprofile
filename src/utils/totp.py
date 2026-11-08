@@ -40,7 +40,7 @@ _HTML_STYLE_SCRIPT_RE = re.compile(r"<(style|script|head)[^>]*>.*?</\1>", re.IGN
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _OTP_CONTEXT_AFTER_RE = re.compile(
-    r"(?:code|mã|otp|pin|verification|confirm|security|passcode|xác\s*nhận|xác\s*minh|bảo\s*mật|コード)"
+    r"(?:code|código|codigo|codul|kod|код|mã|otp|pin|verification|confirm|security|passcode|xác\s*nhận|xác\s*minh|bảo\s*mật|コード)"
     r"[^0-9a-zA-Z]{1,35}\b(\d{4,8})\b",
     re.IGNORECASE,
 )
@@ -60,7 +60,21 @@ _NO_OTP_SUBJECT_HINTS = (
     "đã bật xác minh 2 bước",
     "app password created",
     "did you just remove your email",
+    "did you just add your phone",
+    "did you just remove your phone",
     "có phải bạn vừa gỡ địa chỉ email",
+    "có phải bạn vừa thêm số điện thoại",
+    "có phải bạn vừa gỡ số điện thoại",
+    "¿acabas de agregar tu número de teléfono",
+    "¿acabas de eliminar tu número de teléfono",
+    "tocmai ţi-ai adăugat numărul de telefon",
+    "tocmai ți-ai adăugat numărul de telefon",
+    "это вы только что добавили номер телефона",
+    "це ви щойно додали номер телефону",
+    "adakah anda baharu menambah nombor telefon",
+    "kakadagdag mo lang ba ng phone number mo",
+    "電話番号を追加しましたか",
+    "電話番号を削除しましたか",
 )
 
 
@@ -447,6 +461,67 @@ _META_CHECKPOINT_PHRASES = (
     "metaアカウントで対応が必要です",
     "アカウントを一時停止しました",
     "人間であることを確認",
+    # Spanish
+    "se requiere una acción en tu cuenta de meta",
+    "se requiere una accion en tu cuenta de meta",
+    "acción necesaria en tu cuenta de meta",
+    "suspendimos tu cuenta",
+    "hemos suspendido tu cuenta",
+    "inhabilitamos tu cuenta",
+    # Romanian
+    "este necesară o acţiune privind contul tău de meta",
+    "este necesară o acțiune privind contul tău de meta",
+    "este necesara o actiune privind contul tau de meta",
+    "ţi-am suspendat contul",
+    "ți-am suspendat contul",
+    # Russian
+    "требуется выполнить действие в вашем аккаунте meta",
+    "необходимо выполнить действие в вашем аккаунте meta",
+    "мы приостановили действие вашего аккаунта",
+    "ваш аккаунт заблокирован",
+    # Ukrainian
+    "потрібна дія щодо вашого облікового запису meta",
+    "ми призупинили дію вашого облікового запису",
+    # Malay / Indonesian
+    "tindakan diperlukan pada akaun meta anda",
+    "tindakan diperlukan di akun meta anda",
+    "kami menggantung akaun anda",
+    "kami menangguhkan akun anda",
+    # Dutch
+    "actie vereist voor je meta-account",
+    "we hebben je account opgeschort",
+    # Filipino / Tagalog
+    "kailangan ng aksyon sa iyong meta account",
+    "sinuspinde namin ang iyong account",
+    # Portuguese
+    "ação necessária na sua conta da meta",
+    "acao necessaria na sua conta da meta",
+    "ação necessária na tua conta meta",
+    "suspendemos a sua conta",
+    "suspendemos sua conta",
+    # French
+    "action requise sur votre compte meta",
+    "nous avons suspendu votre compte",
+    # German
+    "handlungsbedarf für dein meta-konto",
+    "aktion erforderlich für dein meta-konto",
+    "wir haben dein konto gesperrt",
+    # Italian
+    "azione richiesta sul tuo account meta",
+    "abbiamo sospeso il tuo account",
+    # Turkish
+    "meta hesabınızda işlem yapılması gerekiyor",
+    "meta hesabında işlem yapılması gerekiyor",
+    "hesabınızı askıya aldık",
+    # Polish
+    "wymagane działanie na koncie meta",
+    "zawiesiliśmy twoje konto",
+    # Thai / Korean / Chinese / Arabic
+    "ต้องดำเนินการกับบัญชี meta ของคุณ",
+    "meta 계정에 조치가 필요합니다",
+    "你的 meta 帐户需要采取行动",
+    "您的 meta 帳號需要採取行動",
+    "مطلوب اتخاذ إجراء بشأن حساب meta الخاص بك",
 )
 
 _META_ACTIVE_AGAIN_SUBJECTS = (
@@ -1019,7 +1094,26 @@ def _fetch_via_generator_email(
             and "did you just remove" not in subj_low
             and any(
                 k in subj_low
-                for k in ("confirm", "code", "mã", "verify", "login", "security", "xác nhận")
+                for k in (
+                    "confirm",
+                    "code",
+                    "código",
+                    "codul",
+                    "kod",
+                    "код",
+                    "mã",
+                    "verify",
+                    "login",
+                    "security",
+                    "xác nhận",
+                    "sahkan",
+                    "bevestig",
+                    "kumpirmahin",
+                    "подтвердите",
+                    "підтвердьте",
+                    "認証",
+                    "コード",
+                )
             )
         )
         if needs_body_otp and msg_ctx:
