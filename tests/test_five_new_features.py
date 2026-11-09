@@ -4206,6 +4206,8 @@ def test_detect_meta_checkpoint_mail_and_safe_sequential_scanner():
 
 
 def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_path):
+    import datetime as dt
+
     from src.core.container import Container
     from src.core.events import EventBus
     from src.services.monitor import MonitorService
@@ -4247,10 +4249,27 @@ def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_pat
         data_dir=str(tmp_path / "camoufox_data"),
         log_dir=str(tmp_path / "logs"),
     )
-    assert mon.should_auto_scan_mail() is True
+    vn_tz = dt.timezone(dt.timedelta(hours=7))
+    ts_0530_vn = dt.datetime(2026, 11, 10, 5, 30, 0, tzinfo=vn_tz).timestamp()
+    ts_0859_vn = dt.datetime(2026, 11, 10, 8, 59, 59, tzinfo=vn_tz).timestamp()
+    ts_0901_vn = dt.datetime(2026, 11, 10, 9, 1, 0, tzinfo=vn_tz).timestamp()
+    ts_1500_vn = dt.datetime(2026, 11, 10, 15, 0, 0, tzinfo=vn_tz).timestamp()
+    ts_next_0830_vn = dt.datetime(2026, 11, 11, 8, 30, 0, tzinfo=vn_tz).timestamp()
+    ts_next_0905_vn = dt.datetime(2026, 11, 11, 9, 5, 0, tzinfo=vn_tz).timestamp()
+
+    # Before 09:00 AM Vietnam time: must NOT auto-scan even if never scanned before
+    assert mon.should_auto_scan_mail(now_ts=ts_0530_vn) is False
+    assert mon.should_auto_scan_mail(now_ts=ts_0859_vn) is False
+    # At/after 09:00 AM Vietnam time: must auto-scan
+    assert mon.should_auto_scan_mail(now_ts=ts_0901_vn) is True
 
     targets = mon.get_live_mail_scan_targets(isolated_pm.list_profiles())
     assert [t[0] for t in targets] == ["Live1", "Live2"]
+
+    # If a scan somehow ran before 09:00 AM (e.g. 05:30 AM), it still needs to scan after 09:00 AM
+    mon.record_mail_scan({}, scanned_names={"Live1", "Live2"}, update_timestamp=True, scan_ts=ts_0530_vn)
+    assert mon.should_auto_scan_mail(now_ts=ts_0859_vn) is False
+    assert mon.should_auto_scan_mail(now_ts=ts_0901_vn) is True
 
     mon.record_mail_scan(
         {
@@ -4265,8 +4284,13 @@ def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_pat
         dead_tokens={"dead@hotmail.com"},
         scanned_names={"Live1", "Live2"},
         update_timestamp=True,
+        scan_ts=ts_0901_vn,
     )
-    assert mon.should_auto_scan_mail() is False
+    assert mon.should_auto_scan_mail(now_ts=ts_0901_vn) is False
+    assert mon.should_auto_scan_mail(now_ts=ts_1500_vn) is False
+    # Next day before 09:00 AM VN: still False; next day after 09:00 AM VN: True
+    assert mon.should_auto_scan_mail(now_ts=ts_next_0830_vn) is False
+    assert mon.should_auto_scan_mail(now_ts=ts_next_0905_vn) is True
 
     # Reload from monitor_settings.json and verify persistence
     mon2 = MonitorService(

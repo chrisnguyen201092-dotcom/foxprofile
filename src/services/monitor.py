@@ -47,6 +47,8 @@ from .proxy.geo_check import classify_isp_type, compute_meta_ip_fraud_score
 
 PORT_COOLDOWN_MINUTES = 15
 TOKEN_BURST_THRESHOLD = 12
+VN_TZ = dt.timezone(dt.timedelta(hours=7))
+MAIL_AUTO_SCAN_MIN_HOUR_VN = 9
 
 _RE_PORT = re.compile(r":(\d{2,5})(?=:|$|\s|/)")
 _RE_LEGACY_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
@@ -1487,9 +1489,27 @@ class MonitorService:
         self,
         now_ts: float | None = None,
         cooldown_hours: float = 20.0,
+        *,
+        min_hour_vn: int = MAIL_AUTO_SCAN_MIN_HOUR_VN,
     ) -> bool:
-        """Return True if at least `cooldown_hours` have elapsed since the last daily mail scan."""
+        """Return True if it is at/after `min_hour_vn` (09:00 AM Vietnam time, UTC+7)
+        and no mail scan has been recorded since today's `min_hour_vn` VN cutoff.
+        """
         cur = time.time() if now_ts is None else float(now_ts)
+        now_vn = dt.datetime.fromtimestamp(cur, tz=VN_TZ)
+        if 0 <= min_hour_vn <= 23:
+            if now_vn.hour < min_hour_vn:
+                return False
+            today_cutoff_vn = now_vn.replace(
+                hour=min_hour_vn,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if self._last_mail_scan_ts <= 0.0:
+                return True
+            last_vn = dt.datetime.fromtimestamp(self._last_mail_scan_ts, tz=VN_TZ)
+            return last_vn < today_cutoff_vn
         return (cur - self._last_mail_scan_ts) >= (cooldown_hours * 3600.0)
 
     def get_live_mail_scan_targets(
@@ -1559,9 +1579,10 @@ class MonitorService:
         dead_tokens: set[str] | list[str] | None = None,
         scanned_names: set[str] | list[str] | None = None,
         update_timestamp: bool = True,
+        scan_ts: float | None = None,
     ) -> None:
         if update_timestamp:
-            self._last_mail_scan_ts = time.time()
+            self._last_mail_scan_ts = time.time() if scan_ts is None else float(scan_ts)
         if scanned_names:
             for pname in scanned_names:
                 if pname not in hits:
