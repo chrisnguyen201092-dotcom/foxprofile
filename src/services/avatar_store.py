@@ -18,8 +18,13 @@ import pathlib
 import struct
 import sys
 import tempfile
+import threading
 import time
 import zlib
+from collections.abc import Callable, Iterator
+from typing import NamedTuple, TypeVar
+
+_T = TypeVar("_T")
 
 AVATARS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "avatars")
@@ -149,6 +154,46 @@ def remove_avatar(profile_name: str, *, avatars_dir: str | None = None) -> bool:
     return removed
 
 
+def rename_avatar(
+    old_name: str,
+    new_name: str,
+    *,
+    avatars_dir: str | None = None,
+) -> bool:
+    """Migrate saved circular avatar files when a profile is renamed."""
+    if not old_name or not new_name or old_name == new_name:
+        return False
+    old_key = _profile_key(old_name)
+    new_key = _profile_key(new_name)
+    if old_key == new_key:
+        return False
+    base = pathlib.Path(avatars_dir or AVATARS_DIR)
+    if not base.is_dir():
+        return False
+    old_files = [p for p in base.glob(f"{old_key}_*.png") if p.is_file()]
+    if not old_files:
+        return False
+
+    for stale in list(base.glob(f"{new_key}_*.png")):
+        if stale.is_file():
+            with contextlib.suppress(OSError):
+                stale.unlink()
+
+    moved = False
+    for src_p in old_files:
+        suffix = src_p.name[len(old_key) :]
+        dst_p = base / f"{new_key}{suffix}"
+        with contextlib.suppress(OSError):
+            os.replace(src_p, dst_p)
+            with contextlib.suppress(OSError):
+                os.utime(dst_p, None)
+            moved = True
+
+    if moved:
+        _invalidate_avatar_cache(avatars_dir)
+    return moved
+
+
 def encode_rgba_png(width: int, height: int, rgba_bytes: bytes) -> bytes:
     """Encode raw RGBA bytes (row-major, top-to-bottom) as a standard PNG file."""
     stride = width * 4
@@ -218,7 +263,12 @@ def apply_circular_mask_bgra_to_rgba(
     return bytes(out)
 
 
-def _is_valid_avatar_rgba(rgba_64: bytes, *, strict_variance: bool = False) -> bool:
+def _is_valid_avatar_rgba(
+    rgba_64: bytes,
+    *,
+    strict_variance: bool = False,
+    reject_uniform: bool = False,
+) -> bool:
     """Verify a 64x64 circular RGBA buffer is not a failed all-black or blank uniform capture."""
     if len(rgba_64) != 64 * 64 * 4:
         return False
@@ -291,6 +341,21 @@ def _is_valid_avatar_rgba(rgba_64: bytes, *, strict_variance: bool = False) -> b
             if (abs(r - mean_r) + abs(g - mean_g) + abs(b - mean_b)) >= 28.0
         )
         if varied < max(10, total_inner // 10):
+            return False
+    elif reject_uniform:
+        # For manual screen snips, reject flat blank-background or single-color overlay crops
+        dyn_range = max(r_max - r_min, g_max - g_min, b_max - b_min)
+        if dyn_range < 16:
+            return False
+        mean_r = r_sum / total_inner
+        mean_g = g_sum / total_inner
+        mean_b = b_sum / total_inner
+        varied = sum(
+            1
+            for (r, g, b) in samples
+            if (abs(r - mean_r) + abs(g - mean_g) + abs(b - mean_b)) >= 18.0
+        )
+        if varied < 6:
             return False
 
     return True
@@ -405,8 +470,15 @@ def _win32_apis():
         user32.CloseClipboard.restype = wintypes.BOOL
         user32.GetClipboardData.argtypes = [wintypes.UINT]
         user32.GetClipboardData.restype = ctypes.c_void_p
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        user32.GetSystemMetrics.restype = ctypes.c_int
+        if hasattr(user32, "SetThreadDpiAwarenessContext"):
+            user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_ssize_t]
+            user32.SetThreadDpiAwarenessContext.restype = ctypes.c_ssize_t
 
         # gdi32 (64-bit HANDLE / HGDIOBJ / HDC safety)
+        gdi32.GetDeviceCaps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        gdi32.GetDeviceCaps.restype = ctypes.c_int
         gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
         gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
         gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
@@ -574,6 +646,149 @@ def _win32_apis():
     return user32, gdi32, kernel32, shell32, gdiplus
 
 
+@contextlib.contextmanager
+def _per_monitor_dpi_context() -> Iterator[bool]:
+    """Temporarily switch ONLY the calling thread to Per-Monitor DPI Aware v2."""
+    if sys.platform != "win32":
+        yield False
+        return
+    user32, _gdi32, _k32, _sh32, _gp = _win32_apis()
+    setter = getattr(user32, "SetThreadDpiAwarenessContext", None)
+    if setter is None:
+        yield False
+        return
+    prev = 0
+    for ctx in (-4, -3, -2):  # PER_MONITOR_AWARE_V2, PER_MONITOR_AWARE, SYSTEM_AWARE
+        with contextlib.suppress(Exception):
+            res = int(setter(ctx))
+            if res:
+                prev = res
+                break
+    try:
+        yield bool(prev)
+    finally:
+        if prev:
+            with contextlib.suppress(Exception):
+                setter(prev)
+
+
+_DPI_WORKER_STATE = threading.local()
+
+
+def _run_in_dpi_worker(fn: Callable[[], _T]) -> _T:
+    """Execute DPI-switching Win32 work on an isolated worker thread so GUI threads keep their native DPI context."""
+    if sys.platform != "win32" or getattr(_DPI_WORKER_STATE, "active", False):
+        return fn()
+
+    box: list[object] = [None, None]
+
+    def _worker() -> None:
+        _DPI_WORKER_STATE.active = True
+        try:
+            box[0] = fn()
+        except BaseException as exc:
+            box[1] = exc
+        finally:
+            _DPI_WORKER_STATE.active = False
+
+    worker = threading.Thread(target=_worker, name="FoxAvatarDpiWorker", daemon=True)
+    worker.start()
+    worker.join()
+    if box[1] is not None:
+        raise box[1]  # type: ignore[misc]
+    return box[0]  # type: ignore[return-value]
+
+
+def _read_virtual_screen_metrics_raw(user32: object) -> tuple[int, int, int, int]:
+    vx = int(user32.GetSystemMetrics(76))  # type: ignore[attr-defined]
+    vy = int(user32.GetSystemMetrics(77))  # type: ignore[attr-defined]
+    vw = int(user32.GetSystemMetrics(78))  # type: ignore[attr-defined]
+    vh = int(user32.GetSystemMetrics(79))  # type: ignore[attr-defined]
+    if vw <= 0 or vh <= 0:
+        vx, vy = 0, 0
+        vw = max(1, int(user32.GetSystemMetrics(0)))  # type: ignore[attr-defined]
+        vh = max(1, int(user32.GetSystemMetrics(1)))  # type: ignore[attr-defined]
+    return (vx, vy, vw, vh)
+
+
+def get_virtual_screen_metrics(*, physical: bool = False) -> tuple[int, int, int, int]:
+    """Return `(x, y, width, height)` of the Windows virtual desktop in logical or physical px."""
+    if sys.platform != "win32":
+        return (0, 0, 1920, 1080)
+    user32, gdi32, _k32, _sh32, _gp = _win32_apis()
+    if not physical:
+        return _read_virtual_screen_metrics_raw(user32)
+
+    def _read_physical() -> tuple[int, int, int, int]:
+        with _per_monitor_dpi_context() as switched:
+            vx, vy, vw, vh = _read_virtual_screen_metrics_raw(user32)
+            if not switched:
+                hdc = user32.GetDC(None)
+                if hdc:
+                    try:
+                        log_w = max(1, int(gdi32.GetDeviceCaps(hdc, 8)))  # HORZRES
+                        log_h = max(1, int(gdi32.GetDeviceCaps(hdc, 10)))  # VERTRES
+                        phys_w = int(gdi32.GetDeviceCaps(hdc, 118))  # DESKTOPHORZRES
+                        phys_h = int(gdi32.GetDeviceCaps(hdc, 117))  # DESKTOPVERTRES
+                        if phys_w > log_w or phys_h > log_h:
+                            sx = phys_w / float(log_w)
+                            sy = phys_h / float(log_h)
+                            vx = int(round(vx * sx))
+                            vy = int(round(vy * sy))
+                            vw = max(1, int(round(vw * sx)))
+                            vh = max(1, int(round(vh * sy)))
+                    finally:
+                        user32.ReleaseDC(None, hdc)
+            return (vx, vy, vw, vh)
+
+    return _run_in_dpi_worker(_read_physical)
+
+
+def logical_rect_to_physical_rect(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    logical_bounds: tuple[int, int, int, int] | None = None,
+    physical_bounds: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int, int, int]:
+    """Convert virtual-desktop logical coordinates `(x1, y1, x2, y2)` to physical device pixels."""
+    lvx, lvy, lvw, lvh = (
+        logical_bounds
+        if logical_bounds is not None
+        else get_virtual_screen_metrics(physical=False)
+    )
+    pvx, pvy, pvw, pvh = (
+        physical_bounds
+        if physical_bounds is not None
+        else get_virtual_screen_metrics(physical=True)
+    )
+    if lvw <= 0 or lvh <= 0 or pvw <= 0 or pvh <= 0 or (lvx, lvy, lvw, lvh) == (pvx, pvy, pvw, pvh):
+        return (x1, y1, x2, y2)
+    sx = pvw / float(lvw)
+    sy = pvh / float(lvh)
+    return (
+        pvx + int(round((x1 - lvx) * sx)),
+        pvy + int(round((y1 - lvy) * sy)),
+        pvx + int(round((x2 - lvx) * sx)),
+        pvy + int(round((y2 - lvy) * sy)),
+    )
+
+
+def _make_topdown_bgra_bmi(width: int, height: int) -> _BITMAPINFOHEADER:
+    import ctypes
+
+    bmi = _BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.biWidth = width
+    bmi.biHeight = -height  # top-down 32-bit DIB
+    bmi.biPlanes = 1
+    bmi.biBitCount = 32
+    bmi.biCompression = 0
+    return bmi
+
+
 def _render_gp_bitmap_to_square_rgba(
     gp_bitmap: int,
     target_size: int,
@@ -675,6 +890,7 @@ def _scale_hbitmap_to_circular_avatars_win32(
     *,
     avatars_dir: str | None = None,
     strict_variance: bool = False,
+    reject_uniform: bool = False,
 ) -> bool:
     """Center-crop a Win32 HBITMAP to a square, scale to 22x22 & 64x64, and save circular PNGs."""
     if sys.platform != "win32" or not hbitmap:
@@ -699,7 +915,11 @@ def _scale_hbitmap_to_circular_avatars_win32(
                 if (
                     rgba_22
                     and rgba_64
-                    and _is_valid_avatar_rgba(rgba_64, strict_variance=strict_variance)
+                    and _is_valid_avatar_rgba(
+                        rgba_64,
+                        strict_variance=strict_variance,
+                        reject_uniform=reject_uniform,
+                    )
                 ):
                     return _save_square_rgba_buffers(
                         profile_name, rgba_22, rgba_64, avatars_dir=avatars_dir
@@ -794,7 +1014,11 @@ def _scale_hbitmap_to_circular_avatars_win32(
         if (
             not rgba_22
             or not rgba_64
-            or not _is_valid_avatar_rgba(rgba_64, strict_variance=strict_variance)
+            or not _is_valid_avatar_rgba(
+                rgba_64,
+                strict_variance=strict_variance,
+                reject_uniform=reject_uniform,
+            )
         ):
             return False
         return _save_square_rgba_buffers(profile_name, rgba_22, rgba_64, avatars_dir=avatars_dir)
@@ -803,6 +1027,224 @@ def _scale_hbitmap_to_circular_avatars_win32(
         gdi32.DeleteDC(src_dc)
         if screen_dc:
             user32.ReleaseDC(None, screen_dc)
+
+
+class DesktopFreezeFrame(NamedTuple):
+    """Frozen desktop snapshot holding physical BGRA pixels and logical dimmed PPM preview."""
+
+    raw_bgra: bytes
+    phys_x: int
+    phys_y: int
+    phys_w: int
+    phys_h: int
+    log_x: int
+    log_y: int
+    log_w: int
+    log_h: int
+    dimmed_ppm: bytes
+
+
+def bgra_to_ppm_p6(
+    bgra: bytes,
+    width: int,
+    height: int,
+    *,
+    brightness: float = 0.62,
+) -> bytes:
+    """Encode top-down BGRA buffer to binary PPM (P6) with fast C-level LUT brightness scaling."""
+    if width <= 0 or height <= 0:
+        return b""
+    expected = width * height * 4
+    if len(bgra) < expected:
+        return b""
+    src = bgra if len(bgra) == expected else bgra[:expected]
+    lut = bytes(max(0, min(255, int(round(i * brightness)))) for i in range(256))
+    rgb = bytearray(width * height * 3)
+    rgb[0::3] = src[2::4].translate(lut)
+    rgb[1::3] = src[1::4].translate(lut)
+    rgb[2::3] = src[0::4].translate(lut)
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    return header + bytes(rgb)
+
+
+def capture_desktop_freeze_frame() -> DesktopFreezeFrame | None:
+    """Capture the full Windows virtual desktop at physical DPI before showing any snip overlay."""
+    if sys.platform != "win32":
+        return None
+    log_x, log_y, log_w, log_h = get_virtual_screen_metrics(physical=False)
+
+    def _capture() -> DesktopFreezeFrame | None:
+        try:
+            import ctypes
+
+            user32, gdi32, _k32, _sh32, _gp = _win32_apis()
+            srccopy = 0x00CC0020
+
+            with _per_monitor_dpi_context():
+                phys_x, phys_y, phys_w, phys_h = get_virtual_screen_metrics(physical=True)
+                if phys_w < 16 or phys_h < 16 or log_w < 16 or log_h < 16:
+                    return None
+                screen_dc = user32.GetDC(None)
+                if not screen_dc:
+                    return None
+
+                mem_dc = None
+                hbmp = None
+                old_mem = None
+                prev_dc = None
+                prev_dib = None
+                old_prev = None
+                try:
+                    mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+                    if not mem_dc:
+                        return None
+                    bmi = _make_topdown_bgra_bmi(phys_w, phys_h)
+                    bits_ptr = ctypes.c_void_p()
+                    hbmp = gdi32.CreateDIBSection(
+                        mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
+                    )
+                    if not hbmp or not bits_ptr.value:
+                        return None
+                    old_mem = gdi32.SelectObject(mem_dc, hbmp)
+                    ok_blt = bool(
+                        gdi32.BitBlt(mem_dc, 0, 0, phys_w, phys_h, screen_dc, phys_x, phys_y, srccopy)
+                    )
+                    if not ok_blt:
+                        return None
+                    raw_bgra = ctypes.string_at(bits_ptr.value, phys_w * phys_h * 4)
+                    step = max(4, ((len(raw_bgra) // 2048) // 4) * 4)
+                    if not any(
+                        raw_bgra[i] or raw_bgra[i + 1] or raw_bgra[i + 2]
+                        for i in range(0, len(raw_bgra) - 3, step)
+                    ):
+                        return None
+
+                    if (log_w, log_h) == (phys_w, phys_h):
+                        preview_bgra = raw_bgra
+                    else:
+                        prev_dc = gdi32.CreateCompatibleDC(screen_dc)
+                        if not prev_dc:
+                            return None
+                        prev_bmi = _make_topdown_bgra_bmi(log_w, log_h)
+                        prev_bits_ptr = ctypes.c_void_p()
+                        prev_dib = gdi32.CreateDIBSection(
+                            prev_dc, ctypes.byref(prev_bmi), 0, ctypes.byref(prev_bits_ptr), None, 0
+                        )
+                        if not prev_dib or not prev_bits_ptr.value:
+                            return None
+                        old_prev = gdi32.SelectObject(prev_dc, prev_dib)
+                        gdi32.SetStretchBltMode(prev_dc, 3)  # COLORONCOLOR
+                        if not gdi32.StretchBlt(
+                            prev_dc, 0, 0, log_w, log_h, mem_dc, 0, 0, phys_w, phys_h, srccopy
+                        ):
+                            return None
+                        preview_bgra = ctypes.string_at(prev_bits_ptr.value, log_w * log_h * 4)
+
+                    dimmed_ppm = bgra_to_ppm_p6(preview_bgra, log_w, log_h, brightness=0.62)
+                    return DesktopFreezeFrame(
+                        raw_bgra=raw_bgra,
+                        phys_x=phys_x,
+                        phys_y=phys_y,
+                        phys_w=phys_w,
+                        phys_h=phys_h,
+                        log_x=log_x,
+                        log_y=log_y,
+                        log_w=log_w,
+                        log_h=log_h,
+                        dimmed_ppm=dimmed_ppm,
+                    )
+                finally:
+                    if prev_dc and old_prev:
+                        gdi32.SelectObject(prev_dc, old_prev)
+                    if prev_dib:
+                        gdi32.DeleteObject(prev_dib)
+                    if prev_dc:
+                        gdi32.DeleteDC(prev_dc)
+                    if mem_dc and old_mem:
+                        gdi32.SelectObject(mem_dc, old_mem)
+                    if hbmp:
+                        gdi32.DeleteObject(hbmp)
+                    if mem_dc:
+                        gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+        except Exception:
+            return None
+
+    return _run_in_dpi_worker(_capture)
+
+
+def save_avatar_from_bgra_crop(
+    profile_name: str,
+    raw_bgra: bytes,
+    frame_w: int,
+    frame_h: int,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    avatars_dir: str | None = None,
+    strict_variance: bool = False,
+    reject_uniform: bool = True,
+) -> bool:
+    """Crop `(x1, y1, x2, y2)` directly from an in-memory top-down BGRA frame and save avatar."""
+    if sys.platform != "win32" or frame_w <= 0 or frame_h <= 0:
+        return False
+    if len(raw_bgra) < frame_w * frame_h * 4:
+        return False
+    left = max(0, min(x1, x2))
+    right = min(frame_w, max(x1, x2))
+    top = max(0, min(y1, y2))
+    bottom = min(frame_h, max(y1, y2))
+    cw = right - left
+    ch = bottom - top
+    if cw < 8 or ch < 8:
+        return False
+    try:
+        import ctypes
+
+        user32, gdi32, _k32, _sh32, _gp = _win32_apis()
+        screen_dc = user32.GetDC(None)
+        if not screen_dc:
+            return False
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        user32.ReleaseDC(None, screen_dc)
+        if not mem_dc:
+            return False
+
+        bmi = _make_topdown_bgra_bmi(cw, ch)
+        bits_ptr = ctypes.c_void_p()
+        hbmp = gdi32.CreateDIBSection(
+            mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
+        )
+        gdi32.DeleteDC(mem_dc)
+        if not hbmp or not bits_ptr.value:
+            if hbmp:
+                gdi32.DeleteObject(hbmp)
+            return False
+
+        try:
+            row_bytes = cw * 4
+            src_stride = frame_w * 4
+            crop_buf = bytearray(ch * row_bytes)
+            src_view = memoryview(raw_bgra)
+            for row in range(ch):
+                src_off = (top + row) * src_stride + (left * 4)
+                dst_off = row * row_bytes
+                crop_buf[dst_off : dst_off + row_bytes] = src_view[src_off : src_off + row_bytes]
+            crop_bytes = bytes(crop_buf)
+            ctypes.memmove(bits_ptr.value, crop_bytes, len(crop_bytes))
+            return _scale_hbitmap_to_circular_avatars_win32(
+                int(hbmp),
+                profile_name,
+                avatars_dir=avatars_dir,
+                strict_variance=strict_variance,
+                reject_uniform=reject_uniform,
+            )
+        finally:
+            gdi32.DeleteObject(hbmp)
+    except Exception:
+        return False
 
 
 def save_avatar_from_screen_rect(
@@ -814,70 +1256,77 @@ def save_avatar_from_screen_rect(
     *,
     avatars_dir: str | None = None,
     strict_variance: bool = False,
+    reject_uniform: bool = True,
+    coords_are_physical: bool = False,
 ) -> bool:
     """Capture screen region `(x1, y1, x2, y2)` via Win32 GDI and save as circular avatar."""
     if sys.platform != "win32":
         return False
-    left, right = min(x1, x2), max(x1, x2)
-    top, bottom = min(y1, y2), max(y1, y2)
-    w = right - left
-    h = bottom - top
-    if w < 8 or h < 8:
-        return False
-    try:
-        import ctypes
+    log_bounds = None if coords_are_physical else get_virtual_screen_metrics(physical=False)
 
-        user32, gdi32, _k32, _sh32, _gp = _win32_apis()
-        srccopy = 0x00CC0020
-
-        screen_dc = user32.GetDC(None)
-        if not screen_dc:
-            return False
-        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
-        if not mem_dc:
-            user32.ReleaseDC(None, screen_dc)
-            return False
-
-        bmi = _BITMAPINFOHEADER()
-        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
-        bmi.biWidth = w
-        bmi.biHeight = -h  # top-down 32-bit DIB
-        bmi.biPlanes = 1
-        bmi.biBitCount = 32
-        bmi.biCompression = 0
-
-        bits_ptr = ctypes.c_void_p()
-        hbmp = gdi32.CreateDIBSection(
-            mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
-        )
-        if not hbmp or not bits_ptr.value:
-            gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(None, screen_dc)
-            return False
-
-        old = gdi32.SelectObject(mem_dc, hbmp)
-        ok_blt = False
-        try:
-            ok_blt = bool(gdi32.BitBlt(mem_dc, 0, 0, w, h, screen_dc, left, top, srccopy))
-        finally:
-            if old:
-                gdi32.SelectObject(mem_dc, old)
-            gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(None, screen_dc)
-
-        try:
-            if not ok_blt:
-                return False
-            return _scale_hbitmap_to_circular_avatars_win32(
-                int(hbmp),
-                profile_name,
-                avatars_dir=avatars_dir,
-                strict_variance=strict_variance,
+    def _capture_rect() -> bool:
+        rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+        if not coords_are_physical:
+            rx1, ry1, rx2, ry2 = logical_rect_to_physical_rect(
+                rx1, ry1, rx2, ry2, logical_bounds=log_bounds
             )
-        finally:
-            gdi32.DeleteObject(hbmp)
-    except Exception:
-        return False
+        left, right = min(rx1, rx2), max(rx1, rx2)
+        top, bottom = min(ry1, ry2), max(ry1, ry2)
+        w = right - left
+        h = bottom - top
+        if w < 8 or h < 8:
+            return False
+        try:
+            import ctypes
+
+            user32, gdi32, _k32, _sh32, _gp = _win32_apis()
+            srccopy = 0x00CC0020
+
+            with _per_monitor_dpi_context():
+                screen_dc = user32.GetDC(None)
+                if not screen_dc:
+                    return False
+                mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+                if not mem_dc:
+                    user32.ReleaseDC(None, screen_dc)
+                    return False
+
+                bmi = _make_topdown_bgra_bmi(w, h)
+                bits_ptr = ctypes.c_void_p()
+                hbmp = gdi32.CreateDIBSection(
+                    mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
+                )
+                if not hbmp or not bits_ptr.value:
+                    gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+                    return False
+
+                old = gdi32.SelectObject(mem_dc, hbmp)
+                ok_blt = False
+                try:
+                    ok_blt = bool(gdi32.BitBlt(mem_dc, 0, 0, w, h, screen_dc, left, top, srccopy))
+                finally:
+                    if old:
+                        gdi32.SelectObject(mem_dc, old)
+                    gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+
+            try:
+                if not ok_blt:
+                    return False
+                return _scale_hbitmap_to_circular_avatars_win32(
+                    int(hbmp),
+                    profile_name,
+                    avatars_dir=avatars_dir,
+                    strict_variance=strict_variance,
+                    reject_uniform=reject_uniform,
+                )
+            finally:
+                gdi32.DeleteObject(hbmp)
+        except Exception:
+            return False
+
+    return _run_in_dpi_worker(_capture_rect)
 
 
 def _save_avatar_from_dib_memory(
@@ -1200,6 +1649,35 @@ def _box_has_avatar_content_bgra(
     return max(r_max - r_min, g_max - g_min, b_max - b_min) >= 28
 
 
+def detect_foreground_running_profile(
+    running_names: tuple[str, ...] | list[str],
+) -> str | None:
+    """Return the running profile name matching the active Win32 foreground window title."""
+    if sys.platform != "win32" or not running_names:
+        return None
+    try:
+        import ctypes
+
+        user32, _gdi32, _k32, _sh32, _gp = _win32_apis()
+        fg = user32.GetForegroundWindow()
+        if not fg or user32.IsIconic(fg):
+            return None
+        length = user32.GetWindowTextLengthW(fg)
+        if length <= 0:
+            return None
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(fg, buf, length + 1)
+        title = buf.value or ""
+        for pname in sorted(running_names, key=len, reverse=True):
+            if title.startswith(f"[{pname}] "):
+                return pname
+        if len(running_names) == 1 and not title.startswith("[") and ("Muse" in title or " — " in title):
+            return running_names[0]
+        return None
+    except Exception:
+        return None
+
+
 def find_muse_connected_avatar_box_bgra(
     raw_bgra: bytes,
     width: int,
@@ -1209,28 +1687,30 @@ def find_muse_connected_avatar_box_bgra(
     if width < 160 or height < 180 or len(raw_bgra) < width * height * 4:
         return None
 
-    # Scan with stride=2 to locate the ~14x14 green `⚡ Connected` circle quickly
+    def _is_green(r: int, g: int, b: int) -> bool:
+        return g >= 115 and r < 85 and b < 140 and (g - r) >= 60 and (g - b) >= 35
+
+    # Scan with stride=2 to locate the green `⚡ Connected` badge across 100%-200% DPI scales
     visited: set[tuple[int, int]] = set()
-    for sy in range(160, height - 10, 2):
+    for sy in range(80, height - 10, 2):
         row_off = sy * width * 4
-        for sx in range(20, width - 60, 2):
+        for sx in range(14, width - 24, 2):
             idx = row_off + sx * 4
             b = raw_bgra[idx]
             g = raw_bgra[idx + 1]
             r = raw_bgra[idx + 2]
-            if g > 120 and r < 60 and b < 60 and (sx, sy) not in visited:
-                # Flood/window gather around (sx, sy) within +/- 18px
+            if _is_green(r, g, b) and (sx, sy) not in visited:
                 gx_min = sx
                 gx_max = sx
                 gy_min = sy
                 gy_max = sy
                 count = 0
-                for yy in range(max(0, sy - 16), min(height, sy + 18)):
+                for yy in range(max(0, sy - 20), min(height, sy + 40)):
                     r_off = yy * width * 4
-                    for xx in range(max(0, sx - 16), min(width, sx + 18)):
+                    for xx in range(max(0, sx - 24), min(width, sx + 40)):
                         ii = r_off + xx * 4
                         bb, gg, rr = raw_bgra[ii], raw_bgra[ii + 1], raw_bgra[ii + 2]
-                        if gg > 120 and rr < 60 and bb < 60:
+                        if _is_green(rr, gg, bb):
                             visited.add((xx, yy))
                             count += 1
                             if xx < gx_min:
@@ -1243,23 +1723,30 @@ def find_muse_connected_avatar_box_bgra(
                                 gy_max = yy
                 gw = gx_max - gx_min + 1
                 gh = gy_max - gy_min + 1
-                if 9 <= gw <= 26 and 9 <= gh <= 26 and 55 <= count <= 420:
-                    scale = max(0.85, min(2.0, (gw + gh) / 28.0))
+                if (
+                    8 <= gw <= 38
+                    and 8 <= gh <= 38
+                    and 40 <= count <= 950
+                    and gw <= gh * 1.7
+                    and gh <= gw * 1.7
+                ):
+                    scale = max(0.80, min(2.5, (gw + gh) / 28.0))
                     gx_c = (gx_min + gx_max) / 2.0
                     gy_c = (gy_min + gy_max) / 2.0
                     x1 = int(round(gx_c - 13.0 * scale))
-                    y1 = int(round(gy_c - 174.0 * scale))
                     x2 = int(round(gx_c + 109.0 * scale))
-                    y2 = int(round(gy_c - 52.0 * scale))
-                    if (
-                        x1 >= 0
-                        and y1 >= 0
-                        and x2 <= width
-                        and y2 <= height
-                        and (x2 - x1) >= 48
-                        and _box_has_avatar_content_bgra(raw_bgra, width, x1, y1, x2, y2)
-                    ):
-                        return (x1, y1, x2, y2)
+                    side = x2 - x1
+                    if side < 44 or x1 < 0 or x2 > width:
+                        continue
+                    for v_mult in (1.0, 0.88, 1.12):
+                        y1 = int(round(gy_c - 174.0 * scale * v_mult))
+                        y2 = y1 + side
+                        if (
+                            y1 >= 0
+                            and y2 <= height
+                            and _box_has_avatar_content_bgra(raw_bgra, width, x1, y1, x2, y2)
+                        ):
+                            return (x1, y1, x2, y2)
     return None
 
 
@@ -1267,6 +1754,7 @@ def auto_capture_muse_avatar_from_active_window(
     profile_name: str,
     *,
     avatars_dir: str | None = None,
+    allow_unprefixed_single: bool = True,
 ) -> bool:
     """Passively inspect the foreground Camoufox window for the Muse `⚡ Connected` card and auto-save its avatar."""
     if sys.platform != "win32" or not profile_name:
@@ -1287,78 +1775,89 @@ def auto_capture_muse_avatar_from_active_window(
         user32.GetWindowTextW(fg, buf, length + 1)
         title = buf.value or ""
         prefix = f"[{profile_name}] "
-        if not (title.startswith(prefix) or "Muse" in title or " — " in title):
-            return False
-
-        rect = _RECT()
-        if not user32.GetWindowRect(fg, ctypes.byref(rect)):
-            return False
-        win_w = int(rect.right - rect.left)
-        win_h = int(rect.bottom - rect.top)
-        if win_w < 300 or win_h < 300:
-            return False
-
-        # Only scan the top 480px band of the browser window where the Muse card opens
-        scan_x = int(rect.left) + 8
-        scan_y = int(rect.top) + 70
-        scan_w = min(win_w - 16, 1600)
-        scan_h = min(win_h - 80, 440)
-        if scan_w < 200 or scan_h < 200:
+        if not (
+            title.startswith(prefix)
+            or (
+                allow_unprefixed_single
+                and not title.startswith("[")
+                and ("Muse" in title or " — " in title)
+            )
+        ):
             return False
 
         srccopy = 0x00CC0020
-        screen_dc = user32.GetDC(None)
-        if not screen_dc:
-            return False
-        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
-        if not mem_dc:
-            user32.ReleaseDC(None, screen_dc)
-            return False
 
-        bmi = _BITMAPINFOHEADER()
-        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
-        bmi.biWidth = scan_w
-        bmi.biHeight = -scan_h
-        bmi.biPlanes = 1
-        bmi.biBitCount = 32
-        bmi.biCompression = 0
+        def _capture_fg_and_save() -> bool:
+            raw_bgra = b""
+            scan_w = 0
+            scan_h = 0
+            with _per_monitor_dpi_context():
+                rect = _RECT()
+                if not user32.GetWindowRect(fg, ctypes.byref(rect)):
+                    return False
+                win_w = int(rect.right - rect.left)
+                win_h = int(rect.bottom - rect.top)
+                if win_w < 300 or win_h < 300:
+                    return False
 
-        bits_ptr = ctypes.c_void_p()
-        dib = gdi32.CreateDIBSection(
-            mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
-        )
-        if not dib or not bits_ptr.value:
-            gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(None, screen_dc)
-            return False
+                # Scan the top band of the browser window in physical DPI coordinates
+                scan_x = int(rect.left) + 8
+                scan_y = int(rect.top) + 48
+                scan_w = min(win_w - 16, 2560)
+                scan_h = min(win_h - 56, 760)
+                if scan_w < 200 or scan_h < 200:
+                    return False
 
-        old = gdi32.SelectObject(mem_dc, dib)
-        raw_bgra = b""
-        try:
-            if gdi32.BitBlt(mem_dc, 0, 0, scan_w, scan_h, screen_dc, scan_x, scan_y, srccopy):
-                raw_bgra = ctypes.string_at(bits_ptr.value, scan_w * scan_h * 4)
-        finally:
-            if old:
-                gdi32.SelectObject(mem_dc, old)
-            gdi32.DeleteObject(dib)
-            gdi32.DeleteDC(mem_dc)
-            user32.ReleaseDC(None, screen_dc)
+                screen_dc = user32.GetDC(None)
+                if not screen_dc:
+                    return False
+                mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+                if not mem_dc:
+                    user32.ReleaseDC(None, screen_dc)
+                    return False
 
-        if not raw_bgra:
-            return False
-        box = find_muse_connected_avatar_box_bgra(raw_bgra, scan_w, scan_h)
-        if box is None:
-            return False
-        bx1, by1, bx2, by2 = box
-        return save_avatar_from_screen_rect(
-            profile_name,
-            scan_x + bx1,
-            scan_y + by1,
-            scan_x + bx2,
-            scan_y + by2,
-            avatars_dir=avatars_dir,
-            strict_variance=True,
-        )
+                bmi = _make_topdown_bgra_bmi(scan_w, scan_h)
+                bits_ptr = ctypes.c_void_p()
+                dib = gdi32.CreateDIBSection(
+                    mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits_ptr), None, 0
+                )
+                if not dib or not bits_ptr.value:
+                    gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+                    return False
+
+                old = gdi32.SelectObject(mem_dc, dib)
+                try:
+                    if gdi32.BitBlt(mem_dc, 0, 0, scan_w, scan_h, screen_dc, scan_x, scan_y, srccopy):
+                        raw_bgra = ctypes.string_at(bits_ptr.value, scan_w * scan_h * 4)
+                finally:
+                    if old:
+                        gdi32.SelectObject(mem_dc, old)
+                    gdi32.DeleteObject(dib)
+                    gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+
+            if not raw_bgra:
+                return False
+            box = find_muse_connected_avatar_box_bgra(raw_bgra, scan_w, scan_h)
+            if box is None:
+                return False
+            bx1, by1, bx2, by2 = box
+            return save_avatar_from_bgra_crop(
+                profile_name,
+                raw_bgra,
+                scan_w,
+                scan_h,
+                bx1,
+                by1,
+                bx2,
+                by2,
+                avatars_dir=avatars_dir,
+                strict_variance=True,
+                reject_uniform=True,
+            )
+
+        return _run_in_dpi_worker(_capture_fg_and_save)
     except Exception:
         return False
 

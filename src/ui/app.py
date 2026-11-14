@@ -1233,6 +1233,8 @@ class App:
                             count=len(res["scanned_names"]),
                         )
                     )
+                else:
+                    self._log(get_string("mail_scanner_circuit_breaker"))
             except Exception as exc:
                 logger.error("Error in daily mail auto-scan: %s", exc)
             finally:

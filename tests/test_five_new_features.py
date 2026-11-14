@@ -4204,6 +4204,34 @@ def test_detect_meta_checkpoint_mail_and_safe_sequential_scanner():
     assert res_cb["aborted"] is True
     assert len(calls) == 3
 
+    # 6. Per-provider circuit breaker skips dead provider (Hotmail 502) while scanning healthy providers
+    mixed_targets = [
+        ("H1", "h1@hotmail.com", "M.C500_1"),
+        ("H2", "h2@hotmail.com", "M.C500_2"),
+        ("H3", "h3@hotmail.com", "M.C500_3"),
+        ("H4", "h4@hotmail.com", "M.C500_4"),
+        ("L1", "user1@luuvan.site", "https://luuvan.site/"),
+        ("G1", "user2@polccat.site", "https://generator.email/user2@polccat.site"),
+    ]
+    mixed_calls = []
+
+    def _mixed_fetch(em, tok, top=4, timeout=12):
+        mixed_calls.append(em)
+        if em.endswith("@hotmail.com"):
+            return False, "Không đọc được hòm thư từ Microsoft Graph / IMAP", []
+        return True, "", clean_msgs
+
+    res_mixed = run_safe_mail_checkpoint_scan(
+        mixed_targets,
+        delay_range=(0.0, 0.0),
+        max_consecutive_errors=3,
+        fetch_fn=_mixed_fetch,
+    )
+    assert res_mixed["aborted"] is False
+    assert res_mixed["tripped_providers"] == {"hotmail"}
+    assert "h4@hotmail.com" not in mixed_calls
+    assert res_mixed["scanned_names"] == {"L1", "G1"}
+
 
 def test_monitor_mail_checkpoint_persistence_and_quarantine(isolated_pm, tmp_path):
     import datetime as dt
@@ -5020,5 +5048,502 @@ def test_detect_meta_checkpoint_mail_multilingual() -> None:
         assert detect_meta_checkpoint_mail([{"subject": subj, "preview": ""}]) is None
         assert extract_otp_from_text(subj, "123456") == ""
 
+
+def test_avatar_high_dpi_freeze_frame_and_uniform_rejection(tmp_path) -> None:
+    """Verify High-DPI 125% crop mapping, blank/uniform rejection, PPM PhotoImage, and multi-DPI Muse box."""
+    import ctypes
+    import sys
+
+    from src.services.avatar_store import (
+        _is_valid_avatar_rgba,
+        _per_monitor_dpi_context,
+        apply_circular_mask_bgra_to_rgba,
+        bgra_to_ppm_p6,
+        find_muse_connected_avatar_box_bgra,
+        get_avatar_path,
+        logical_rect_to_physical_rect,
+        remove_avatar,
+        save_avatar_from_bgra_crop,
+    )
+
+    # 1. High-DPI 125% mapping (2048x1152 logical -> 2560x1440 physical)
+    px1, py1, px2, py2 = logical_rect_to_physical_rect(
+        1000,
+        400,
+        1080,
+        480,
+        logical_bounds=(0, 0, 2048, 1152),
+        physical_bounds=(0, 0, 2560, 1440),
+    )
+    assert (px1, py1, px2, py2) == (1250, 500, 1350, 600)
+
+    if sys.platform == "win32":
+        fw, fh = 2560, 1440
+        # Build 2560x1440 #FCFCFC background frame with textured avatar ONLY at physical (1250..1350, 500..600)
+        bg_row = b"\xfc\xfc\xfc\xff" * fw
+        frame_buf = bytearray(bg_row * fh)
+        for yy in range(500, 600):
+            row_start = yy * fw * 4
+            for xx in range(1250, 1350):
+                off = row_start + xx * 4
+                frame_buf[off] = ((xx * 7) ^ yy) & 0xFF
+                frame_buf[off + 1] = ((yy * 5) + xx) & 0xFF
+                frame_buf[off + 2] = ((xx + yy) * 3) & 0xFF
+                frame_buf[off + 3] = 255
+        raw_frame = bytes(frame_buf)
+
+        av_dir = str(tmp_path / "avatars_hidpi")
+        # Unmapped logical coords hit blank #FCFCFC and must be rejected without writing files
+        assert (
+            save_avatar_from_bgra_crop(
+                "MonicaDPI",
+                raw_frame,
+                fw,
+                fh,
+                1000,
+                400,
+                1080,
+                480,
+                avatars_dir=av_dir,
+                reject_uniform=True,
+            )
+            is False
+        )
+        assert get_avatar_path("MonicaDPI", 22, avatars_dir=av_dir) is None
+
+        # Mapped physical coords capture the real textured avatar cleanly
+        assert (
+            save_avatar_from_bgra_crop(
+                "MonicaDPI",
+                raw_frame,
+                fw,
+                fh,
+                px1,
+                py1,
+                px2,
+                py2,
+                avatars_dir=av_dir,
+                reject_uniform=True,
+            )
+            is True
+        )
+        assert get_avatar_path("MonicaDPI", 22, avatars_dir=av_dir) is not None
+        assert remove_avatar("MonicaDPI", avatars_dir=av_dir) is True
+
+        # 2. Blank/uniform patches (#FCFCFC, #09090B, uniform gray) rejected under reject_uniform=True
+        blank_dir = str(tmp_path / "avatars_blank")
+        for b, g, r in ((252, 252, 252), (11, 9, 9), (128, 128, 128)):
+            patch = bytes([b, g, r, 255]) * (96 * 96)
+            assert (
+                save_avatar_from_bgra_crop(
+                    "BlankTest",
+                    patch,
+                    96,
+                    96,
+                    0,
+                    0,
+                    96,
+                    96,
+                    avatars_dir=blank_dir,
+                    reject_uniform=True,
+                )
+                is False
+            )
+        assert get_avatar_path("BlankTest", 22, avatars_dir=blank_dir) is None
+
+    # Direct RGBA uniform guard check (platform-independent)
+    for b, g, r in ((252, 252, 252), (11, 9, 9), (128, 128, 128)):
+        rgba_u = apply_circular_mask_bgra_to_rgba(bytes([b, g, r, 255]) * (64 * 64), 64)
+        assert _is_valid_avatar_rgba(rgba_u, reject_uniform=True) is False
+
+    # 3. bgra_to_ppm_p6 + tk.PhotoImage round-trip at 2048x1152 logical High-DPI canvas size
+    pw, ph = 2048, 1152
+    sample_bgra = b"\x64\xc8\x32\xff" * (pw * ph)  # BGR=(100,200,50) -> RGB=(50,200,100)
+    ppm = bgra_to_ppm_p6(sample_bgra, pw, ph, brightness=0.5)
+    expected_hdr = f"P6\n{pw} {ph}\n255\n".encode("ascii")
+    assert ppm.startswith(expected_hdr)
+    assert len(ppm) == len(expected_hdr) + pw * ph * 3
+    # RGB scaled by 0.5: (25, 100, 50)
+    assert ppm[len(expected_hdr) : len(expected_hdr) + 3] == bytes([25, 100, 50])
+
+    tk_photo_dims: tuple[int, int] | None = None
+    try:
+        import gc
+        import tkinter as tk
+
+        tk_root = tk.Tk()
+    except Exception:
+        tk_root = None
+
+    if tk_root is not None:
+        img = None
+        try:
+            tk_root.withdraw()
+            img = tk.PhotoImage(data=ppm, master=tk_root)
+            tk_photo_dims = (img.width(), img.height())
+        finally:
+            del img
+            tk_root.destroy()
+            if getattr(tk, "_default_root", None) is tk_root:
+                tk._default_root = None
+            del tk_root
+            gc.collect()
+        assert tk_photo_dims == (pw, ph)
+
+    # 4. Thread-isolated _per_monitor_dpi_context never changes process DPI awareness
+    if sys.platform == "win32":
+        import threading
+
+        shcore = ctypes.windll.shcore
+        user32 = ctypes.windll.user32
+        before_aw = ctypes.c_int(-1)
+        shcore.GetProcessDpiAwareness(0, ctypes.byref(before_aw))
+        before_w = user32.GetSystemMetrics(0)
+        before_h = user32.GetSystemMetrics(1)
+
+        with _per_monitor_dpi_context():
+            assert user32.GetSystemMetrics(0) >= before_w
+            assert user32.GetSystemMetrics(1) >= before_h
+
+            other_thread_obs: list[int] = []
+
+            def _probe_other_thread() -> None:
+                aw = ctypes.c_int(-1)
+                shcore.GetProcessDpiAwareness(0, ctypes.byref(aw))
+                other_thread_obs.extend(
+                    [aw.value, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)]
+                )
+
+            probe = threading.Thread(target=_probe_other_thread)
+            probe.start()
+            probe.join(timeout=5.0)
+            assert other_thread_obs == [before_aw.value, before_w, before_h]
+
+        try:
+            with _per_monitor_dpi_context():
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+
+        after_aw = ctypes.c_int(-1)
+        shcore.GetProcessDpiAwareness(0, ctypes.byref(after_aw))
+        assert after_aw.value == before_aw.value
+        assert user32.GetSystemMetrics(0) == before_w
+        assert user32.GetSystemMetrics(1) == before_h
+
+    # 5. Multi-DPI (1.0x, 1.25x, 1.5x) & Tailwind green (#22C55E, #10B981) Muse badge detection
+    for scale_f, (bgr) in (
+        (1.0, (94, 197, 34)),    # #22C55E at 100% DPI
+        (1.25, (129, 185, 16)),  # #10B981 at 125% DPI
+        (1.5, (94, 197, 34)),    # #22C55E at 150% DPI
+    ):
+        mw, mh = 560, 480
+        mframe = bytearray(b"\xfc\xfc\xfc\xff" * (mw * mh))
+        badge_sz = int(round(14 * scale_f))
+        bx0, by0 = 120, int(round(320 * (scale_f / 1.5 + 0.35)))
+        for yy in range(by0, by0 + badge_sz):
+            for xx in range(bx0, bx0 + badge_sz):
+                idx = (yy * mw + xx) * 4
+                mframe[idx] = bgr[0]
+                mframe[idx + 1] = bgr[1]
+                mframe[idx + 2] = bgr[2]
+                mframe[idx + 3] = 255
+        # Blank frame without avatar must return None
+        assert find_muse_connected_avatar_box_bgra(bytes(mframe), mw, mh) is None
+
+        # Draw textured avatar directly above badge
+        gx_c = bx0 + (badge_sz - 1) / 2.0
+        gy_c = by0 + (badge_sz - 1) / 2.0
+        ax1 = int(round(gx_c - 15.0 * scale_f))
+        ax2 = int(round(gx_c + 112.0 * scale_f))
+        ay1 = int(round(gy_c - 180.0 * scale_f))
+        ay2 = int(round(gy_c - 48.0 * scale_f))
+        for yy in range(max(0, ay1), min(mh, ay2)):
+            for xx in range(max(0, ax1), min(mw, ax2)):
+                idx = (yy * mw + xx) * 4
+                mframe[idx] = (xx * 5) & 0xFF
+                mframe[idx + 1] = (yy * 3) & 0xFF
+                mframe[idx + 2] = ((xx ^ yy) * 4) & 0xFF
+                mframe[idx + 3] = 255
+        detected = find_muse_connected_avatar_box_bgra(bytes(mframe), mw, mh)
+        assert detected is not None, f"Failed multi-DPI detection at scale {scale_f}"
+
+
+def test_rename_avatar_and_profile_manager_rename_migrates_avatars(isolated_pm, tmp_path):
+    """Profile rename migrates saved circular avatars and removes the old key."""
+    import hashlib
+    import pathlib
+    import shutil
+
+    from src.services.avatar_store import (
+        avatar_version,
+        get_avatar_path,
+        rename_avatar,
+        save_avatar_from_bgra_crop,
+    )
+
+    frame_bgra = bytes(
+        (x * 7 + y * 3) & 0xFF if c < 3 else 255
+        for y in range(96)
+        for x in range(96)
+        for c in range(4)
+    )
+    av_dir = tmp_path / "av_direct"
+    assert save_avatar_from_bgra_crop(
+        "OldName",
+        frame_bgra,
+        96,
+        96,
+        0,
+        0,
+        96,
+        96,
+        avatars_dir=str(av_dir),
+        reject_uniform=True,
+    )
+    old_key = hashlib.sha1(b"OldName").hexdigest()[:16]
+    new_key = hashlib.sha1(b"#1 Kayla").hexdigest()[:16]
+    ver_64 = av_dir / f"{old_key}_64_123456.png"
+    shutil.copyfile(av_dir / f"{old_key}_64.png", ver_64)
+
+    assert rename_avatar("OldName", "OldName", avatars_dir=str(av_dir)) is False
+    assert rename_avatar("MissingName", "#1 Kayla", avatars_dir=str(av_dir)) is False
+    assert rename_avatar("OldName", "#1 Kayla", avatars_dir=str(av_dir)) is True
+
+    assert get_avatar_path("OldName", 22, avatars_dir=str(av_dir)) is None
+    assert list(av_dir.glob(f"{old_key}_*")) == []
+    assert (av_dir / f"{new_key}_22.png").is_file()
+    assert (av_dir / f"{new_key}_64.png").is_file()
+    assert (av_dir / f"{new_key}_64_123456.png").is_file()
+    assert get_avatar_path("#1 Kayla", 22, avatars_dir=str(av_dir)) is not None
+    p64 = get_avatar_path("#1 Kayla", 64, avatars_dir=str(av_dir))
+    assert p64 is not None and pathlib.Path(p64).name.startswith(f"{new_key}_64")
+    assert avatar_version("#1 Kayla", avatars_dir=str(av_dir)) > 0.0
+
+    # ProfileManager.update_profile hook on isolated temp workspace
+    assert isolated_pm.add_profile("FredaOrig", "http://1.2.3.4:8080", "windows")
+    av_pm = tmp_path / "avatars"
+    assert save_avatar_from_bgra_crop(
+        "FredaOrig",
+        frame_bgra,
+        96,
+        96,
+        0,
+        0,
+        96,
+        96,
+        avatars_dir=str(av_pm),
+        reject_uniform=True,
+    )
+    assert isolated_pm.update_profile("FredaOrig", "#1 Kayla", "http://1.2.3.4:8080", "windows")
+    assert get_avatar_path("FredaOrig", 64, avatars_dir=str(av_pm)) is None
+    assert get_avatar_path("#1 Kayla", 64, avatars_dir=str(av_pm)) is not None
+
+
+def test_dpi_worker_never_mutates_caller_or_tk_thread_dpi():
+    """Avatar Win32 capture runs DPI switching on a worker thread without mutating Tk thread DPI."""
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Win32 DPI context isolation test only applies to Windows")
+
+    import ctypes
+    import gc
+    import threading
+    import tkinter as tk
+
+    from src.services.avatar_store import (
+        auto_capture_muse_avatar_from_active_window,
+        capture_desktop_freeze_frame,
+        get_virtual_screen_metrics,
+    )
+
+    user32 = ctypes.WinDLL("user32")
+    get_ctx = getattr(user32, "GetThreadDpiAwarenessContext", None)
+    are_eq = getattr(user32, "AreDpiAwarenessContextsEqual", None)
+    if get_ctx is not None:
+        get_ctx.argtypes = []
+        get_ctx.restype = ctypes.c_ssize_t
+    if are_eq is not None:
+        are_eq.argtypes = [ctypes.c_ssize_t, ctypes.c_ssize_t]
+        are_eq.restype = ctypes.c_int
+
+    errors: list[BaseException] = []
+
+    def _tk_worker() -> None:
+        tk_root = None
+        try:
+            tk_root = tk.Tk()
+            tk_root.withdraw()
+            before_ctx = int(get_ctx()) if get_ctx is not None else 0
+            before_sm = (int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
+            before_tk = (tk_root.winfo_screenwidth(), tk_root.winfo_screenheight())
+
+            phys = get_virtual_screen_metrics(physical=True)
+            assert phys[2] > 0 and phys[3] > 0
+            capture_desktop_freeze_frame()
+            auto_capture_muse_avatar_from_active_window("__nonexistent_profile__")
+
+            after_ctx = int(get_ctx()) if get_ctx is not None else 0
+            if get_ctx is not None and are_eq is not None:
+                assert are_eq(before_ctx, after_ctx) != 0
+            elif get_ctx is not None:
+                assert after_ctx == before_ctx
+            assert (int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))) == before_sm
+            assert (tk_root.winfo_screenwidth(), tk_root.winfo_screenheight()) == before_tk
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if tk_root is not None:
+                tk_root.destroy()
+                if getattr(tk, "_default_root", None) is tk_root:
+                    tk._default_root = None
+                del tk_root
+            gc.collect()
+
+    t = threading.Thread(target=_tk_worker)
+    t.start()
+    t.join(timeout=15.0)
+    assert not t.is_alive()
+    assert not errors
+
+
+def test_floating_tab_bar_snip_recovery_and_reopen_visibility_subprocess():
+    """FoxTab recovers visibility after external snipper close and across close/reopen cycles."""
+    import os
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Floating tab bar Win32 subprocess test only applies to Windows")
+
+    child = r"""
+import ctypes, os, time
+from ctypes import wintypes
+from src.ui.components.floating_tab_bar import FloatingProfileTabBar
+
+u = ctypes.WinDLL("user32")
+pid = os.getpid()
+GWL_EXSTYLE = -20
+WM_CLOSE = 0x0010
+REQUIRED_BAR_FLAGS = 0x08000088  # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+
+get_long = getattr(u, "GetWindowLongPtrW", u.GetWindowLongW)
+get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+get_long.restype = ctypes.c_ssize_t
+
+u.IsWindow.argtypes = [wintypes.HWND]
+u.IsWindow.restype = wintypes.BOOL
+u.IsWindowVisible.argtypes = [wintypes.HWND]
+u.IsWindowVisible.restype = wintypes.BOOL
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.PostMessageW.restype = wintypes.BOOL
+u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+u.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+u.EnumWindows.restype = wintypes.BOOL
+
+def find_pid_visible_windows():
+    found = []
+    def cb(hwnd, _lp):
+        proc_id = wintypes.DWORD(0)
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
+        if proc_id.value == pid and u.IsWindowVisible(hwnd):
+            ex = int(get_long(hwnd, GWL_EXSTYLE))
+            if ex & 0x00000088 == 0x00000088:
+                found.append((int(hwnd), ex))
+        return True
+    u.EnumWindows(WNDENUMPROC(cb), 0)
+    return found
+
+bar = FloatingProfileTabBar(
+    on_select_tab=lambda _n: None,
+    on_close_tab=lambda _n: None,
+    on_toggle_single_stage=lambda: None,
+    on_focus_foxprofile=lambda: None,
+)
+bar.sync(["__FoxTabTest__"], set(), "__FoxTabTest__", True, True)
+
+bar_hwnd = 0
+deadline = time.monotonic() + 5.0
+while time.monotonic() < deadline:
+    wins = find_pid_visible_windows()
+    for hw, ex in wins:
+        if (ex & REQUIRED_BAR_FLAGS) == REQUIRED_BAR_FLAGS:
+            bar_hwnd = hw
+            break
+    if bar_hwnd:
+        break
+    time.sleep(0.05)
+
+assert bar_hwnd != 0, "FoxTab bar window never became visible"
+
+# Trigger real snipper, wait for overlay HWND, close it externally via WM_CLOSE
+bar.request_screen_snip("__FoxTabTest__", delay_sec=0)
+snip_hwnd = 0
+deadline = time.monotonic() + 5.0
+while time.monotonic() < deadline:
+    wins = find_pid_visible_windows()
+    for hw, _ex in wins:
+        if hw != bar_hwnd:
+            snip_hwnd = hw
+            break
+    if snip_hwnd:
+        break
+    time.sleep(0.05)
+
+assert snip_hwnd != 0, "Snipper overlay never appeared"
+assert not u.IsWindowVisible(wintypes.HWND(bar_hwnd)), "FoxTab should hide while snipper is open"
+
+assert u.PostMessageW(wintypes.HWND(snip_hwnd), WM_CLOSE, 0, 0)
+deadline = time.monotonic() + 5.0
+recovered = False
+while time.monotonic() < deadline:
+    if not u.IsWindow(wintypes.HWND(snip_hwnd)) and u.IsWindowVisible(wintypes.HWND(bar_hwnd)):
+        recovered = True
+        break
+    time.sleep(0.05)
+
+assert recovered, "FoxTab stayed deadlocked hidden after external snip close"
+
+# Verify withdraw on zero profiles and reliable re-show on reopen
+bar.sync([], set(), None, True, True)
+deadline = time.monotonic() + 4.0
+while time.monotonic() < deadline and u.IsWindowVisible(wintypes.HWND(bar_hwnd)):
+    time.sleep(0.05)
+assert not u.IsWindowVisible(wintypes.HWND(bar_hwnd)), "FoxTab did not hide when profiles stopped"
+
+bar.sync(["__FoxTabTest__", "__FoxTabTest2__"], {"__FoxTabTest2__"}, "__FoxTabTest__", True, True)
+deadline = time.monotonic() + 4.0
+reopened = False
+while time.monotonic() < deadline:
+    if u.IsWindowVisible(wintypes.HWND(bar_hwnd)):
+        ex = int(get_long(wintypes.HWND(bar_hwnd), GWL_EXSTYLE))
+        if (ex & REQUIRED_BAR_FLAGS) == REQUIRED_BAR_FLAGS:
+            reopened = True
+            break
+    time.sleep(0.05)
+assert reopened, "FoxTab did not reappear with TOPMOST+TOOLWINDOW+NOACTIVATE flags on reopen"
+
+bar.close()
+if bar._thread is not None:
+    bar._thread.join(timeout=5.0)
+assert bar._thread is None or not bar._thread.is_alive()
+print("OK")
+"""
+    env = dict(os.environ)
+    env.pop("PYTEST_CURRENT_TEST", None)
+    res = subprocess.run(
+        [sys.executable, "-c", child],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, f"stdout={res.stdout!r}, stderr={res.stderr!r}"
+    assert res.stderr.strip() == ""
+    assert "OK" in res.stdout
 
 

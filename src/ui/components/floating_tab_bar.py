@@ -9,6 +9,7 @@ browser process 100% isolated (`SWP_NOSIZE`).
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import sys
 import threading
@@ -19,9 +20,14 @@ from ...core.strings import get_string
 from ...services.avatar_store import (
     auto_capture_muse_avatar_from_active_window,
     avatar_version,
+    capture_desktop_freeze_frame,
+    detect_foreground_running_profile,
     get_avatar_path,
     get_smooth_fox_logo_path,
+    get_virtual_screen_metrics,
+    logical_rect_to_physical_rect,
     remove_avatar,
+    save_avatar_from_bgra_crop,
     save_avatar_from_clipboard,
     save_avatar_from_file,
     save_avatar_from_screen_rect,
@@ -51,42 +57,131 @@ _FG_INACTIVE = "#1E2422"
 _CLOSE_INACTIVE = "#66706A"
 _CLOSE_INACTIVE_HOVER = "#B42330"
 
+_TABBAR_WIN32_CACHE: tuple[object, object] | None = None
 
-def _apply_win32_toolwindow(hwnd: int) -> None:
-    """Hide floating bar from taskbar/Alt+Tab and enable Windows 11 DWM rounded corners."""
+
+def _tabbar_win32() -> tuple[object | None, object | None]:
+    """Return isolated 64-bit-prototyped `(user32, dwmapi)` handles for FoxTab."""
+    global _TABBAR_WIN32_CACHE
+    if sys.platform != "win32":
+        return (None, None)
+    if _TABBAR_WIN32_CACHE is not None:
+        return _TABBAR_WIN32_CACHE  # type: ignore[return-value]
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32")
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+
+        if hasattr(user32, "GetWindowLongPtrW"):
+            user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+
+        if hasattr(user32, "SetWindowLongPtrW"):
+            user32.SetWindowLongPtrW.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_ssize_t,
+            ]
+            user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+        user32.SetWindowLongW.restype = ctypes.c_long
+
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        user32.GetAsyncKeyState.restype = ctypes.c_short
+
+        dwmapi = None
+        with contextlib.suppress(Exception):
+            dwmapi = ctypes.WinDLL("dwmapi")
+            dwmapi.DwmSetWindowAttribute.argtypes = [
+                wintypes.HWND,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+            ]
+            dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+        _TABBAR_WIN32_CACHE = (user32, dwmapi)
+        return (user32, dwmapi)
+    except Exception:
+        return (None, None)
+
+
+def _apply_win32_toolwindow(
+    hwnd: int,
+    *,
+    no_activate: bool = True,
+    round_corners: bool = True,
+) -> int:
+    """Hide floating bar from taskbar/Alt+Tab, enforce TOPMOST, and optionally apply DWM corners."""
     if sys.platform != "win32" or hwnd <= 0:
-        return
+        return 0
+    user32, dwmapi = _tabbar_win32()
+    if user32 is None:
+        return 0
     with contextlib.suppress(Exception):
         import ctypes
+        from ctypes import wintypes
 
-        user32 = ctypes.windll.user32
         gwl_exstyle = -20
         ws_ex_toolwindow = 0x00000080
         ws_ex_topmost = 0x00000008
+        ws_ex_noactivate = 0x08000000
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-        set_long = getattr(user32, "SetWindowLongPtrW", user32.GetWindowLongW)
-        parent = user32.GetParent(hwnd) or hwnd
-        cur = int(get_long(parent, gwl_exstyle))
-        set_long(parent, gwl_exstyle, cur | ws_ex_toolwindow | ws_ex_topmost)
+        set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        parent = int(user32.GetParent(wintypes.HWND(hwnd)) or hwnd)
+        parent_hwnd = wintypes.HWND(parent)
+        cur = int(get_long(parent_hwnd, gwl_exstyle))
+        new_ex = cur | ws_ex_toolwindow | ws_ex_topmost
+        if no_activate:
+            new_ex |= ws_ex_noactivate
+        else:
+            new_ex &= ~ws_ex_noactivate
+        set_long(parent_hwnd, gwl_exstyle, new_ex)
+        # Flush cached Win32 extended styles and enforce TOPMOST without activating or resizing
+        # (SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED = 0x0033)
+        user32.SetWindowPos(parent_hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0033)
 
-        with contextlib.suppress(Exception):
-            dwmapi = ctypes.windll.dwmapi
-            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
-            pref = ctypes.c_int(2)
-            dwmapi.DwmSetWindowAttribute(
-                parent,
-                33,
-                ctypes.byref(pref),
-                ctypes.sizeof(pref),
-            )
-            # DWMWA_BORDER_COLOR = 34, COLORREF 0x00BBGGRR (#17332E -> 0x002E3317)
-            border_col = ctypes.c_int(0x002E3317)
-            dwmapi.DwmSetWindowAttribute(
-                parent,
-                34,
-                ctypes.byref(border_col),
-                ctypes.sizeof(border_col),
-            )
+        if round_corners and dwmapi is not None:
+            with contextlib.suppress(Exception):
+                # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+                pref = ctypes.c_int(2)
+                dwmapi.DwmSetWindowAttribute(
+                    parent_hwnd,
+                    33,
+                    ctypes.byref(pref),
+                    ctypes.sizeof(pref),
+                )
+                # DWMWA_BORDER_COLOR = 34, COLORREF 0x00BBGGRR (#17332E -> 0x002E3317)
+                border_col = ctypes.c_int(0x002E3317)
+                dwmapi.DwmSetWindowAttribute(
+                    parent_hwnd,
+                    34,
+                    ctypes.byref(border_col),
+                    ctypes.sizeof(border_col),
+                )
+        return parent
+    return 0
 
 
 def _compute_orientation(
@@ -137,6 +232,7 @@ class FloatingProfileTabBar:
         )
         self._thread: threading.Thread | None = None
         self._stop_flag = False
+        self._pending_snip: tuple[str, int] | None = None
 
     def sync(
         self,
@@ -157,13 +253,14 @@ class FloatingProfileTabBar:
         with self._lock:
             self._state = new_state
             should_start = (
-                self._thread is None
+                (self._thread is None or not self._thread.is_alive())
                 and bool(running_names)
                 and bool(enabled)
                 and sys.platform == "win32"
                 and "PYTEST_CURRENT_TEST" not in os.environ
             )
             if should_start:
+                self._stop_flag = False
                 self._thread = threading.Thread(
                     target=self._run_tk_loop,
                     name="FoxTabFloatingBar",
@@ -171,11 +268,24 @@ class FloatingProfileTabBar:
                 )
                 self._thread.start()
 
+    def request_screen_snip(self, profile_name: str, *, delay_sec: int = 0) -> None:
+        """Thread-safely queue opening the interactive screen snipper for `profile_name`."""
+        with self._lock:
+            self._pending_snip = (profile_name, max(0, int(delay_sec)))
+
     def close(self) -> None:
         with self._lock:
             self._stop_flag = True
 
     def _run_tk_loop(self) -> None:
+        try:
+            self._run_tk_loop_impl()
+        finally:
+            # Break closure reference cycles while still on the Tk thread so Tcl/Tk
+            # C handles are freed here instead of main-thread shutdown (Tcl_AsyncDelete).
+            gc.collect()
+
+    def _run_tk_loop_impl(self) -> None:
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -204,7 +314,10 @@ class FloatingProfileTabBar:
                     raw_logo = tk.PhotoImage(file=logo_path)
                     factor = max(1, raw_logo.width() // 26)
                     logo_img = raw_logo.subsample(factor, factor)
+                    del raw_logo
 
+        logo_holder: list[object] = [logo_img]
+        del logo_img
         outer = tk.Frame(
             root,
             bg=_BG_BAR,
@@ -238,10 +351,47 @@ class FloatingProfileTabBar:
         last_rendered: list[object] = [None]
         photo_cache: dict[tuple[str, float], object] = {}
         active_menu: list[object] = [None]
+        active_menu_bounds: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0]
         snip_active: list[bool] = [False]
+        snip_phase: list[str] = [""]
+        active_snip_win: list[object] = [None]
+        snip_cancel_cb: list[Callable[[], None] | None] = [None]
+        snip_refreeze_cb: list[Callable[[], None] | None] = [None]
+        snip_opened_at: list[float] = [0.0]
         file_dialog_active: list[bool] = [False]
         poll_tick: list[int] = [0]
         last_av_click: dict[str, object] = {"name": "", "ts": 0.0, "after_id": None}
+
+        win32_user32, _win32_dwm = _tabbar_win32()
+        win32_hwnd_type = None
+        if sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                from ctypes import wintypes
+
+                win32_hwnd_type = wintypes.HWND
+
+        def _clear_snip_state() -> None:
+            snip_active[0] = False
+            snip_phase[0] = ""
+            active_snip_win[0] = None
+            snip_cancel_cb[0] = None
+            snip_refreeze_cb[0] = None
+            last_rendered[0] = None
+
+        def _abort_active_snip() -> None:
+            cb = snip_cancel_cb[0]
+            win = active_snip_win[0]
+            snip_cancel_cb[0] = None
+            snip_refreeze_cb[0] = None
+            snip_phase[0] = ""
+            if cb is not None:
+                with contextlib.suppress(Exception):
+                    cb()
+            if win is not None:
+                with contextlib.suppress(Exception):
+                    if win.winfo_exists():  # type: ignore[attr-defined]
+                        win.destroy()  # type: ignore[attr-defined]
+            _clear_snip_state()
 
         def _cancel_pending_tab_select() -> None:
             aid = last_av_click.get("after_id")
@@ -255,6 +405,7 @@ class FloatingProfileTabBar:
                 with contextlib.suppress(Exception):
                     active_menu[0].destroy()  # type: ignore[attr-defined]
                 active_menu[0] = None
+                active_menu_bounds[:] = [0.0, 0.0, 0.0, 0.0, 0.0]
 
         def _notify_avatar_updated() -> None:
             photo_cache.clear()
@@ -278,26 +429,46 @@ class FloatingProfileTabBar:
                 return img
             return None
 
-        def _open_screen_snipper(pname: str) -> None:
-            """Interactive full-screen crosshair selector to snip the Muse avatar from screen."""
+        def _open_screen_snipper(pname: str, *, delay_sec: int = 0) -> None:
+            """Interactive freeze-frame crosshair selector to snip the Muse avatar accurately."""
             _cancel_pending_tab_select()
             _close_popup_menu()
             snip_active[0] = True
-            self._on_select_tab(pname)
+            snip_phase[0] = "delay"
+            snip_opened_at[0] = time.monotonic()
+            active_snip_win[0] = None
+            snip_cancel_cb[0] = None
+            snip_refreeze_cb[0] = None
+            with self._lock:
+                running_snap = self._state[0]
+            fg_prof = detect_foreground_running_profile(running_snap)
 
-            def _launch_overlay() -> None:
+            def _restore_bar_after_snip() -> None:
+                _clear_snip_state()
+
+            def _show_snip_canvas(frame: object | None) -> None:
+                if not snip_active[0]:
+                    return
+                if frame is not None:
+                    vx = int(getattr(frame, "log_x", 0))
+                    vy = int(getattr(frame, "log_y", 0))
+                    vw = int(getattr(frame, "log_w", root.winfo_screenwidth()))
+                    vh = int(getattr(frame, "log_h", root.winfo_screenheight()))
+                else:
+                    vx, vy, vw, vh = get_virtual_screen_metrics(physical=False)
+
                 try:
                     snip = tk.Toplevel(root)
+                    snip.withdraw()
                     snip.overrideredirect(True)
-                    scr_w = root.winfo_screenwidth()
-                    scr_h = root.winfo_screenheight()
-                    snip.geometry(f"{scr_w}x{scr_h}+0+0")
+                    snip.geometry(f"{vw}x{vh}{vx:+d}{vy:+d}")
                     with contextlib.suppress(Exception):
                         snip.attributes("-topmost", True)
-                        snip.attributes("-alpha", 0.28)
+                        if frame is None:
+                            snip.attributes("-alpha", 0.28)
                     snip.configure(bg="#09090B", cursor="crosshair")
                 except Exception:
-                    snip_active[0] = False
+                    _restore_bar_after_snip()
                     return
 
                 canvas = tk.Canvas(
@@ -308,66 +479,107 @@ class FloatingProfileTabBar:
                 )
                 canvas.pack(fill="both", expand=True)
 
-                # Top instruction banner
+                if frame is not None and getattr(frame, "dimmed_ppm", b""):
+                    with contextlib.suppress(Exception):
+                        freeze_photo = tk.PhotoImage(data=frame.dimmed_ppm)  # type: ignore[attr-defined]
+                        canvas.create_image(0, 0, anchor="nw", image=freeze_photo)
+                        canvas._freeze_photo = freeze_photo  # type: ignore[attr-defined]
+
+                banner_cx = max(340, min(vw - 340, (-vx) + root.winfo_screenwidth() // 2))
                 canvas.create_rectangle(
-                    scr_w // 2 - 310,
+                    banner_cx - 330,
                     16,
-                    scr_w // 2 + 310,
-                    52,
-                    fill="#000000",
+                    banner_cx + 330,
+                    54,
+                    fill="#102622",
                     outline="#FFFFFF",
                     width=1,
                 )
-                canvas.create_text(
-                    scr_w // 2,
-                    34,
+                hint_id = canvas.create_text(
+                    banner_cx,
+                    35,
                     text=get_string("avatar_snip_hint", name=pname),
                     fill="#FFFFFF",
                     font=("Segoe UI Semibold", 10),
                 )
 
-                coords = {"x1": 0, "y1": 0, "rect": None, "oval": None}
+                coords: dict[str, object] = {
+                    "x1": 0,
+                    "y1": 0,
+                    "rect": None,
+                    "oval": None,
+                    "dragging": False,
+                }
 
-                def _cancel(_e: object = None) -> None:
-                    snip_active[0] = False
-                    with contextlib.suppress(Exception):
-                        snip.destroy()
-
-                def _on_press(e: object) -> None:
-                    coords["x1"] = int(getattr(e, "x_root", 0))
-                    coords["y1"] = int(getattr(e, "y_root", 0))
+                def _clear_selection_shapes() -> None:
                     if coords["rect"]:
                         canvas.delete(coords["rect"])
+                        coords["rect"] = None
                     if coords["oval"]:
                         canvas.delete(coords["oval"])
+                        coords["oval"] = None
+                    coords["dragging"] = False
+
+                def _cancel(_e: object = None) -> None:
+                    snip_phase[0] = ""
+                    snip_cancel_cb[0] = None
+                    snip_refreeze_cb[0] = None
+                    active_snip_win[0] = None
+                    with contextlib.suppress(Exception):
+                        canvas._freeze_photo = None  # type: ignore[attr-defined]
+                        snip.destroy()
+                    _restore_bar_after_snip()
+
+                def _re_freeze(_e: object = None) -> None:
+                    snip_phase[0] = "delay"
+                    snip_cancel_cb[0] = None
+                    snip_refreeze_cb[0] = None
+                    active_snip_win[0] = None
+                    with contextlib.suppress(Exception):
+                        canvas._freeze_photo = None  # type: ignore[attr-defined]
+                        snip.destroy()
+                    _open_screen_snipper(pname, delay_sec=3)
+
+                def _on_snip_destroy(ev: object) -> None:
+                    if getattr(ev, "widget", None) is snip and snip_phase[0] == "canvas":
+                        _restore_bar_after_snip()
+
+                def _on_press(e: object) -> None:
+                    _clear_selection_shapes()
+                    cx = int(getattr(e, "x_root", 0)) - vx
+                    cy = int(getattr(e, "y_root", 0)) - vy
+                    coords["x1"] = cx
+                    coords["y1"] = cy
+                    coords["dragging"] = True
                     coords["rect"] = canvas.create_rectangle(
-                        coords["x1"],
-                        coords["y1"],
-                        coords["x1"],
-                        coords["y1"],
+                        cx,
+                        cy,
+                        cx,
+                        cy,
                         outline="#FFFFFF",
                         width=2,
                         dash=(4, 2),
                     )
                     coords["oval"] = canvas.create_oval(
-                        coords["x1"],
-                        coords["y1"],
-                        coords["x1"],
-                        coords["y1"],
+                        cx,
+                        cy,
+                        cx,
+                        cy,
                         outline="#FFFFFF",
                         width=2,
                     )
 
                 def _on_motion(e: object) -> None:
-                    if not coords["rect"]:
+                    if not coords["dragging"] or not coords["rect"]:
                         return
-                    x2 = int(getattr(e, "x_root", 0))
-                    y2 = int(getattr(e, "y_root", 0))
-                    canvas.coords(coords["rect"], coords["x1"], coords["y1"], x2, y2)
+                    x1 = int(coords["x1"])  # type: ignore[arg-type]
+                    y1 = int(coords["y1"])  # type: ignore[arg-type]
+                    x2 = int(getattr(e, "x_root", 0)) - vx
+                    y2 = int(getattr(e, "y_root", 0)) - vy
+                    canvas.coords(coords["rect"], x1, y1, x2, y2)
                     if coords["oval"]:
-                        # Preview the exact inscribed square circle that will be cropped
-                        left, right = min(int(coords["x1"]), x2), max(int(coords["x1"]), x2)
-                        top, bottom = min(int(coords["y1"]), y2), max(int(coords["y1"]), y2)
+                        left, right = min(x1, x2), max(x1, x2)
+                        top, bottom = min(y1, y2), max(y1, y2)
                         w = right - left
                         h = bottom - top
                         side = min(w, h)
@@ -376,10 +588,78 @@ class FloatingProfileTabBar:
                         canvas.coords(coords["oval"], cx1, cy1, cx1 + side, cy1 + side)
 
                 def _on_release(e: object) -> None:
-                    x1 = int(coords["x1"])
-                    y1 = int(coords["y1"])
-                    x2 = int(getattr(e, "x_root", 0))
-                    y2 = int(getattr(e, "y_root", 0))
+                    if not coords["dragging"]:
+                        return
+                    coords["dragging"] = False
+                    x1 = int(coords["x1"])  # type: ignore[arg-type]
+                    y1 = int(coords["y1"])  # type: ignore[arg-type]
+                    x2 = int(getattr(e, "x_root", 0)) - vx
+                    y2 = int(getattr(e, "y_root", 0)) - vy
+                    if abs(x2 - x1) < 10 or abs(y2 - y1) < 10:
+                        _clear_selection_shapes()
+                        return
+
+                    if frame is not None:
+                        px1, py1, px2, py2 = logical_rect_to_physical_rect(
+                            vx + x1,
+                            vy + y1,
+                            vx + x2,
+                            vy + y2,
+                            logical_bounds=(
+                                int(getattr(frame, "log_x", vx)),
+                                int(getattr(frame, "log_y", vy)),
+                                int(getattr(frame, "log_w", vw)),
+                                int(getattr(frame, "log_h", vh)),
+                            ),
+                            physical_bounds=(
+                                int(getattr(frame, "phys_x", 0)),
+                                int(getattr(frame, "phys_y", 0)),
+                                int(getattr(frame, "phys_w", vw)),
+                                int(getattr(frame, "phys_h", vh)),
+                            ),
+                        )
+                        phys_x = int(getattr(frame, "phys_x", 0))
+                        phys_y = int(getattr(frame, "phys_y", 0))
+                        phys_w = int(getattr(frame, "phys_w", vw))
+                        phys_h = int(getattr(frame, "phys_h", vh))
+                        ok = save_avatar_from_bgra_crop(
+                            pname,
+                            getattr(frame, "raw_bgra", b""),
+                            phys_w,
+                            phys_h,
+                            px1 - phys_x,
+                            py1 - phys_y,
+                            px2 - phys_x,
+                            py2 - phys_y,
+                            reject_uniform=True,
+                        )
+                        if ok:
+                            snip_phase[0] = ""
+                            snip_cancel_cb[0] = None
+                            snip_refreeze_cb[0] = None
+                            active_snip_win[0] = None
+                            with contextlib.suppress(Exception):
+                                canvas._freeze_photo = None  # type: ignore[attr-defined]
+                                snip.destroy()
+                            _restore_bar_after_snip()
+                            _notify_avatar_updated()
+                        else:
+                            if coords["rect"]:
+                                canvas.itemconfigure(coords["rect"], outline="#FF6B6B")
+                            if coords["oval"]:
+                                canvas.itemconfigure(coords["oval"], outline="#FF6B6B")
+                            canvas.itemconfigure(
+                                hint_id,
+                                text=get_string("avatar_snip_retry", name=pname),
+                                fill="#FFB4B4",
+                            )
+                        return
+
+                    snip_phase[0] = "capturing"
+                    snip_opened_at[0] = time.monotonic()
+                    snip_cancel_cb[0] = None
+                    snip_refreeze_cb[0] = None
+                    active_snip_win[0] = None
                     with contextlib.suppress(Exception):
                         canvas.delete("all")
                         snip.withdraw()
@@ -390,16 +670,18 @@ class FloatingProfileTabBar:
 
                     def _do_capture() -> None:
                         try:
-                            if (
-                                abs(x2 - x1) >= 10
-                                and abs(y2 - y1) >= 10
-                                and save_avatar_from_screen_rect(pname, x1, y1, x2, y2)
+                            if save_avatar_from_screen_rect(
+                                pname,
+                                vx + x1,
+                                vy + y1,
+                                vx + x2,
+                                vy + y2,
+                                reject_uniform=True,
                             ):
                                 _notify_avatar_updated()
                         finally:
-                            snip_active[0] = False
+                            _restore_bar_after_snip()
 
-                    # Wait 80ms so DWM completely removes the dark overlay before BitBlt
                     root.after(80, _do_capture)
 
                 canvas.bind("<ButtonPress-1>", _on_press)
@@ -407,9 +689,145 @@ class FloatingProfileTabBar:
                 canvas.bind("<ButtonRelease-1>", _on_release)
                 canvas.bind("<Button-3>", _cancel)
                 snip.bind("<Escape>", _cancel)
-                snip.focus_force()
+                snip.bind("<space>", _re_freeze)
+                snip.bind("<Destroy>", _on_snip_destroy)
+                with contextlib.suppress(Exception):
+                    snip.protocol("WM_DELETE_WINDOW", _cancel)
 
-            root.after(200, _launch_overlay)
+                active_snip_win[0] = snip
+                snip_phase[0] = "canvas"
+                snip_opened_at[0] = time.monotonic()
+                snip_cancel_cb[0] = _cancel
+                snip_refreeze_cb[0] = _re_freeze
+
+                snip.deiconify()
+                snip.update_idletasks()
+                with contextlib.suppress(Exception):
+                    snip.attributes("-topmost", True)
+                _apply_win32_toolwindow(snip.winfo_id(), no_activate=False, round_corners=False)
+                with contextlib.suppress(Exception):
+                    snip.lift()
+                    snip.focus_force()
+
+            def _grab_and_open_canvas() -> None:
+                wait_token = {"cancelled": False}
+                snip_phase[0] = "delay"
+                snip_opened_at[0] = time.monotonic()
+                snip_cancel_cb[0] = lambda: wait_token.__setitem__("cancelled", True)
+                snip_refreeze_cb[0] = None
+                with contextlib.suppress(Exception):
+                    root.withdraw()
+                    root.update_idletasks()
+                    root.update()
+                last_rendered[0] = "hidden"
+
+                def _open_now() -> None:
+                    if wait_token["cancelled"] or not snip_active[0]:
+                        return
+                    _show_snip_canvas(capture_desktop_freeze_frame())
+
+                root.after(35, _open_now)
+
+            if delay_sec > 0:
+                if fg_prof != pname:
+                    self._on_select_tab(pname)
+                banner = None
+                lbl = None
+                try:
+                    banner = tk.Toplevel(root)
+                    banner.withdraw()
+                    banner.overrideredirect(True)
+                    with contextlib.suppress(Exception):
+                        banner.attributes("-topmost", True)
+                    banner.configure(bg=_BG_RAIL)
+                    lbl = tk.Label(
+                        banner,
+                        text=get_string("avatar_snip_countdown", name=pname, sec=delay_sec),
+                        bg=_BG_RAIL,
+                        fg="#FFFFFF",
+                        font=("Segoe UI Semibold", 10),
+                        padx=16,
+                        pady=8,
+                    )
+                    lbl.pack()
+                    banner.update_idletasks()
+                    bw = banner.winfo_reqwidth()
+                    bh = banner.winfo_reqheight()
+                    bx = max(8, (root.winfo_screenwidth() - bw) // 2)
+                    banner.geometry(f"{bw}x{bh}+{bx}+54")
+                    banner.deiconify()
+                    banner.update_idletasks()
+                    with contextlib.suppress(Exception):
+                        banner.attributes("-topmost", True)
+                    _apply_win32_toolwindow(banner.winfo_id(), no_activate=True)
+                except Exception:
+                    banner = None
+                    lbl = None
+
+                deadline = time.monotonic() + float(delay_sec)
+                cancelled = {"flag": False}
+
+                def _cancel_countdown() -> None:
+                    cancelled["flag"] = True
+                    if banner is not None:
+                        with contextlib.suppress(Exception):
+                            banner.destroy()
+                    _restore_bar_after_snip()
+
+                active_snip_win[0] = banner
+                snip_phase[0] = "delay"
+                snip_opened_at[0] = time.monotonic()
+                snip_cancel_cb[0] = _cancel_countdown
+                snip_refreeze_cb[0] = None
+
+                if banner is not None:
+                    banner.bind("<Button-3>", lambda _e: _cancel_countdown())
+
+                def _tick_countdown() -> None:
+                    if cancelled["flag"] or not snip_active[0]:
+                        return
+                    if win32_user32 is not None and (win32_user32.GetAsyncKeyState(0x1B) & 0x8000):
+                        _cancel_countdown()
+                        return
+                    rem_f = deadline - time.monotonic()
+                    if rem_f <= 0.0:
+                        active_snip_win[0] = None
+                        if banner is not None:
+                            with contextlib.suppress(Exception):
+                                banner.destroy()
+                        _grab_and_open_canvas()
+                        return
+                    rem = max(1, int(rem_f + 0.99))
+                    if lbl is not None:
+                        with contextlib.suppress(Exception):
+                            lbl.configure(
+                                text=get_string("avatar_snip_countdown", name=pname, sec=rem)
+                            )
+                    root.after(100, _tick_countdown)
+
+                root.after(100, _tick_countdown)
+                return
+
+            if fg_prof == pname:
+                _grab_and_open_canvas()
+            else:
+                self._on_select_tab(pname)
+                wait_switch = {"cancelled": False}
+                snip_phase[0] = "delay"
+                snip_opened_at[0] = time.monotonic()
+                snip_cancel_cb[0] = lambda: wait_switch.__setitem__("cancelled", True)
+                snip_refreeze_cb[0] = None
+                with contextlib.suppress(Exception):
+                    root.withdraw()
+                    root.update_idletasks()
+                last_rendered[0] = "hidden"
+
+                def _open_after_switch() -> None:
+                    if wait_switch["cancelled"] or not snip_active[0]:
+                        return
+                    _show_snip_canvas(capture_desktop_freeze_frame())
+
+                root.after(260, _open_after_switch)
 
         def _open_avatar_menu(event: object, pname: str) -> None:
             """Show FoxProfile-themed popup menu to set/change `pname`'s circular avatar."""
@@ -419,6 +837,7 @@ class FloatingProfileTabBar:
             ry = int(getattr(event, "y_root", root.winfo_y() + root.winfo_height()))
 
             pop = tk.Toplevel(root)
+            pop.withdraw()
             pop.overrideredirect(True)
             with contextlib.suppress(Exception):
                 pop.attributes("-topmost", True)
@@ -468,7 +887,11 @@ class FloatingProfileTabBar:
 
             _add_item(
                 get_string("avatar_menu_snip"),
-                lambda: _open_screen_snipper(pname),
+                lambda: _open_screen_snipper(pname, delay_sec=0),
+            )
+            _add_item(
+                get_string("avatar_menu_snip_delay"),
+                lambda: _open_screen_snipper(pname, delay_sec=3),
             )
 
             def _do_paste() -> None:
@@ -489,6 +912,7 @@ class FloatingProfileTabBar:
                         _notify_avatar_updated()
                 finally:
                     file_dialog_active[0] = False
+                    last_rendered[0] = None
 
             _add_item(get_string("avatar_menu_file"), _do_file)
 
@@ -507,27 +931,14 @@ class FloatingProfileTabBar:
             px = max(6, min(rx, scr_w - pw - 6))
             py = max(6, min(ry + 8, scr_h - ph - 6))
             pop.geometry(f"{pw}x{ph}+{px}+{py}")
-            _apply_win32_toolwindow(pop.winfo_id())
+            pop.deiconify()
+            pop.update_idletasks()
             with contextlib.suppress(Exception):
+                pop.attributes("-topmost", True)
                 pop.lift()
-                pop.focus_force()
-
-            def _on_pop_focus_out(_e: object) -> None:
-                if file_dialog_active[0]:
-                    return
-                if (time.monotonic() - opened_at) < 0.25:
-                    return
-                _close_popup_menu()
-
-            pop.bind("<FocusOut>", _on_pop_focus_out)
+            _apply_win32_toolwindow(pop.winfo_id(), no_activate=True)
+            active_menu_bounds[:] = [float(px), float(py), float(px + pw), float(py + ph), opened_at]
             pop.bind("<Escape>", lambda _e: _close_popup_menu())
-
-        win32_user32 = None
-        if sys.platform == "win32":
-            with contextlib.suppress(Exception):
-                import ctypes
-
-                win32_user32 = ctypes.windll.user32
 
         def _start_drag(event: object) -> None:
             _close_popup_menu()
@@ -545,10 +956,10 @@ class FloatingProfileTabBar:
             cur_wy = int(drag_state["win_y"]) if drag_state["custom_pos"] else root.winfo_y()
             drag_state["x"] = rx - cur_wx
             drag_state["y"] = ry - cur_wy
-            if win32_user32 is not None:
+            if win32_user32 is not None and win32_hwnd_type is not None:
                 with contextlib.suppress(Exception):
                     hwnd = root.winfo_id()
-                    drag_state["top_hwnd"] = int(win32_user32.GetParent(hwnd) or hwnd)
+                    drag_state["top_hwnd"] = int(win32_user32.GetParent(win32_hwnd_type(hwnd)) or hwnd)
 
         def _on_drag(event: object) -> None:
             rx = int(getattr(event, "x_root", 0))
@@ -566,15 +977,23 @@ class FloatingProfileTabBar:
             scr_h = int(drag_state["scr_h"])
             cur_w = int(drag_state["cur_w"])
             cur_h = int(drag_state["cur_h"])
-            nx = max(0, min(rx - int(drag_state["x"]), scr_w - cur_w))
-            ny = max(0, min(ry - int(drag_state["y"]), scr_h - cur_h))
+            nx = max(0, min(rx - int(drag_state["x"]), max(0, scr_w - cur_w)))
+            ny = max(0, min(ry - int(drag_state["y"]), max(0, scr_h - cur_h)))
             drag_state["custom_pos"] = True
             drag_state["win_x"] = nx
             drag_state["win_y"] = ny
             top_hwnd = int(drag_state["top_hwnd"])
-            if win32_user32 is not None and top_hwnd:
+            if win32_user32 is not None and win32_hwnd_type is not None and top_hwnd:
                 # SWP_NOSIZE (0x0001) | SWP_NOACTIVATE (0x0010) | SWP_NOOWNERZORDER (0x0200)
-                win32_user32.SetWindowPos(top_hwnd, -1, nx, ny, 0, 0, 0x0211)
+                win32_user32.SetWindowPos(
+                    win32_hwnd_type(top_hwnd),
+                    win32_hwnd_type(-1),
+                    nx,
+                    ny,
+                    0,
+                    0,
+                    0x0211,
+                )
             else:
                 root.geometry(f"+{nx}+{ny}")
 
@@ -619,17 +1038,18 @@ class FloatingProfileTabBar:
                 pady=8,
                 cursor="fleur",
             )
-            if logo_img is not None:
+            cur_logo = logo_holder[0]
+            if cur_logo is not None:
                 ic = tk.Label(
                     rail,
-                    image=logo_img,
+                    image=cur_logo,  # type: ignore[arg-type]
                     bg=_BG_RAIL,
                     bd=0,
                     padx=0,
                     pady=0,
                     cursor="fleur",
                 )
-                ic.image = logo_img  # type: ignore[attr-defined]
+                ic.image = cur_logo  # type: ignore[attr-defined]
                 ic.pack(side="left", padx=(0, 7))
                 _bind_drag(ic, click_toggle_home=True)
 
@@ -722,7 +1142,16 @@ class FloatingProfileTabBar:
                     pady=2,
                     cursor="hand2",
                 )
-            def _on_avatar_click(event: object, n: str = pname) -> None:
+            def _on_avatar_click(
+                event: object,
+                n: str = pname,
+                direct_menu: bool = (avatar_img is None or is_active),
+            ) -> None:
+                if direct_menu:
+                    _cancel_pending_tab_select()
+                    last_av_click["ts"] = 0.0
+                    _open_avatar_menu(event, n)
+                    return
                 now = time.monotonic()
                 prev_ts = float(last_av_click.get("ts", 0.0))  # type: ignore[arg-type]
                 if last_av_click.get("name") == n and (now - prev_ts) <= 0.45:
@@ -900,84 +1329,214 @@ class FloatingProfileTabBar:
             drag_state["cur_w"] = req_w
             drag_state["cur_h"] = req_h
             if drag_state["custom_pos"]:
+                max_x = max(0, scr_w - req_w)
+                max_y = max(0, scr_h - req_h)
                 if drag_state["dock_right"] and int(drag_state["right_x"]) > 0:
-                    x = max(4, min(int(drag_state["right_x"]) - req_w, scr_w - req_w - 4))
+                    x = max(0, min(int(drag_state["right_x"]) - req_w, max(0, scr_w - req_w - 4)))
                 else:
-                    x = max(4, min(int(drag_state["win_x"]), scr_w - req_w - 4))
-                y = max(0, min(int(drag_state["win_y"]), scr_h - req_h - 4))
+                    x = max(0, min(int(drag_state["win_x"]), max(0, scr_w - req_w - 4)))
+                y = max(0, min(int(drag_state["win_y"]), max(0, scr_h - req_h - 4)))
+                x = max(0, min(x, max_x))
+                y = max(0, min(y, max_y))
                 drag_state["win_x"] = x
                 drag_state["win_y"] = y
                 drag_state["right_x"] = x + req_w
             else:
-                x = max(8, (scr_w - req_w) // 2)
-                y = 4
+                x = max(0, min(max(8, (scr_w - req_w) // 2), max(0, scr_w - req_w)))
+                y = max(0, min(4, max(0, scr_h - req_h)))
             root.geometry(f"{req_w}x{req_h}+{x}+{y}")
 
         def _poll() -> None:
+            next_delay = 120
             with self._lock:
-                if self._stop_flag:
-                    with contextlib.suppress(Exception):
-                        root.destroy()
-                    return
+                stopping = self._stop_flag
                 running, loading, active_tab, single_stage, enabled = self._state
+                pending_snip = self._pending_snip
+                self._pending_snip = None
 
-            if not enabled or not running:
-                if last_rendered[0] != "hidden":
-                    _close_popup_menu()
-                    root.withdraw()
-                    last_rendered[0] = "hidden"
-                root.after(150, _poll)
-                return
-
-            if (
-                drag_state["dragging"]
-                or active_menu[0] is not None
-                or snip_active[0]
-                or file_dialog_active[0]
-            ):
-                root.after(80, _poll)
-                return
-
-            poll_tick[0] += 1
-            eff_cur = active_tab if active_tab in running else (running[0] if running else None)
-            if (
-                eff_cur
-                and poll_tick[0] % 10 == 0
-                and get_avatar_path(eff_cur, 22) is None
-                and auto_capture_muse_avatar_from_active_window(eff_cur)
-            ):
-                _notify_avatar_updated()
-
-            cur_orient = _compute_orientation(
-                int(drag_state["win_x"]),
-                int(drag_state["win_y"]),
-                root.winfo_screenwidth(),
-                root.winfo_screenheight(),
-                bool(drag_state["custom_pos"]),
-                int(drag_state["cur_w"]),
-            )
-            av_sig = tuple(avatar_version(n) for n in running)
-            render_key = (
-                running,
-                loading,
-                active_tab,
-                single_stage,
-                collapsed["value"],
-                cur_orient,
-                av_sig,
-            )
-            if render_key != last_rendered[0]:
-                was_hidden = last_rendered[0] in (None, "hidden")
-                _rebuild(running, loading, active_tab, single_stage)
-                if was_hidden:
-                    root.deiconify()
-                _apply_win32_toolwindow(root.winfo_id())
+            if stopping:
                 with contextlib.suppress(Exception):
-                    root.attributes("-topmost", True)
-                last_rendered[0] = render_key
+                    _cancel_pending_tab_select()
+                    _close_popup_menu()
+                    _abort_active_snip()
+                    photo_cache.clear()
+                    logo_holder[0] = None
+                    last_rendered[0] = None
+                    for child in outer.winfo_children():
+                        child.destroy()
+                    root.quit()
+                    root.destroy()
+                return
 
-            root.after(120, _poll)
+            try:
+                if not enabled or not running:
+                    if snip_active[0]:
+                        _abort_active_snip()
+                    if last_rendered[0] != "hidden":
+                        _close_popup_menu()
+                        root.withdraw()
+                        last_rendered[0] = "hidden"
+                    next_delay = 150
+                elif pending_snip is not None and not snip_active[0] and not drag_state["dragging"]:
+                    _open_screen_snipper(pending_snip[0], delay_sec=pending_snip[1])
+                    next_delay = 80
+                elif active_menu[0] is not None and not file_dialog_active[0]:
+                    if win32_user32 is not None and (time.monotonic() - active_menu_bounds[4]) >= 0.22:
+                        if win32_user32.GetAsyncKeyState(0x1B) & 0x8000:
+                            _close_popup_menu()
+                        elif (win32_user32.GetAsyncKeyState(0x01) & 0x8000) or (
+                            win32_user32.GetAsyncKeyState(0x02) & 0x8000
+                        ):
+                            mx = root.winfo_pointerx()
+                            my = root.winfo_pointery()
+                            if not (
+                                active_menu_bounds[0] - 4 <= mx <= active_menu_bounds[2] + 4
+                                and active_menu_bounds[1] - 4 <= my <= active_menu_bounds[3] + 4
+                            ):
+                                _close_popup_menu()
+                    next_delay = 60
+                else:
+                    if snip_active[0]:
+                        if snip_phase[0] == "canvas":
+                            cur_snip = active_snip_win[0]
+                            exists = False
+                            if cur_snip is not None:
+                                with contextlib.suppress(Exception):
+                                    exists = bool(cur_snip.winfo_exists())  # type: ignore[attr-defined]
+                            if not exists:
+                                _abort_active_snip()
+                            elif (
+                                win32_user32 is not None
+                                and (time.monotonic() - snip_opened_at[0]) >= 0.22
+                            ):
+                                if win32_user32.GetAsyncKeyState(0x1B) & 0x8000:
+                                    _abort_active_snip()
+                                elif (
+                                    win32_user32.GetAsyncKeyState(0x20) & 0x8000
+                                    and snip_refreeze_cb[0] is not None
+                                ):
+                                    cb_rf = snip_refreeze_cb[0]
+                                    cb_rf()
+                        elif (
+                            snip_phase[0] in ("delay", "capturing")
+                            and (time.monotonic() - snip_opened_at[0]) > 15.0
+                        ):
+                            _abort_active_snip()
+
+                    if drag_state["dragging"] or snip_active[0] or file_dialog_active[0]:
+                        next_delay = 80
+                    else:
+                        poll_tick[0] += 1
+                        if poll_tick[0] % 5 == 0 and any(get_avatar_path(n, 22) is None for n in running):
+                            fg_prof = detect_foreground_running_profile(running)
+                            if (
+                                fg_prof
+                                and get_avatar_path(fg_prof, 22) is None
+                                and auto_capture_muse_avatar_from_active_window(
+                                    fg_prof,
+                                    allow_unprefixed_single=(len(running) == 1),
+                                )
+                            ):
+                                _notify_avatar_updated()
+
+                        cur_orient = _compute_orientation(
+                            int(drag_state["win_x"]),
+                            int(drag_state["win_y"]),
+                            root.winfo_screenwidth(),
+                            root.winfo_screenheight(),
+                            bool(drag_state["custom_pos"]),
+                            int(drag_state["cur_w"]),
+                        )
+                        av_sig = tuple(avatar_version(n) for n in running)
+                        render_key = (
+                            running,
+                            loading,
+                            active_tab,
+                            single_stage,
+                            collapsed["value"],
+                            cur_orient,
+                            av_sig,
+                        )
+                        if render_key != last_rendered[0]:
+                            was_hidden = last_rendered[0] in (None, "hidden")
+                            _rebuild(running, loading, active_tab, single_stage)
+                            if was_hidden:
+                                root.deiconify()
+                            root.update_idletasks()
+                            with contextlib.suppress(Exception):
+                                root.attributes("-topmost", True)
+                            parent = _apply_win32_toolwindow(root.winfo_id(), no_activate=True)
+                            if (
+                                win32_user32 is not None
+                                and win32_hwnd_type is not None
+                                and parent > 0
+                                and not win32_user32.IsWindowVisible(win32_hwnd_type(parent))
+                            ):
+                                # SW_SHOWNOACTIVATE (4), then SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE (0x0053)
+                                win32_user32.ShowWindow(win32_hwnd_type(parent), 4)
+                                win32_user32.SetWindowPos(
+                                    win32_hwnd_type(parent),
+                                    win32_hwnd_type(-1),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0x0053,
+                                )
+                            last_rendered[0] = render_key
+                        elif (
+                            poll_tick[0] % 8 == 0
+                            and win32_user32 is not None
+                            and win32_hwnd_type is not None
+                        ):
+                            with contextlib.suppress(Exception):
+                                hwnd = root.winfo_id()
+                                parent = int(
+                                    win32_user32.GetParent(win32_hwnd_type(hwnd)) or hwnd
+                                )
+                                if parent > 0:
+                                    parent_hwnd = win32_hwnd_type(parent)
+                                    if not win32_user32.IsWindowVisible(parent_hwnd):
+                                        last_rendered[0] = None
+                                    else:
+                                        # Re-assert HWND_TOPMOST without moving, resizing, or activating (0x0013)
+                                        win32_user32.SetWindowPos(
+                                            parent_hwnd,
+                                            win32_hwnd_type(-1),
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            0x0013,
+                                        )
+            except Exception:
+                next_delay = 150
+
+            with contextlib.suppress(Exception):
+                root.after(next_delay, _poll)
 
         root.after(50, _poll)
-        with contextlib.suppress(Exception):
+        try:
             root.mainloop()
+        except Exception:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                _cancel_pending_tab_select()
+            with contextlib.suppress(Exception):
+                _close_popup_menu()
+            with contextlib.suppress(Exception):
+                _abort_active_snip()
+            photo_cache.clear()
+            logo_holder[0] = None
+            last_rendered[0] = None
+            last_av_click.clear()
+            drag_state.clear()
+            with contextlib.suppress(Exception):
+                outer.destroy()
+            with contextlib.suppress(Exception):
+                root.quit()
+            with contextlib.suppress(Exception):
+                root.destroy()
+            if getattr(tk, "_default_root", None) is root:
+                tk._default_root = None

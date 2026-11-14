@@ -1231,6 +1231,7 @@ class MonitorService:
         self._fixed_work_squads: dict[str, list[str]] = {}
         self._sort_by: str = "custom"
         self._last_mail_scan_ts: float = 0.0
+        self._last_aborted_mail_scan_ts: float = 0.0
         self._mail_checkpoint_hits: dict[str, dict[str, str]] = {}
         self._mail_dead_tokens: set[str] = set()
         self._load_settings()
@@ -1496,6 +1497,11 @@ class MonitorService:
         and no mail scan has been recorded since today's `min_hour_vn` VN cutoff.
         """
         cur = time.time() if now_ts is None else float(now_ts)
+        if (
+            self._last_aborted_mail_scan_ts > 0.0
+            and 0.0 <= (cur - self._last_aborted_mail_scan_ts) < 1800.0
+        ):
+            return False
         now_vn = dt.datetime.fromtimestamp(cur, tz=VN_TZ)
         if 0 <= min_hour_vn <= 23:
             if now_vn.hour < min_hour_vn:
@@ -1583,6 +1589,11 @@ class MonitorService:
     ) -> None:
         if update_timestamp:
             self._last_mail_scan_ts = time.time() if scan_ts is None else float(scan_ts)
+            self._last_aborted_mail_scan_ts = 0.0
+        else:
+            self._last_aborted_mail_scan_ts = (
+                time.time() if scan_ts is None else float(scan_ts)
+            )
         if scanned_names:
             for pname in scanned_names:
                 if pname not in hits:

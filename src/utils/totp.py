@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import gzip
 import hashlib
 import hmac
 import html
@@ -748,7 +749,23 @@ def _fetch_via_imap_xoauth2(
     auth_str = f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01".encode()
     messages: list[dict[str, str]] = []
     try:
-        imap = imaplib.IMAP4_SSL("outlook.office365.com", 993, timeout=timeout)
+        if getattr(imaplib.IMAP4_SSL, "__module__", "") == "imaplib":
+            addrs = socket.getaddrinfo(
+                "outlook.office365.com",
+                993,
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+            )
+            if addrs:
+                af, st, pr, _, sa = addrs[0]
+                probe = socket.socket(af, st, pr)
+                try:
+                    probe.settimeout(min(3.0, max(1.5, float(timeout) / 4.0)))
+                    probe.connect(sa)
+                finally:
+                    with contextlib.suppress(Exception):
+                        probe.close()
+        imap = imaplib.IMAP4_SSL("outlook.office365.com", 993, timeout=min(6, int(timeout)))
         try:
             imap.authenticate("XOAUTH2", lambda _: auth_str)
             for folder in ("INBOX", "Junk"):
@@ -924,6 +941,8 @@ def is_generator_email_address(
 _SSL_DEFAULT_CTX = ssl.create_default_context()
 _IPV4_POOL_LOCK = threading.Lock()
 _IPV4_CONN_POOL: dict[str, list[_IPv4HTTPSConnection]] = {}
+_GEN_EMAIL_AB_HP: list[str] = [""]
+_AB_HP_RE = re.compile(r"__Host-ab_hp=([^;\s]+)")
 
 
 class _IPv4HTTPSConnection(http.client.HTTPSConnection):
@@ -1004,7 +1023,15 @@ def _http_get_ipv4(
     timeout: int = 15,
 ) -> str:
     """Perform a thread-safe Keep-Alive HTTPS GET over IPv4 (`socket.AF_INET`) with fast SYN retry and same-socket redirect handling."""
-    req_headers = {**headers, "Connection": "keep-alive"}
+    req_headers = {"Accept-Encoding": "gzip", **headers, "Connection": "keep-alive"}
+    if host == "generator.email" and _GEN_EMAIL_AB_HP[0]:
+        cur_ck = req_headers.get("Cookie") or ""
+        if "__Host-ab_hp=" not in cur_ck:
+            req_headers["Cookie"] = (
+                f"{cur_ck}; __Host-ab_hp={_GEN_EMAIL_AB_HP[0]}"
+                if cur_ck
+                else f"__Host-ab_hp={_GEN_EMAIL_AB_HP[0]}"
+            )
     last_err: Exception | None = None
 
     for attempt in range(2):
@@ -1012,12 +1039,20 @@ def _http_get_ipv4(
         try:
             cur_path = path
             body_bytes = b""
+            content_enc = ""
             for _redir in range(3):
                 if conn.sock is not None and hasattr(conn.sock, "settimeout"):
                     conn.sock.settimeout(max(12.0, float(timeout)))
                 conn.request("GET", cur_path, headers=req_headers)
                 resp = conn.getresponse()
                 body_bytes = resp.read()
+                content_enc = (resp.getheader("Content-Encoding") or "").strip().lower()
+                if host == "generator.email" and hasattr(resp, "getheaders"):
+                    for hk, hv in resp.getheaders():
+                        if hk.lower() == "set-cookie" and "__Host-ab_hp=" in hv:
+                            m_hp = _AB_HP_RE.search(hv)
+                            if m_hp:
+                                _GEN_EMAIL_AB_HP[0] = m_hp.group(1)
                 if resp.status in (301, 302, 303, 307, 308):
                     loc = resp.getheader("Location") or ""
                     if loc:
@@ -1028,6 +1063,9 @@ def _http_get_ipv4(
                         continue
                 break
             _checkin_ipv4_conn(host, conn)
+            if content_enc == "gzip" and body_bytes[:2] == b"\x1f\x8b":
+                with contextlib.suppress(Exception):
+                    body_bytes = gzip.decompress(body_bytes)
             return body_bytes.decode("utf-8", errors="replace")
         except Exception as e:
             last_err = e
@@ -1067,7 +1105,12 @@ def _fetch_via_generator_email(
             headers=headers,
             timeout=max(15, int(timeout)),
         )
-        if 'id="email-table"' not in page_html and user not in page_html.lower():
+        page_low = page_html.lower()
+        if (
+            'id="email-table"' not in page_html
+            and user not in page_low
+            and "generator.email" not in page_low
+        ):
             page_html = _http_get_ipv4(
                 "generator.email",
                 f"/{ctx_base}",
@@ -1742,6 +1785,29 @@ def fetch_hotmail_messages(
     return True, first_otp, msgs
 
 
+def _mail_provider_bucket(email_addr: str | None, mail_token: str | None = None) -> str:
+    """Return the provider group name for per-provider circuit breaking."""
+    clean_em = (email_addr or "").strip().lower()
+    if is_gmail_address(clean_em):
+        return "gmail"
+    if not is_mailtemp_address(clean_em):
+        return "hotmail"
+    tok_low = (mail_token or "").strip().lower()
+    if "tempmail.id.vn" in tok_low:
+        return "tempmail.id.vn"
+    if "tinyhost.shop" in tok_low:
+        return "tinyhost.shop"
+    if "tuan89.site" in tok_low or any(clean_em.endswith(d) for d in _TUAN89_DOMAINS):
+        return "tuan89.site"
+    if "luuvan.site" in tok_low or any(clean_em.endswith(d) for d in _LUUVAN_DOMAINS):
+        return "luuvan.site"
+    if "tempmail.plus" in tok_low or any(clean_em.endswith(d) for d in _TEMPMAIL_PLUS_DOMAINS):
+        return "tempmail.plus"
+    if is_generator_email_address(clean_em, mail_token):
+        return "generator.email"
+    return "mailtemp.vn"
+
+
 def run_safe_mail_checkpoint_scan(
     targets: list[tuple[str, str, str]],
     *,
@@ -1753,13 +1819,13 @@ def run_safe_mail_checkpoint_scan(
     on_progress: Callable[[int, int, str, str, str, dict[str, str] | None], None] | None = None,
     fetch_fn: Callable[..., tuple[bool, str, list[dict[str, str]]]] = fetch_hotmail_messages,
 ) -> dict[str, Any]:
-    """Sequentially scan `targets` (`[(profile_name, email, mail_token), ...]`) with random jitter and a circuit breaker."""
+    """Sequentially scan `targets` (`[(profile_name, email, mail_token), ...]`) with random jitter and a per-provider circuit breaker."""
     hits: dict[str, dict[str, str]] = {}
     dead_tokens: set[str] = set()
     scanned_names: set[str] = set()
     email_status: dict[str, tuple[str, str]] = {}
-    consecutive_errors = 0
-    aborted = False
+    provider_errors: dict[str, int] = {}
+    tripped_providers: set[str] = set()
     total = len(targets)
 
     for idx, (prof_name, email_addr, mail_token) in enumerate(targets, 1):
@@ -1768,6 +1834,15 @@ def run_safe_mail_checkpoint_scan(
 
         em_clean = (email_addr or "").strip()
         em_key = em_clean.lower()
+        provider = _mail_provider_bucket(em_clean, mail_token)
+        if provider in tripped_providers:
+            st_msg = f"⏭ Bỏ qua tạm thời ({provider} đang lỗi kết nối liên tiếp)"
+            if em_key:
+                email_status[em_key] = ("warn", st_msg)
+            if on_progress is not None:
+                on_progress(idx, total, prof_name, em_clean, st_msg, None)
+            continue
+
         ok, otp_or_err, msgs = fetch_fn(
             em_clean,
             mail_token,
@@ -1778,24 +1853,24 @@ def run_safe_mail_checkpoint_scan(
             if is_permanent_mail_token_error(otp_or_err):
                 if em_key:
                     dead_tokens.add(em_key)
-                consecutive_errors = 0
+                provider_errors[provider] = 0
                 st_msg = f"✗ Token hết hạn ({otp_or_err[:40]})"
                 if em_key:
                     email_status[em_key] = ("error", st_msg)
                 if on_progress is not None:
                     on_progress(idx, total, prof_name, em_clean, st_msg, None)
             else:
-                consecutive_errors += 1
+                cur_err = provider_errors.get(provider, 0) + 1
+                provider_errors[provider] = cur_err
                 st_msg = f"⚠ Lỗi kết nối ({otp_or_err[:40]})"
                 if em_key:
                     email_status[em_key] = ("error", st_msg)
                 if on_progress is not None:
                     on_progress(idx, total, prof_name, em_clean, st_msg, None)
-                if consecutive_errors >= max_consecutive_errors:
-                    aborted = True
-                    break
+                if cur_err >= max_consecutive_errors:
+                    tripped_providers.add(provider)
         else:
-            consecutive_errors = 0
+            provider_errors[provider] = 0
             scanned_names.add(prof_name)
             cp = detect_meta_checkpoint_mail(msgs)
             if cp is not None:
@@ -1825,7 +1900,7 @@ def run_safe_mail_checkpoint_scan(
                 if on_progress is not None:
                     on_progress(idx, total, prof_name, em_clean, st_msg, None)
 
-        if idx < total and not aborted:
+        if idx < total and provider not in tripped_providers:
             lo, hi = delay_range
             wait_s = random.uniform(min(lo, hi), max(lo, hi)) if hi > 0 else 0.0
             end_wait = time.monotonic() + wait_s
@@ -1834,11 +1909,18 @@ def run_safe_mail_checkpoint_scan(
                     break
                 time.sleep(min(0.15, max(0.01, end_wait - time.monotonic())))
 
+    aborted = (
+        bool(tripped_providers)
+        and not scanned_names
+        and not hits
+        and not dead_tokens
+    )
     return {
         "hits": hits,
         "dead_tokens": dead_tokens,
         "scanned_names": scanned_names,
         "email_status": email_status,
+        "tripped_providers": tripped_providers,
         "total": total,
         "aborted": aborted,
         "stopped": bool(stop_event is not None and stop_event.is_set()),

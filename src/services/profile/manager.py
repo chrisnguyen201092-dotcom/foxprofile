@@ -22,6 +22,7 @@ from ...models.profile import (
     set_active_status_tags,
     today_ymd,
 )
+from ...services.avatar_store import rename_avatar
 from ...services.monitor import extract_proxy_endpoint, extract_proxy_port
 from ...utils.proxy_parser import normalize_proxy
 from ...utils.totp import (
@@ -808,6 +809,9 @@ class ProfileManager:
                     (new_name if k == original_name else k): (profile if k == original_name else v)
                     for k, v in self.profiles.items()
                 }
+                with contextlib.suppress(Exception):
+                    avatars_dir = str(pathlib.Path(PROFILES_FILE).parent / "avatars")
+                    rename_avatar(original_name, new_name, avatars_dir=avatars_dir)
 
             self.save_profiles()
             logger.info("Updated profile: %s -> %s", original_name, new_name)
