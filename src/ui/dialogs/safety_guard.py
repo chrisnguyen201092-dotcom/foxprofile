@@ -25,13 +25,13 @@ _CYCLE_PRESETS = (4, 5, 6)
 
 
 def _warning_card(w: PreLaunchWarning) -> ft.Container:
-    is_crit = w.level == "critical"
+    is_crit = w.level == "critical" or w.code in ("cluster_busy", "batch_cluster_collision")
     col = COLORS["error"] if is_crit else COLORS["warning"]
     icon = ft.Icons.GPP_BAD_ROUNDED if is_crit else ft.Icons.WARNING_AMBER_ROUNDED
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=12, vertical=9),
         border_radius=8,
-        bgcolor=COLORS["input_bg"],
+        bgcolor=ft.Colors.with_opacity(0.08, col),
         border=ft.Border.all(1, col),
         content=ft.Row(
             spacing=10,
@@ -122,13 +122,16 @@ def open_bulk_prelaunch_guard_dialog(
     total_count = len(safe_names) + len(issues)
     rows: list[ft.Control] = []
     for pname, wlist in issues.items():
-        has_crit = any(w.level == "critical" for w in wlist)
+        has_crit = any(
+            w.level == "critical" or w.code in ("cluster_busy", "batch_cluster_collision")
+            for w in wlist
+        )
         col = COLORS["error"] if has_crit else COLORS["warning"]
         rows.append(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 border_radius=7,
-                bgcolor=COLORS["input_bg"],
+                bgcolor=ft.Colors.with_opacity(0.08, col),
                 border=ft.Border.all(1, col),
                 content=ft.Column(
                     spacing=3,
@@ -1099,13 +1102,13 @@ def _build_squad_candidate_row(
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=6, vertical=2),
                 border_radius=4,
-                bgcolor=ft.Colors.with_opacity(0.12, COLORS["warning"]),
-                border=ft.Border.all(1, COLORS["warning"]),
+                bgcolor=ft.Colors.with_opacity(0.11, COLORS["error"]),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.50, COLORS["error"])),
                 content=ft.Text(
                     get_string("work_squad_busy_cluster_badge"),
                     size=10.5,
                     font_family=FONT_SEMIBOLD,
-                    color=COLORS["warning"],
+                    color=COLORS["error"],
                 ),
             )
         )

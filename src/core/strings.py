@@ -15,6 +15,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "col_device": "Device",
         "col_proxy": "Proxy",
         "col_geo": "Timezone · Locale",
+        "col_trust": "Trust",
+        "tooltip_sort_trust": "Click to sort by Trust Score",
         "col_status": "Status",
         "direct_short": "Direct",
         "follows_ip": "Follows IP",
@@ -585,14 +587,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_monitor_subtitle": "Read-only inspection of account warmup readiness, Scamalytics/ProxyCheck IP fraud scores, and cross-profile correlation risks.",
         "trust_tab_scores": "Trust & IP Score ({count})",
         "trust_tab_audit": "Cross-Profile Audit ({count})",
-        "trust_kpi_high": "✦ High Trust (≥56)",
+        "trust_kpi_high": "✦ High Trust (≥45)",
         "trust_kpi_clean_ip": "✦ Clean IP (≤25pt)",
         "trust_kpi_audit": "Audit Risks",
         "trust_kpi_audit_ok": "✦ 0 Issues",
         "trust_kpi_ports": "Active Ports",
         "trust_filter_all": "All ({count})",
         "trust_filter_diamond": "✦ Diamond ({count})",
-        "trust_filter_elite": "🛡️ Trusted ({count})",
+        "trust_filter_elite": "◆ Trusted ({count})",
         "trust_filter_platinum": "❖ Established ({count})",
         "trust_filter_trusted": "◈ Stable ({count})",
         "trust_filter_warming": "◇ Warming ({count})",
@@ -615,23 +617,34 @@ STRINGS: dict[str, dict[str, str]] = {
         "ip_flag_yes": "⚠ Flagged (Proxy/VPN)",
         "ip_flag_no": "✦ Clean (Not flagged)",
         "trust_tier_diamond": "✦ {score}pt · Diamond",
-        "trust_tier_elite": "🛡️ {score}pt · Trusted",
+        "trust_tier_elite": "◆ {score}pt · Trusted",
         "trust_tier_platinum": "❖ {score}pt · Established",
         "trust_tier_trusted": "◈ {score}pt · Stable",
         "trust_tier_warming": "◇ {score}pt · Warming",
         "trust_tier_cold": "○ {score}pt · New",
         "trust_tier_banned": "✕ Banned / Hold",
+        "trust_pts_short": "{sym} {score}pt",
+        "trust_sub_diamond": "Diamond",
+        "trust_sub_elite": "Trusted",
+        "trust_sub_platinum": "Estab.",
+        "trust_sub_trusted": "Stable",
+        "trust_sub_warming": "Warming",
+        "trust_sub_incubating": "Incubating",
+        "trust_sub_red_cap": "Capped 44",
+        "trust_sub_cold": "New",
+        "trust_sub_empty": "Unopened",
+        "trust_sub_banned": "Banned",
         "trust_breakdown_tooltip": (
-            "Meta Sigma & Hatch OIDC Trust Score: {score}/150\n"
+            "Empirical Survival & Session Trust Score: {score}/100\n"
             "• Meta `datr` Device Token: {datr_age}d old · synced on {datr_doms} Meta/Muse domain(s)\n"
             "• Multi-Day Login Rhythm: {act_days} active day(s) · {sess_cnt} session(s) ({mins}m)\n"
-            "• Hatch VM Session (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookies)\n"
+            "• Hatch VM Session (`hatch_gw` + `hatch_sess`): {sess} ({cookies} cookies)\n"
             "• First-Party Storage (`ps_l`/`ps_n`): {ps_l} · History: {hpages} page(s)\n"
             "• Prior Meta Checkpoint Scar: {chk_scar}\n"
             "• HTTP Cache2 ETag Sync: {cache2}\n"
-            "── Tier Ladder (0–150): ○ New (1–20) · ◇ Warming (21–55) · ◈ Stable (56–80, 12d+) · ❖ Established (81–105, 21d+) · 🛡️ Trusted (106–130, 30d+) · ✦ Diamond (131–150, 45d+)"
+            "── Tier Ladder (0–100): ○ New (<3d, 1–20) · ◇ Warming (<7d/Hold, 21–44) · ◈ Stable (7d+, 45–61) · ❖ Established (21d+, 62–75) · ◆ Trusted (>1m/30d+, 76–89) · ✦ Diamond (>3m/90d+, 90–100)"
         ),
-        "trust_hist_tab": "Trust Breakdown ({score}/150)",
+        "trust_hist_tab": "Trust Breakdown ({score}/100)",
         "tooltip_trust_breakdown": "Click to view detailed Trust Score calculation",
         "trust_expand_hint": "💡 Click any account row below (or its Trust badge) to expand its item-by-item Trust Score calculation & stage cap checklist.",
         "trust_yes": "✦ Ready",
@@ -787,6 +800,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "col_device": "Thiết bị",
         "col_proxy": "Proxy",
         "col_geo": "Timezone · Locale",
+        "col_trust": "Trust",
+        "tooltip_sort_trust": "Nhấn để sắp xếp theo Điểm Trust",
         "col_status": "Trạng thái",
         "direct_short": "Trực tiếp",
         "follows_ip": "Theo IP",
@@ -1357,14 +1372,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "trust_monitor_subtitle": "Phân tích chỉ-đọc (an toàn tuyệt đối) điểm rủi ro IP (Scamalytics · ProxyCheck), độ tín nhiệm tài khoản và rà soát xung đột chéo.",
         "trust_tab_scores": "Điểm Trust & Độ sạch IP ({count})",
         "trust_tab_audit": "Kiểm toán Chống Tương quan ({count})",
-        "trust_kpi_high": "✦ Trust Cao (≥56đ)",
+        "trust_kpi_high": "✦ Trust Cao (≥45đ)",
         "trust_kpi_clean_ip": "✦ IP Sạch (≤25pt)",
         "trust_kpi_audit": "Kiểm toán Chéo",
         "trust_kpi_audit_ok": "✦ 0 Rủi ro",
         "trust_kpi_ports": "Cổng Đang Mở",
         "trust_filter_all": "Tất cả ({count})",
         "trust_filter_diamond": "✦ Kim Cương ({count})",
-        "trust_filter_elite": "🛡️ Tin cậy ({count})",
+        "trust_filter_elite": "◆ Tin cậy ({count})",
         "trust_filter_platinum": "❖ Bền vững ({count})",
         "trust_filter_trusted": "◈ Ổn định ({count})",
         "trust_filter_warming": "◇ Đang tích lũy ({count})",
@@ -1387,23 +1402,34 @@ STRINGS: dict[str, dict[str, str]] = {
         "ip_flag_yes": "⚠ Bị gắn cờ Proxy/VPN",
         "ip_flag_no": "✦ Ẩn danh sạch (Không bị gắn cờ)",
         "trust_tier_diamond": "✦ {score}đ · Kim Cương",
-        "trust_tier_elite": "🛡️ {score}đ · Tin cậy",
+        "trust_tier_elite": "◆ {score}đ · Tin cậy",
         "trust_tier_platinum": "❖ {score}đ · Bền vững",
         "trust_tier_trusted": "◈ {score}đ · Ổn định",
         "trust_tier_warming": "◇ {score}đ · Tích lũy",
         "trust_tier_cold": "○ {score}đ · Khởi tạo",
         "trust_tier_banned": "✕ Tạm ngưng / Khóa",
+        "trust_pts_short": "{sym} {score}đ",
+        "trust_sub_diamond": "Kim Cương",
+        "trust_sub_elite": "Tin cậy",
+        "trust_sub_platinum": "Bền vững",
+        "trust_sub_trusted": "Ổn định",
+        "trust_sub_warming": "Tích lũy",
+        "trust_sub_incubating": "Đang ủ",
+        "trust_sub_red_cap": "Trần Đỏ",
+        "trust_sub_cold": "Khởi tạo",
+        "trust_sub_empty": "Chưa mở",
+        "trust_sub_banned": "Đã khóa",
         "trust_breakdown_tooltip": (
-            "Điểm Tín Nhiệm Meta Sigma & Hatch OIDC: {score}/150\n"
+            "Điểm Tín Nhiệm Sống Sót & Phiên Trượt: {score}/100\n"
             "• Cookie định danh thiết bị Meta `datr`: {datr_age} ngày · đồng bộ {datr_doms} miền Meta/Muse\n"
             "• Lịch sử hoạt động nhiều ngày: {act_days} ngày mở · {sess_cnt} phiên ({mins}p)\n"
-            "• Phiên Hatch VM (`hatch_gw` + `hatch_vml`): {sess} ({cookies} cookie)\n"
+            "• Phiên Hatch VM (`hatch_gw` + `hatch_sess`): {sess} ({cookies} cookie)\n"
             "• Cookie phiên chính thức (`ps_l`/`ps_n`): {ps_l} · Lịch sử duyệt web: {hpages} trang\n"
             "• Lịch sử Checkpoint Meta: {chk_scar}\n"
             "• Đồng bộ ETag HTTP Cache2: {cache2}\n"
-            "── Hệ thống 6 Hạng (0–150đ): ○ Khởi tạo (1–20đ) · ◇ Tích lũy (21–55đ) · ◈ Ổn định (56–80đ, ≥12d) · ❖ Bền vững (81–105đ, ≥21d) · 🛡️ Tin cậy (106–130đ, ≥30d) · ✦ Kim Cương (131–150đ, ≥45d)"
+            "── Hệ thống 6 Hạng (0–100đ): ○ Khởi tạo (<3d, 1–20đ) · ◇ Tích lũy (<7d/Ủ phôi, 21–44đ) · ◈ Ổn định (7d+, 45–61đ) · ❖ Bền vững (21d+, 62–75đ) · ◆ Tin cậy (>1 tháng, 76–89đ) · ✦ Kim Cương (>3 tháng, 90–100đ)"
         ),
-        "trust_hist_tab": "Chi tiết Trust ({score}/150)",
+        "trust_hist_tab": "Chi tiết Trust ({score}/100)",
         "tooltip_trust_breakdown": "Bấm để xem chi tiết cách tính điểm Trust",
         "trust_expand_hint": "💡 Bấm vào dòng tài khoản bất kỳ bên dưới (hoặc bấm vào huy hiệu điểm Trust) để mở bảng phân tích chi tiết từng hạng mục điểm & điều kiện mở trần.",
         "trust_yes": "✦ Đã có",

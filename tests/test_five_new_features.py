@@ -2459,8 +2459,10 @@ def test_monitor_trust_score_and_anti_correlation_auditor(tmp_path):
     assert d_info.cookie_count >= 60
     assert d_info.history_pages >= 50
     assert d_info.ip_fraud_score == 0
-    assert d_info.trust_score >= 95
-    assert d_info.trust_tier == "platinum"
+    assert d_info.trust_score >= 76
+    assert d_info.trust_score <= 89
+    assert d_info.trust_tier == "elite"
+    assert snap.elite_count == 1
     assert snap.platinum_count == 1
     assert snap.clean_ip_count == 1
 
@@ -2612,11 +2614,11 @@ def test_trust_score_consistency_root_domains_and_tier_gates(tmp_path):
     assert w_info.active_days == 14
     assert w_info.session_count == 25
     assert w_info.total_minutes == 1250
-    assert w_info.trust_score >= 81
+    assert 62 <= w_info.trust_score <= 75
     assert w_info.trust_tier == "platinum"
 
     assert cf_info.hatch_gw is False
-    assert cf_info.trust_score <= 25
+    assert cf_info.trust_score <= 20
 
 
 def test_safe_farming_scheduler_and_dialog(isolated_pm, tmp_path):
@@ -3125,13 +3127,14 @@ def test_trust_score_breakdown_and_ui_dialogs():
         timezone="America/Los_Angeles",
         locale="en-US",
     )
-    # Raw score > 48, but datr_age_days=5.2 (<7d) caps final score at Stage 0b (48)
+    # Raw score > 44, but datr_age_days=5.2 (<7d) caps final score at Stage 1 under 7d (44)
     info_warm = ProfileMonitorInfo(
         name="CappedWarmAcc",
         port=":5295",
         hatch_gw=True,
         hatch_vml=True,
         hatch_sess=True,
+        sess_exp="Còn 25d",
         has_thread_url=True,
         tab_count=2,
         has_ps_l=True,
@@ -3146,20 +3149,21 @@ def test_trust_score_breakdown_and_ui_dialogs():
         total_minutes=300,
         ip_fraud_score=26,
         ip_proxy_flag=False,
-        trust_score=43,
+        trust_score=44,
         trust_tier="warming",
         has_proxy=True,
         has_geo_pin=True,
     )
     bd = compute_trust_breakdown(info_warm, p)
-    assert len(bd["pillars"]) == 6
-    assert sum(pil["max_pts"] for pil in bd["pillars"]) == 150
-    assert bd["positive_total"] == (4 + 8 + 7 + 20 + 10 + 17)  # 66
+    assert len(bd["pillars"]) == 4
+    assert sum(pil["max_pts"] for pil in bd["pillars"]) == 100
+    assert bd["pillars"][0]["max_pts"] == 50
+    assert bd["positive_total"] == (10 + 15 + 17 + 13)  # 55
     assert bd["penalty_total"] == 0
-    assert bd["raw_score"] == 66
-    assert bd["stage_cap"] == 43
-    assert bd["capped_by"] == 23
-    assert bd["final_score"] == 43
+    assert bd["raw_score"] == 55
+    assert bd["stage_cap"] == 44
+    assert bd["capped_by"] == 11
+    assert bd["final_score"] == 44
     assert any(not g["passed"] for g in bd["gates"])
 
     panel = _build_trust_breakdown_panel(info_warm, p)
@@ -3377,6 +3381,8 @@ def test_build_safe_schedule_preserves_existing_applied_tags(isolated_pm, tmp_pa
 
 
 def test_master_and_immortal_trust_tiers_above_diamond(tmp_path):
+    import datetime as dt
+
     from src.services.monitor import MonitorService, compute_trust_breakdown
     from src.ui.components.profile_card import _geo_score_badge
     from src.ui.dialogs.batch_and_backup import (
@@ -3418,96 +3424,140 @@ def test_master_and_immortal_trust_tiers_above_diamond(tmp_path):
         conn.commit()
         conn.close()
 
+    _seed_profile_dir("Cold2d", 2.0)
     _seed_profile_dir("Platinum22d", 22.0)
     _seed_profile_dir("Elite32d", 32.0)
-    _seed_profile_dir("Diamond48d", 48.0)
+    _seed_profile_dir("Diamond95d", 95.0)
+    _seed_profile_dir("CheckpointAcc", 35.0)
+    _seed_profile_dir("TaintRed62", 25.0)
+    _seed_profile_dir("CleanNew14", 8.5)
+
+    p_chk = sqlite3.connect(str(data_dir / "CheckpointAcc" / "places.sqlite"))
+    p_chk.execute("CREATE TABLE moz_places (url TEXT, rev_host TEXT, visit_count INTEGER)")
+    p_chk.execute(
+        "INSERT INTO moz_places VALUES (?, ?, ?)",
+        ("https://auth.meta.com/checkpoints/?id=1", "moc.atem.htua.", 1),
+    )
+    p_chk.commit()
+    p_chk.close()
 
     mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
-    # 1. Platinum22d: 15 active days, 26 sessions, 1560m -> passes Platinum (same 21d difficulty), capped at 105
-    mon._live_sessions["Platinum22d"] = [
-        {
-            "start": f"2026-10-{1 + (idx % 15):02d} 10:{idx:02d}:00",
-            "end": f"2026-10-{1 + (idx % 15):02d} 11:{idx:02d}:00",
-            "duration_mins": 60,
-            "port": ":10001",
-            "is_live": False,
-        }
-        for idx in range(26)
-    ]
-    # 2. Elite32d: 21 active days, 36 sessions, 2160m (36h) + mail_token -> passes Elite (30d), capped at 130
-    mon._live_sessions["Elite32d"] = [
-        {
-            "start": f"2026-10-{1 + (idx % 21):02d} 10:{idx % 60:02d}:00",
-            "end": f"2026-10-{1 + (idx % 21):02d} 11:{idx % 60:02d}:00",
-            "duration_mins": 60,
-            "port": ":10002",
-            "is_live": False,
-        }
-        for idx in range(36)
-    ]
-    # 3. Diamond48d: 29 active days, 52 sessions, 3120m (52h) + mail_token + password -> Diamond (131-150)
-    mon._live_sessions["Diamond48d"] = [
-        {
-            "start": f"2026-10-{1 + (idx % 29):02d} 10:{idx % 60:02d}:00",
-            "end": f"2026-10-{1 + (idx % 29):02d} 11:{idx % 60:02d}:00",
-            "duration_mins": 60,
-            "port": ":10003",
-            "is_live": False,
-        }
-        for idx in range(52)
-    ]
-
-    for idx, pname in enumerate(["Platinum22d", "Elite32d", "Diamond48d"], 1):
+    for idx, pname in enumerate(
+        [
+            "Cold2d",
+            "Platinum22d",
+            "Elite32d",
+            "Diamond95d",
+            "CheckpointAcc",
+            "TaintRed62",
+            "CleanNew14",
+        ],
+        1,
+    ):
         ip = f"2606:65c0:40:2d{idx}::1"
-        mon.record_exit_ip(pname, ip, country="US", proxy=f"http://u:p@1.2.3.4:1000{idx}")
+        mon.record_exit_ip(pname, ip, country="US", proxy=f"http://u:p@sp02-usa101.nguonproxy.com:1000{idx}")
         mon.record_ip_risk(ip, {"fraud_score": 51, "proxy_flag": True})
 
     profiles = [
         Profile(
+            name="Cold2d",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10001",
+            timezone="America/Detroit",
+            locale="en-US",
+        ),
+        Profile(
             name="Platinum22d",
-            proxy="http://u:p@1.2.3.4:10001",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10002",
             timezone="America/Detroit",
             locale="en-US",
             mail_token="M.C501_BAY.0.U.-token1|client1",
         ),
         Profile(
             name="Elite32d",
-            proxy="http://u:p@1.2.3.4:10002",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10003",
             timezone="America/Detroit",
             locale="en-US",
             mail_token="M.C501_BAY.0.U.-token2|client2",
         ),
         Profile(
-            name="Diamond48d",
-            proxy="http://u:p@1.2.3.4:10003",
+            name="Diamond95d",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10004",
             timezone="America/Detroit",
             locale="en-US",
             mail_token="M.C501_BAY.0.U.-token3|client3",
-            password="secret_password",
-            recovery_email="rec@gmail.com",
+        ),
+        Profile(
+            name="CheckpointAcc",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10005",
+            timezone="America/Detroit",
+            locale="en-US",
+        ),
+        Profile(
+            name="TaintRed62",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10006",
+            timezone="America/Detroit",
+            locale="en-US",
+            email="tlazglb@hotmail.com",
+            notes="SĐT +19376123124",
+        ),
+        Profile(
+            name="CleanNew14",
+            proxy="http://u:p@sp02-usa101.nguonproxy.com:10007",
+            timezone="America/Detroit",
+            locale="en-US",
+            created_at=(dt.date.today() - dt.timedelta(days=26)).isoformat(),
+            email="ashleymilleruh3nptuw@hotmail.com",
+            recovery_email="ashleymilleruh3nptuw@fviainboxes.com",
         ),
     ]
+    # Add 3 banned @fviainboxes.com profiles to exercise burned_batch exemption for CleanNew14
+    for b_idx in range(3):
+        profiles.append(
+            Profile(
+                name=f"BanFvia{b_idx}",
+                status="ban",
+                recovery_email=f"b{b_idx}@fviainboxes.com",
+            )
+        )
 
     snap = mon.snapshot(profiles, running_names=set())
+    c_info = snap.profiles["Cold2d"]
     p_info = snap.profiles["Platinum22d"]
     e_info = snap.profiles["Elite32d"]
-    d_info = snap.profiles["Diamond48d"]
+    d_info = snap.profiles["Diamond95d"]
+    chk_info = snap.profiles["CheckpointAcc"]
+    red_info = snap.profiles["TaintRed62"]
+    new14_info = snap.profiles["CleanNew14"]
+
+    assert c_info.trust_tier == "cold"
+    assert 1 <= c_info.trust_score <= 20
 
     assert p_info.trust_tier == "platinum"
-    assert 81 <= p_info.trust_score <= 105
+    assert 62 <= p_info.trust_score <= 75
 
     assert e_info.trust_tier == "elite"
-    assert 106 <= e_info.trust_score <= 130
+    assert 76 <= e_info.trust_score <= 89
 
     assert d_info.trust_tier == "diamond"
-    assert 131 <= d_info.trust_score <= 150
-    assert d_info.trust_score == 150
+    assert 90 <= d_info.trust_score <= 100
+    assert d_info.trust_score == 100
+
+    assert chk_info.has_meta_checkpoint is True
+    assert chk_info.trust_tier == "banned"
+    assert chk_info.trust_score == 0
+
+    assert "burned_batch" in red_info.audit_codes
+    assert red_info.trust_tier == "warming"
+    assert red_info.trust_score <= 44
+
+    assert "burned_batch" not in new14_info.audit_codes
+    assert new14_info.trust_tier == "platinum"
 
     assert snap.diamond_count == 1
     assert snap.elite_count == 2
-    assert snap.platinum_count == 3
+    assert snap.platinum_count == 4
 
-    for p_obj, info_obj in zip(profiles, [p_info, e_info, d_info], strict=True):
+    for p_obj, info_obj in zip(profiles[:4], [c_info, p_info, e_info, d_info], strict=True):
         bd = compute_trust_breakdown(info_obj, p_obj)
         assert bd["final_score"] == info_obj.trust_score
         assert _geo_score_badge(info_obj) is not None
@@ -5545,5 +5595,405 @@ print("OK")
     assert res.returncode == 0, f"stdout={res.stdout!r}, stderr={res.stderr!r}"
     assert res.stderr.strip() == ""
     assert "OK" in res.stdout
+
+
+def test_profile_card_trust_column_and_monitor_trust_pill() -> None:
+    """Verify inline Trust pill on _device Line 1, Trust sort chip on header, and Monitor pills."""
+    from src.core.strings import get_string
+    from src.models.profile import Profile
+    from src.services.monitor import MonitorSnapshot, ProfileMonitorInfo
+    from src.ui.components.profile_card import COLUMNS, build_header_row, build_profile_card
+    from src.ui.dialogs.batch_and_backup import (
+        _build_trust_points_pill,
+        _build_trust_score_chip,
+        open_trust_monitor_dialog,
+    )
+
+    assert "trust" not in COLUMNS
+    assert list(COLUMNS.keys()) == ["select", "name", "device", "proxy", "geo", "actions"]
+
+    hdr_plain = build_header_row(False, False, lambda _: None)
+    assert len(hdr_plain.content.controls) == 6
+    assert hdr_plain.content.controls[2].content.value == get_string("col_device")
+
+    import flet as ft
+
+    sort_clicks: list[str] = []
+    hdr_default = build_header_row(
+        False,
+        False,
+        lambda _: None,
+        sort_by="custom",
+        on_sort_trust=lambda: sort_clicks.append("clicked"),
+    )
+    assert len(hdr_default.content.controls) == 6
+    device_hdr_row = hdr_default.content.controls[2].content
+    trust_sort_hdr = device_hdr_row.controls[0]
+    assert trust_sort_hdr.width == 64
+    assert trust_sort_hdr.border is None
+    hdr_lbl, hdr_ico = trust_sort_hdr.content.controls
+    assert hdr_lbl.value == get_string("col_trust")
+    assert hdr_ico.icon == ft.Icons.UNFOLD_MORE_ROUNDED
+    assert device_hdr_row.controls[1].value == get_string("col_device")
+    trust_sort_hdr.on_click(None)
+    assert sort_clicks == ["clicked"]
+
+    hdr_desc = build_header_row(False, False, lambda _: None, sort_by="trust_desc")
+    assert hdr_desc.content.controls[2].content.controls[0].content.controls[1].icon == ft.Icons.ARROW_DOWNWARD_ROUNDED
+    hdr_asc = build_header_row(False, False, lambda _: None, sort_by="trust_asc")
+    assert hdr_asc.content.controls[2].content.controls[0].content.controls[1].icon == ft.Icons.ARROW_UPWARD_ROUNDED
+
+    cases = [
+        (
+            ProfileMonitorInfo(name="Diamond95", trust_score=95, trust_tier="diamond", datr_age_days=92.0, cookie_count=10),
+            ft.Icons.DIAMOND_ROUNDED,
+            "95",
+            "trust_sub_diamond",
+        ),
+        (
+            ProfileMonitorInfo(name="Elite88", trust_score=88, trust_tier="elite", datr_age_days=32.0, cookie_count=10, sess_exp_days=16, sess_exp="Còn 16d"),
+            ft.Icons.VERIFIED_USER_ROUNDED,
+            "88",
+            "trust_sub_elite",
+        ),
+        (
+            ProfileMonitorInfo(name="Plat75", trust_score=75, trust_tier="platinum", datr_age_days=24.0, cookie_count=10),
+            ft.Icons.STAR_ROUNDED,
+            "75",
+            "trust_sub_platinum",
+        ),
+        (
+            ProfileMonitorInfo(name="Trust61", trust_score=61, trust_tier="trusted", datr_age_days=10.0, cookie_count=10),
+            ft.Icons.CHECK_CIRCLE_ROUNDED,
+            "61",
+            "trust_sub_trusted",
+        ),
+        (
+            ProfileMonitorInfo(name="Incubate35", trust_score=35, trust_tier="warming", datr_age_days=0.0, cookie_count=0, session_count=0),
+            ft.Icons.HOURGLASS_TOP_ROUNDED,
+            "35",
+            "trust_sub_incubating",
+        ),
+        (
+            ProfileMonitorInfo(name="RedCap44", trust_score=44, trust_tier="warming", datr_age_days=18.0, cookie_count=10, audit_codes=["burned_batch"]),
+            ft.Icons.WARNING_ROUNDED,
+            "44",
+            "trust_sub_red_cap",
+        ),
+        (
+            ProfileMonitorInfo(name="Empty0", trust_score=0, trust_tier="cold"),
+            ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED,
+            "0",
+            "trust_sub_empty",
+        ),
+        (
+            ProfileMonitorInfo(name="Cold12", trust_score=12, trust_tier="cold", datr_age_days=1.0, cookie_count=2),
+            ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED,
+            "12",
+            "trust_sub_cold",
+        ),
+        (
+            ProfileMonitorInfo(name="Banned0", trust_score=0, trust_tier="banned", is_banned=True),
+            ft.Icons.CANCEL_ROUNDED,
+            "0",
+            "trust_sub_banned",
+        ),
+    ]
+
+    from src.ui.theme import COLORS
+
+    expected_colors = {
+        "Diamond95": "#1D4ED8",
+        "Elite88": "#15803D",
+        "Plat75": "#7C3AED",
+        "Trust61": "#0284C7",
+        "Incubate35": "#475569",
+        "RedCap44": "#D97706",
+        "Empty0": COLORS["text_dim"],
+        "Cold12": COLORS["text_dim"],
+        "Banned0": COLORS["error"],
+    }
+
+    date_clicks: list[str] = []
+    detail_clicks: list[str] = []
+    for info, expected_icon, score_str, sub_key in cases:
+        p = Profile(name=info.name, created_at="2026-10-01")
+        card = build_profile_card(
+            p,
+            False,
+            False,
+            lambda _: None,
+            lambda _: None,
+            lambda _: None,
+            device="1920x1080 · 8 CPU",
+            monitor_info=info,
+            on_edit_dates=lambda n: date_clicks.append(n),
+            on_trust_detail=lambda n: detail_clicks.append(n),
+        )
+        assert len(card.content.controls) == 6
+        device_row = card.content.controls[2].content
+        trust_pill = device_row.controls[0]
+        assert trust_pill.width == 64
+        assert trust_pill.height == 26
+        stack_col = device_row.controls[1].content
+        top_row = stack_col.controls[0]
+        age_ctrl, sep_ctrl, os_txt = top_row.controls
+        assert sep_ctrl.value == "·"
+        assert os_txt.value == "WIN"
+        icon_ctrl, txt_ctrl = trust_pill.content.controls
+        assert icon_ctrl.icon == expected_icon
+        assert icon_ctrl.size == 14
+        assert icon_ctrl.color == expected_colors[info.name]
+        assert txt_ctrl.size == 11.5
+        assert score_str in txt_ctrl.value
+        assert txt_ctrl.color == expected_colors[info.name]
+        assert get_string(sub_key) in (trust_pill.tooltip or "")
+        age_ctrl.on_click(None)
+        trust_pill.on_click(None)
+
+    assert date_clicks == [c[0].name for c in cases]
+    assert detail_clicks == [c[0].name for c in cases]
+
+    card_no_mon = build_profile_card(
+        Profile(name="NoMon", created_at="2026-10-01"),
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        device="1920x1080 · 8 CPU",
+        monitor_info=None,
+    )
+    assert card_no_mon.content.controls[2].content.controls[0].content.value == "—"
+
+    for info, expected_icon, _score_str, _sub_key in cases:
+        pill = _build_trust_points_pill(info, compact=True)
+        p_icon, p_txt = pill.content.controls
+        assert p_icon.icon == expected_icon
+        assert p_txt.color == expected_colors[info.name]
+
+    elite_info = cases[1][0]
+    compact_pill = _build_trust_points_pill(elite_info, compact=True)
+    full_pill = _build_trust_points_pill(elite_info, compact=False)
+    sess_chip = _build_trust_score_chip(elite_info)
+    assert compact_pill.content.controls[0].icon == ft.Icons.VERIFIED_USER_ROUNDED
+    assert "88" in compact_pill.content.controls[1].value
+    assert full_pill.content.value == get_string("trust_tier_elite", score=88)
+    assert sess_chip.content.value == "✓ 16d"
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.dialogs = []
+
+        def show_dialog(self, dlg) -> None:
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self) -> None:
+            if self.dialogs:
+                self.dialogs.pop()
+
+        def update(self) -> None:
+            pass
+
+    page = FakePage()
+    p_elite = Profile(name="Elite88", proxy="http://u:p@1.2.3.4:10001")
+    snap = MonitorSnapshot(profiles={"Elite88": elite_info})
+    open_trust_monitor_dialog(
+        page,  # type: ignore[arg-type]
+        lambda: [p_elite],
+        lambda: snap,
+        lambda _ip, _risk: None,
+    )
+    assert len(page.dialogs) == 1
+
+
+def test_proxy_cooldown_and_subnet_warning_colors_and_badges():
+    """Verify vivid orange cooldown and red /64 subnet collision badges on profile cards and monitor."""
+    import flet as ft
+
+    from src.core.strings import get_string
+    from src.models.profile import Profile
+    from src.services.monitor import ProfileMonitorInfo
+    from src.ui.components.profile_card import build_profile_card
+    from src.ui.theme import COLORS
+
+    assert COLORS["warning"] == "#EA580C"
+
+    cooldown_info = ProfileMonitorInfo(
+        name="CooldownAcc",
+        port=":10001",
+        cluster="usa101",
+        port_cooldown_by=("OtherA", 12),
+    )
+    assert cooldown_info.has_warning is True
+
+    subnet_info = ProfileMonitorInfo(
+        name="SubnetAcc",
+        port=":10002",
+        cluster="usa101",
+        cluster_collision_label="usa101",
+        cluster_busy_by=["OtherB"],
+        port_cooldown_by=("OtherA", 12),
+    )
+    assert subnet_info.has_warning is True
+
+    p_cd = Profile(name="CooldownAcc", proxy="http://u:p@1.2.3.4:10001")
+    cd_card = build_profile_card(
+        p_cd,
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        monitor_info=cooldown_info,
+    )
+    cd_proxy_col = cd_card.content.controls[3].content
+    cd_pill = cd_proxy_col.controls[1]
+    assert isinstance(cd_pill, ft.Container)
+    assert cd_pill.bgcolor == ft.Colors.with_opacity(0.11, "#EA580C")
+    assert cd_pill.content.color == "#EA580C"
+    assert cd_pill.content.weight == ft.FontWeight.W_700
+    assert get_string("proxy_cooldown_by", left=12, other="OtherA") in cd_pill.content.value
+
+    p_sub = Profile(name="SubnetAcc", proxy="http://u:p@1.2.3.4:10002")
+    ip_clicks: list[str] = []
+    sub_card = build_profile_card(
+        p_sub,
+        False,
+        False,
+        lambda _: None,
+        lambda _: None,
+        lambda _: None,
+        monitor_info=subnet_info,
+        on_ip_history=lambda n: ip_clicks.append(n),
+    )
+    sub_proxy_col = sub_card.content.controls[3].content
+    sub_pill = sub_proxy_col.controls[1]
+    assert isinstance(sub_pill, ft.Container)
+    assert sub_pill.bgcolor == ft.Colors.with_opacity(0.11, COLORS["error"])
+    assert sub_pill.content.color == COLORS["error"]
+    assert sub_pill.content.weight == ft.FontWeight.W_700
+    assert get_string("proxy_cluster_busy_by", cluster="usa101", other="OtherB") in sub_pill.content.value
+    sub_pill.on_click(None)
+    assert ip_clicks == ["SubnetAcc"]
+
+
+def test_trust_score_incubated_account_survival_vs_datr_stabilization():
+    """Verify Trust Score 2.0 centers on real account survival age while datr checks OIDC stabilization."""
+    import datetime as dt
+
+    from src.models.profile import Profile
+    from src.services.monitor import ProfileMonitorInfo, compute_trust_breakdown
+
+    today = dt.date.today()
+
+    def _mk_info(
+        name: str,
+        *,
+        datr_age_days: float,
+        hatch_gw: bool = True,
+        has_muse_auth: bool = True,
+        hatch_sess: bool = True,
+        cookie_count: int = 24,
+        sess_exp_days: int | None = 25,
+    ) -> ProfileMonitorInfo:
+        return ProfileMonitorInfo(
+            name=name,
+            port=":10001",
+            cluster="usa101",
+            hatch_gw=hatch_gw,
+            hatch_vml=hatch_gw,
+            hatch_sess=hatch_sess,
+            has_muse_auth=has_muse_auth,
+            sess_exp=f"Còn {sess_exp_days}d" if sess_exp_days is not None else "-",
+            has_ps_l=hatch_gw,
+            has_meta=hatch_gw,
+            has_cache2=hatch_gw,
+            datr_age_days=datr_age_days,
+            datr_domains=3 if hatch_gw else 0,
+            cookie_count=cookie_count,
+            ip_fraud_score=10,
+            ip_proxy_flag=False,
+            has_proxy=True,
+            has_geo_pin=True,
+        )
+
+    # 1. Incubated >1m account (#1 Kayla archetype: 39d old, logged in later -> datr 9.8d) => Elite (86-89)
+    p_1m = Profile(
+        name="KaylaArchetype",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10001",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=39)).isoformat(),
+        email="kayla_clean@hotmail.com",
+        mail_token="M.C501_BAY.0.U.-token|client",
+    )
+    bd_1m = compute_trust_breakdown(_mk_info("KaylaArchetype", datr_age_days=9.8), p_1m)
+    assert bd_1m["stage_code"] == "stage_4_over_1m"
+    assert bd_1m["stage_cap"] == 89
+    assert bd_1m["trust_tier"] == "elite"
+    assert 86 <= bd_1m["final_score"] <= 89
+
+    # 2. Incubated >3m account (95d old, OIDC datr >= 14d -> 15.0d) => Diamond 100/100
+    p_3m = Profile(
+        name="DiamondIncubated",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10002",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=95)).isoformat(),
+        email="diamond_clean@hotmail.com",
+        mail_token="M.C501_BAY.0.U.-token2|client2",
+    )
+    bd_3m = compute_trust_breakdown(_mk_info("DiamondIncubated", datr_age_days=15.0), p_3m)
+    assert bd_3m["stage_code"] == "stage_5_over_3m"
+    assert bd_3m["stage_cap"] is None
+    assert bd_3m["trust_tier"] == "diamond"
+    assert bd_3m["final_score"] == 100
+
+    # 3. Freshly logged-in incubated account (35d old, datr 2.0d < 7d) => held at Stage 1 under 7d (44)
+    p_fresh = Profile(
+        name="FreshOidcLogin",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10003",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=35)).isoformat(),
+        email="fresh_login@hotmail.com",
+        mail_token="M.C501_BAY.0.U.-token3|client3",
+    )
+    bd_fresh = compute_trust_breakdown(_mk_info("FreshOidcLogin", datr_age_days=2.0), p_fresh)
+    assert bd_fresh["stage_code"] == "stage_1_under_7d"
+    assert bd_fresh["stage_cap"] == 44
+    assert bd_fresh["trust_tier"] == "warming"
+    assert bd_fresh["final_score"] == 44
+
+    # 4. Unopened incubated embryo (30d old, datr=0.0d, group "2. Khá sạch") => held at incubating cap (44)
+    p_emb = Profile(
+        name="IncubatedEmbryo",
+        group="2. Khá sạch",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10004",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=30)).isoformat(),
+        email="embryo@animee.tokyo",
+    )
+    bd_emb = compute_trust_breakdown(
+        _mk_info(
+            "IncubatedEmbryo",
+            datr_age_days=0.0,
+            hatch_gw=False,
+            has_muse_auth=False,
+            hatch_sess=False,
+            cookie_count=0,
+            sess_exp_days=None,
+        ),
+        p_emb,
+    )
+    assert bd_emb["stage_code"] == "stage_1_incubating"
+    assert bd_emb["stage_cap"] == 44
+    assert bd_emb["trust_tier"] == "warming"
+    assert bd_emb["final_score"] == 44
+
+
+
 
 

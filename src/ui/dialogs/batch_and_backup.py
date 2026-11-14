@@ -46,6 +46,7 @@ from ...utils.totp import (
     run_safe_mail_checkpoint_scan,
 )
 from ...utils.validation import validate_profile_name, validate_proxy_format
+from ..components.profile_card import resolve_trust_badge_icon, resolve_trust_badge_style
 from ..theme.colors import COLORS, FONT_BOLD, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 from ..theme.page import build_os_dropdown
 from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, OUTLINE_STYLE
@@ -2722,11 +2723,13 @@ def _build_trust_score_chip(
         label = "○ Chưa mở"
         clean_desc = "○ Chưa mở trình duyệt"
 
+    surv_d = max(int(info.age_days or 0), int(info.datr_age_days or 0))
     tip = (
         f"{clean_desc}\n"
+        f"• Điểm Trust 2.0: {info.trust_score}/100đ ({info.trust_tier})\n"
         f"• Thời hạn phiên Muse (`hatch_sess` trượt 30 ngày): còn {info.sess_exp} "
         f"(chỉ cần mở muse.ai 1 lần trước khi hết 30d)\n"
-        f"• Tuổi cookie gốc (`datr`): {info.datr_age_days:.1f} ngày · "
+        f"• Tuổi sống sót: {surv_d} ngày · Thiết bị OIDC (`datr`): {info.datr_age_days:.1f} ngày · "
         f"Hoạt động: {info.active_days} ngày mở ({info.session_count} phiên, {info.total_minutes}p)"
     )
     return ft.Container(
@@ -2747,6 +2750,74 @@ def _build_trust_score_chip(
     )
 
 
+def _build_trust_points_pill(
+    info: ProfileMonitorInfo,
+    *,
+    compact: bool = False,
+    on_click: Callable[[], None] | None = None,
+) -> ft.Container:
+    """Render a Trust Score badge (`88đ` compact with shield icon, or full tier label)."""
+    score, is_banned, tier_key, col, _sym, _ = resolve_trust_badge_style(info)
+    icon_data = resolve_trust_badge_icon(info)
+    label = (
+        get_string("trust_pts_short", sym="", score=score).strip()
+        if compact
+        else (
+            get_string("trust_tier_banned")
+            if is_banned
+            else get_string(f"trust_tier_{tier_key}", score=score)
+        )
+    )
+    is_tinted = score > 0 or is_banned
+    surv_d = max(int(info.age_days or 0), int(info.datr_age_days or 0))
+    tip = (
+        f"Điểm Trust 2.0: {score}/100đ ({tier_key}) · "
+        f"Sống {surv_d}d · OIDC datr {info.datr_age_days:.1f}d · Muse {info.sess_exp} — "
+        f"{get_string('tooltip_trust_breakdown')}"
+    )
+    content: ft.Control = (
+        ft.Row(
+            spacing=3.5,
+            tight=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Icon(icon_data, size=13.5, color=col),
+                ft.Text(
+                    label,
+                    size=11,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_700,
+                    color=col,
+                    no_wrap=True,
+                ),
+            ],
+        )
+        if compact
+        else ft.Text(
+            label,
+            size=11,
+            font_family=FONT_DATA,
+            weight=ft.FontWeight.W_700,
+            color=col,
+            no_wrap=True,
+        )
+    )
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=7 if compact else 8, vertical=2),
+        border_radius=5,
+        bgcolor=ft.Colors.with_opacity(0.11, col) if is_tinted else COLORS["input_bg"],
+        border=ft.Border.all(
+            1,
+            ft.Colors.with_opacity(0.45, col) if is_tinted else COLORS["rule_strong"],
+        ),
+        ink=on_click is not None,
+        on_click=(lambda _: on_click()) if on_click is not None else None,
+        tooltip=tip,
+        content=content,
+    )
+
+
 def _build_trust_breakdown_panel(
     info: ProfileMonitorInfo,
     profile: Profile | None = None,
@@ -2764,27 +2835,11 @@ def _build_trust_breakdown_panel(
     stage_label = str(bd["stage_label"])
     tier = str(bd["trust_tier"])
 
-    tier_col = (
-        COLORS["error"]
-        if tier == "banned"
-        else (
-            "#1D4ED8"
-            if tier == "diamond"
-            else (
-                "#15803D"
-                if tier == "elite"
-                else (
-                    "#7C3AED"
-                    if tier == "platinum"
-                    else (
-                        "#B45309"
-                        if tier == "trusted"
-                        else (COLORS["text_dim"] if tier == "warming" else "#F87171")
-                    )
-                )
-            )
-        )
-    )
+    tier_col = resolve_trust_badge_style(
+        info,
+        score_override=final_score,
+        tier_override=tier,
+    )[3]
 
     def _stat_box(title: str, val_str: str, sub_str: str, col: str) -> ft.Container:
         return ft.Container(
@@ -2816,7 +2871,8 @@ def _build_trust_breakdown_panel(
             ),
         )
 
-    cap_val_str = f"Tối đa {stage_cap}đ" if stage_cap is not None else "150đ (Mở khóa)"
+    max_pts = int(bd.get("max_score", 100))
+    cap_val_str = f"Tối đa {stage_cap}đ" if stage_cap is not None else f"{max_pts}đ (Mở khóa)"
     cap_col = (
         COLORS["warning"]
         if capped_by > 0
@@ -2852,10 +2908,10 @@ def _build_trust_breakdown_panel(
                     spacing=8,
                     controls=[
                         _stat_box(
-                            "1. TỔNG 6 HẠNG MỤC",
-                            f"+{pos_total} / 150đ",
+                            "1. TỔNG 4 TRỤ CỘT",
+                            f"+{pos_total} / {max_pts}đ",
                             "Điểm tích lũy thành phần",
-                            "#1D4ED8" if pos_total >= 56 else COLORS["text_main"],
+                            "#1D4ED8" if pos_total >= 45 else COLORS["text_main"],
                         ),
                         _stat_box(
                             "2. ĐIỂM PHẠT RỦI RO",
@@ -2865,7 +2921,7 @@ def _build_trust_breakdown_panel(
                         ),
                         _stat_box(
                             "3. ĐIỂM GỐC (RAW)",
-                            f"{raw_score} / 150đ",
+                            f"{raw_score} / {max_pts}đ",
                             f"= max(0, {pos_total} {pen_total:+d})",
                             COLORS["text_main"],
                         ),
@@ -2877,7 +2933,7 @@ def _build_trust_breakdown_panel(
                         ),
                         _stat_box(
                             "5. ĐIỂM CHÍNH THỨC",
-                            f"{final_score} / 150đ",
+                            f"{final_score} / {max_pts}đ",
                             f"= min({raw_score}đ, Trần {stage_cap}đ)"
                             if stage_cap is not None
                             else "= Điểm gốc",
@@ -2971,7 +3027,7 @@ def _build_trust_breakdown_panel(
                                 ink=True,
                                 on_click=lambda _: on_score_ip(),
                                 content=ft.Text(
-                                    "✦ Chấm điểm độ sạch IP ngay để nhận tối đa +11đ",
+                                    "✦ Chấm điểm độ sạch IP ngay để nhận tối đa +7đ",
                                     size=10.5,
                                     font_family=FONT_SEMIBOLD,
                                     color=COLORS["accent"],
@@ -3569,6 +3625,13 @@ def open_session_history_dialog(
         summary_badges: list[ft.Control] = []
         if monitor_info is not None:
             summary_badges.append(
+                _build_trust_points_pill(
+                    monitor_info,
+                    compact=False,
+                    on_click=lambda: _switch_tab("trust"),
+                )
+            )
+            summary_badges.append(
                 _build_trust_score_chip(
                     monitor_info,
                     on_click=lambda: _switch_tab("trust"),
@@ -4022,6 +4085,7 @@ def open_trust_monitor_dialog(
         )
         c_banned = sum(1 for _, i in infos if i.is_banned)
         c_active = len(infos) - c_banned
+        c_high = sum(1 for _, i in infos if not i.is_banned and i.trust_score >= 45)
 
         fixable_audit = any(
             f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
@@ -4051,6 +4115,7 @@ def open_trust_monitor_dialog(
                     ),
                     _fchip("all", get_string("trust_filter_all", count=c_active)),
                     _fchip("clean", f"✓ Sạch & An toàn ({c_clean})"),
+                    _fchip("high_trust", f"🛡️ Trust ≥45đ ({c_high})"),
                     _fchip("expiring", f"⏳ Hạn phiên <15d ({c_expiring})"),
                     _fchip("tainted", f"⚠️ Liên đới lịch sử ({c_tainted})"),
                     _fchip("banned", f"📦 Archived ({c_banned})"),
@@ -4162,14 +4227,21 @@ def open_trust_monitor_dialog(
                         controls=[
                             ft.Text(
                                 "PROFILE",
-                                width=212,
+                                width=200,
+                                size=11,
+                                font_family=FONT_SEMIBOLD,
+                                color=COLORS["text_dim"],
+                            ),
+                            ft.Text(
+                                "TRUST",
+                                width=74,
                                 size=11,
                                 font_family=FONT_SEMIBOLD,
                                 color=COLORS["text_dim"],
                             ),
                             ft.Text(
                                 "TRẠNG THÁI",
-                                width=96,
+                                width=92,
                                 size=11,
                                 font_family=FONT_SEMIBOLD,
                                 color=COLORS["text_dim"],
@@ -4183,7 +4255,7 @@ def open_trust_monitor_dialog(
                             ),
                             ft.Text(
                                 "ĐỊA CHỈ IP & ĐỘ SẠCH",
-                                width=215,
+                                width=210,
                                 size=11,
                                 font_family=FONT_SEMIBOLD,
                                 color=COLORS["text_dim"],
@@ -4204,6 +4276,8 @@ def open_trust_monitor_dialog(
                 for p, i in infos
                 if not i.is_banned and not any(c in i.audit_codes for c in taint_codes)
             ]
+        elif flt == "high_trust":
+            infos = [(p, i) for p, i in infos if not i.is_banned and i.trust_score >= 45]
         elif flt == "expiring":
             infos = [
                 (p, i)
@@ -4221,14 +4295,17 @@ def open_trust_monitor_dialog(
         elif flt == "banned":
             infos = [(p, i) for p, i in infos if i.is_banned]
 
-        infos.sort(
-            key=lambda pair: (
-                pair[1].is_banned,
-                any(c in pair[1].audit_codes for c in taint_codes),
-                pair[1].sess_exp_days if pair[1].sess_exp_days is not None else 999,
-                natural_name_key(pair[0].name),
+        if flt == "high_trust":
+            infos.sort(key=lambda pair: (-pair[1].trust_score, natural_name_key(pair[0].name)))
+        else:
+            infos.sort(
+                key=lambda pair: (
+                    pair[1].is_banned,
+                    any(c in pair[1].audit_codes for c in taint_codes),
+                    pair[1].sess_exp_days if pair[1].sess_exp_days is not None else 999,
+                    natural_name_key(pair[0].name),
+                )
             )
-        )
 
         score_rows: list[ft.Control] = []
         for p, info in infos:
@@ -4256,13 +4333,25 @@ def open_trust_monitor_dialog(
                 action_color = COLORS["text_dim"]
             else:
                 op_warns: list[str] = []
+                is_op_crit = False
+                if info.busy_by:
+                    op_warns.append(f"⛔ Đang mở ({info.busy_by[0]})")
+                    is_op_crit = True
+                if info.cluster_busy_by:
+                    cl_lbl = info.cluster_collision_label or info.cluster or "/64"
+                    op_warns.append(f"⚠ Trùng dải /64 {cl_lbl} ({info.cluster_busy_by[0]})")
+                    is_op_crit = True
+                if info.port_cooldown_by is not None:
+                    cd_other, cd_left = info.port_cooldown_by
+                    op_warns.append(f"⏳ Chờ giãn cách IP ({cd_left}p · {cd_other})")
                 if info.ip_country_changed:
                     op_warns.append("⚠ Khác quốc gia IP cũ")
                 if info.proxy_port_changed:
                     op_warns.append("⚠ Đổi cổng/máy chủ Proxy")
+                    is_op_crit = True
                 if op_warns:
                     summary_str = " · ".join(op_warns) + f" · Phiên Muse còn {info.sess_exp}"
-                    action_color = COLORS["warning"]
+                    action_color = COLORS["error"] if is_op_crit else COLORS["warning"]
                 elif info.sess_exp_days is not None and info.sess_exp_days < 0:
                     summary_str = "✕ Phiên hatch_sess đã quá hạn 30 ngày — Cần kiểm tra đăng nhập lại"
                     action_color = COLORS["error"]
@@ -4278,15 +4367,17 @@ def open_trust_monitor_dialog(
                         if info.sess_exp not in ("-", "")
                         else "Đã có phiên Muse"
                     )
+                    surv_d = max(int(info.age_days or 0), int(info.datr_age_days or 0))
                     summary_str = (
                         f"✓ Sạch (Độc lập IP & Phôi) · {sess_txt} · "
-                        f"Cookie gốc {info.datr_age_days:.0f}d — Chỉ mở khi làm việc hoặc giữ phiên <30d"
+                        f"Sống {surv_d}d · OIDC {info.datr_age_days:.0f}d — Chỉ mở khi làm việc hoặc giữ phiên <30d"
                     )
                     action_color = "#15803D"
 
+            surv_d_tip = max(int(info.age_days or 0), int(info.datr_age_days or 0))
             detail_tip = (
                 f"Chẩn đoán: {summary_str}\n"
-                f"Hiện tại: Cookie gốc {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
+                f"Hiện tại: Sống {surv_d_tip}d · Thiết bị OIDC datr {info.datr_age_days:.1f}d ({info.datr_domains} miền Meta/Muse) · "
                 f"{info.active_days}d mở ({info.session_count} phiên, {_format_duration_mins(info.total_minutes)})"
             )
 
@@ -4368,7 +4459,7 @@ def open_trust_monitor_dialog(
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 controls=[
                                     ft.Container(
-                                        width=212,
+                                        width=200,
                                         content=ft.Row(
                                             spacing=4,
                                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -4409,7 +4500,12 @@ def open_trust_monitor_dialog(
                                         ),
                                     ),
                                     ft.Container(
-                                        width=96,
+                                        width=74,
+                                        alignment=ft.Alignment(-1, 0),
+                                        content=_build_trust_points_pill(info, compact=True),
+                                    ),
+                                    ft.Container(
+                                        width=92,
                                         alignment=ft.Alignment(-1, 0),
                                         content=_build_trust_score_chip(info),
                                     ),
@@ -4426,7 +4522,7 @@ def open_trust_monitor_dialog(
                             ),
                         ),
                         ft.Container(
-                            width=215,
+                            width=210,
                             alignment=ft.Alignment(1, 0),
                             content=ft.Row(
                                 spacing=5,

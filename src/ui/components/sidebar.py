@@ -26,6 +26,18 @@ def _filter_row(
     fid: str, label_text: str, count: int, active: str, on_filter: Callable[[str], None]
 ) -> ft.Container:
     on = fid == active
+    if on:
+        count_color = COLORS["sidebar"]
+        count_weight = None
+    elif count > 0 and fid == "warnings":
+        count_color = "#F87171"
+        count_weight = ft.FontWeight.W_700
+    elif count > 0 and fid == "cooldown":
+        count_color = "#FB923C"
+        count_weight = ft.FontWeight.W_700
+    else:
+        count_color = COLORS["cover_muted"]
+        count_weight = None
     return ft.Container(
         height=32,
         border_radius=7,
@@ -50,7 +62,8 @@ def _filter_row(
                     str(count),
                     size=11.5,
                     font_family=FONT_DATA,
-                    color=COLORS["sidebar"] if on else COLORS["cover_muted"],
+                    weight=count_weight,
+                    color=count_color,
                 ),
             ],
         ),

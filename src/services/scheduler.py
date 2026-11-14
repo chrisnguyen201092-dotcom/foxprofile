@@ -1765,7 +1765,7 @@ def _build_fixed_work_squad_plan(
             if lc is not None
             else 72.0
         )
-        is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
+        is_rising = bool(info.hatch_gw and 30 <= info.trust_score < 62)
         is_conflict = (p.name not in active_set) and (
             bool(info.has_warning)
             or bool(info.cluster_busy_by)
@@ -2100,7 +2100,7 @@ def select_parallel_work_squad(
             if lc is not None
             else 72.0
         )
-        is_rising = bool(info.hatch_gw and 40 <= info.trust_score < 81)
+        is_rising = bool(info.hatch_gw and 30 <= info.trust_score < 62)
         sched_tier, pair_order, sched_label = _resolve_profile_schedule_priority(
             p,
             info,

@@ -974,6 +974,10 @@ class App:
                     for f in snap.audit_findings
                 ),
                 mail_alert=bool(snap.mail_checkpoint_hits),
+                sort_by=self.state.sort_by,
+                on_sort_trust=lambda: self._on_sort(
+                    "trust_asc" if self.state.sort_by == "trust_desc" else "trust_desc"
+                ),
             )
             if page_profiles
             else None

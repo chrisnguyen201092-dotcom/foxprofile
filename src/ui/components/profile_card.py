@@ -60,6 +60,8 @@ def build_header_row(
     on_open_work_squad: Callable[[], None] | None = None,
     audit_alert: bool = False,
     mail_alert: bool = False,
+    sort_by: str = "custom",
+    on_sort_trust: Callable[[], None] | None = None,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
         return ft.Text(
@@ -178,6 +180,52 @@ def build_header_row(
         if len(prof_chips) > 1
         else label("col_profile")
     )
+    is_trust_sort = sort_by in ("trust_desc", "trust_asc")
+    hdr_trust_col = COLORS["accent"] if is_trust_sort else COLORS["text_dim"]
+    sort_icon_data = (
+        ft.Icons.ARROW_DOWNWARD_ROUNDED
+        if sort_by == "trust_desc"
+        else (
+            ft.Icons.ARROW_UPWARD_ROUNDED
+            if sort_by == "trust_asc"
+            else ft.Icons.UNFOLD_MORE_ROUNDED
+        )
+    )
+    trust_sort_hdr = ft.Container(
+        width=64,
+        alignment=ft.Alignment(0, 0),
+        ink=on_sort_trust is not None,
+        border_radius=4,
+        padding=ft.Padding.symmetric(vertical=4),
+        tooltip=get_string("tooltip_sort_trust"),
+        on_click=(lambda _: on_sort_trust()) if on_sort_trust is not None else None,
+        content=ft.Row(
+            spacing=2,
+            tight=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Text(
+                    get_string("col_trust"),
+                    size=12,
+                    font_family=FONT_SEMIBOLD,
+                    color=hdr_trust_col,
+                    no_wrap=True,
+                ),
+                ft.Icon(sort_icon_data, size=13, color=hdr_trust_col),
+            ],
+        ),
+    )
+    device_header: ft.Control = (
+        ft.Row(
+            spacing=8,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[trust_sort_hdr, label("col_device")],
+        )
+        if on_sort_trust is not None or is_trust_sort
+        else label("col_device")
+    )
     return ft.Container(
         height=40,
         padding=ft.Padding.symmetric(horizontal=14),
@@ -189,7 +237,7 @@ def build_header_row(
             controls=[
                 _cell("select", box),
                 _cell("name", profile_header),
-                _cell("device", label("col_device")),
+                _cell("device", device_header),
                 _cell("proxy", label("col_proxy")),
                 _cell("geo", label("col_geo")),
                 _cell("actions", None),
@@ -673,6 +721,8 @@ def build_profile_card(
                             device,
                             on_edit_dates=on_edit_dates,
                             monitor_info=monitor_info,
+                            on_trust_detail=on_trust_detail,
+                            on_session_history=on_session_history,
                         )
                     ),
                 ),
@@ -765,6 +815,8 @@ def _device(
     *,
     on_edit_dates: Callable[[str], None] | None = None,
     monitor_info: ProfileMonitorInfo | None = None,
+    on_trust_detail: Callable[[str], None] | None = None,
+    on_session_history: Callable[[str], None] | None = None,
 ) -> ft.Row:
     chrome = profile.engine == "chrome"
     engine_name = "Chrome" if chrome else "Camoufox"
@@ -796,15 +848,17 @@ def _device(
             tip = get_string("tooltip_created_date", date=c_date_str, days=age_days)
 
         line1: ft.Control = ft.Container(
+            ink=on_edit_dates is not None,
+            border_radius=3,
             on_click=(
                 (lambda _, n=profile.name: on_edit_dates(n)) if on_edit_dates is not None else None
             ),
             tooltip=tip,
             content=ft.Text(
                 label_str,
-                size=11.5,
+                size=12.5,
                 font_family=FONT_DATA,
-                color=COLORS["text_sub"],
+                color=COLORS["text_main"] if ban_days is None else COLORS["text_sub"],
                 no_wrap=True,
                 overflow=ft.TextOverflow.ELLIPSIS,
             ),
@@ -818,30 +872,39 @@ def _device(
             no_wrap=True,
         )
 
+    trust_pill = _device_trust_pill(
+        profile,
+        monitor_info,
+        on_trust_detail=on_trust_detail,
+        on_session_history=on_session_history,
+    )
+    sep_dot = ft.Text("·", size=12, color=COLORS["text_dim"], no_wrap=True)
+    os_txt = ft.Text(
+        _OS_LABELS.get(profile.os_type, "OS"),
+        size=11.5,
+        font_family=FONT_DATA,
+        weight=ft.FontWeight.W_600,
+        color=COLORS["text_sub"],
+        tooltip=f"{profile.os_type} · {engine_name}",
+        no_wrap=True,
+    )
+    top_row = ft.Row(
+        spacing=5,
+        tight=True,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        controls=[line1, sep_dot, os_txt],
+    )
+
     return ft.Row(
         spacing=8,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
         controls=[
-            ft.Container(
-                width=38,
-                height=22,
-                border_radius=4,
-                border=ft.Border.all(1, COLORS["text_sub"]),
-                alignment=ft.Alignment(0, 0),
-                tooltip=f"{profile.os_type} · {engine_name}",
-                content=ft.Text(
-                    _OS_LABELS.get(profile.os_type, "OS"),
-                    size=11,
-                    font_family=FONT_DATA,
-                    weight=ft.FontWeight.W_600,
-                    color=COLORS["text_main"],
-                ),
-            ),
+            trust_pill,
             ft.Container(
                 expand=True,
                 # Every row keeps two lines, so heights and baselines match.
                 content=_stack(
-                    line1,
+                    top_row,
                     _minor(device, data=True)
                     if device
                     else _minor(get_string("no_fingerprint_short")),
@@ -907,17 +970,19 @@ def _proxy(
     scheme, _, rest = server.partition("://")
     sub_label = scheme.upper()
     sub_color = COLORS["text_dim"]
+    is_alert = False
     if proxy_check_state is not None and proxy_check_state[0] in ("checking", "fail"):
         st_kind, st_msg = proxy_check_state
         sub_label = st_msg
-        sub_color = COLORS["accent"] if st_kind == "checking" else COLORS["error"]
+        if st_kind == "checking":
+            sub_color = COLORS["accent"]
+        else:
+            sub_color = COLORS["error"]
+            is_alert = True
     elif monitor_info is not None and monitor_info.busy_by:
         sub_label = get_string("proxy_busy_by", other=monitor_info.busy_by[0])
         sub_color = COLORS["error"]
-    elif monitor_info is not None and monitor_info.port_cooldown_by is not None:
-        other, left = monitor_info.port_cooldown_by
-        sub_label = get_string("proxy_cooldown_by", left=left, other=other)
-        sub_color = COLORS["warning"]
+        is_alert = True
     elif monitor_info is not None and getattr(monitor_info, "cluster_busy_by", None):
         sub_label = get_string(
             "proxy_cluster_busy_by",
@@ -926,10 +991,17 @@ def _proxy(
             or "/64",
             other=monitor_info.cluster_busy_by[0],
         )
+        sub_color = COLORS["error"]
+        is_alert = True
+    elif monitor_info is not None and monitor_info.port_cooldown_by is not None:
+        other, left = monitor_info.port_cooldown_by
+        sub_label = get_string("proxy_cooldown_by", left=left, other=other)
         sub_color = COLORS["warning"]
+        is_alert = True
     elif monitor_info is not None and monitor_info.proxy_port_changed:
         sub_label = get_string("proxy_changed_badge", old_port=monitor_info.last_used_port)
         sub_color = COLORS["error"]
+        is_alert = True
     elif monitor_info is not None and monitor_info.ip_country_changed:
         sub_label = get_string(
             "proxy_country_changed_badge",
@@ -937,6 +1009,7 @@ def _proxy(
             new=monitor_info.last_exit_country,
         )
         sub_color = COLORS["warning"]
+        is_alert = True
     elif proxy_check_state is not None:
         _, st_msg = proxy_check_state
         sub_label = st_msg
@@ -977,29 +1050,56 @@ def _proxy(
     )
     isp_detail = getattr(monitor_info, "last_exit_isp", "") if monitor_info is not None else ""
     base_tip = f"{sub_label} · {isp_detail}" if isp_detail else sub_label
-    line2_text = ft.Text(
-        sub_label,
-        size=11.5,
-        font_family=FONT_DATA,
-        color=sub_color,
-        no_wrap=True,
-        overflow=ft.TextOverflow.ELLIPSIS,
-        tooltip=(
-            f"{base_tip} ({get_string('tooltip_ip_history')})"
-            if on_ip_history is not None
-            else base_tip
-        ),
+    line2_tip = (
+        f"{base_tip} ({get_string('tooltip_ip_history')})"
+        if on_ip_history is not None
+        else base_tip
     )
-    line2: ft.Control = (
-        ft.Container(
-            ink=True,
+    if is_alert:
+        line2_text = ft.Text(
+            sub_label,
+            size=11.0,
+            font_family=FONT_DATA,
+            weight=ft.FontWeight.W_700,
+            color=sub_color,
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=line2_tip,
+        )
+        line2: ft.Control = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=6, vertical=1),
             border_radius=4,
-            on_click=lambda _, n=profile.name: on_ip_history(n),
+            bgcolor=ft.Colors.with_opacity(0.11, sub_color),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.48, sub_color)),
+            ink=on_ip_history is not None,
+            on_click=(
+                (lambda _, n=profile.name: on_ip_history(n))
+                if on_ip_history is not None
+                else None
+            ),
+            tooltip=line2_tip,
             content=line2_text,
         )
-        if on_ip_history is not None
-        else line2_text
-    )
+    else:
+        line2_text = ft.Text(
+            sub_label,
+            size=11.5,
+            font_family=FONT_DATA,
+            color=sub_color,
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=line2_tip,
+        )
+        line2 = (
+            ft.Container(
+                ink=True,
+                border_radius=4,
+                on_click=lambda _, n=profile.name: on_ip_history(n),
+                content=line2_text,
+            )
+            if on_ip_history is not None
+            else line2_text
+        )
     return _stack(line1, line2)
 
 
@@ -1021,6 +1121,15 @@ def _geo_score_badge(
         if c in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
     ]
     if t_score <= 0 and not is_banned and not tainted_codes and sess_days is None:
+        return None
+    if (
+        sess_days is None
+        and not is_banned
+        and not tainted_codes
+        and float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0) <= 0.0
+        and int(getattr(monitor_info, "cookie_count", 0) or 0) == 0
+        and int(getattr(monitor_info, "session_count", 0) or 0) == 0
+    ):
         return None
 
     datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
@@ -1112,6 +1221,166 @@ def _geo_score_badge(
             weight=ft.FontWeight.W_700 if (sess_days is not None and sess_days <= 14) else ft.FontWeight.W_600,
             color=fg_col,
             no_wrap=True,
+        ),
+    )
+
+
+_TRUST_TIER_STYLES: dict[str, tuple[str, str, str]] = {
+    "diamond": ("#1D4ED8", "✦", "trust_sub_diamond"),
+    "elite": ("#15803D", "◆", "trust_sub_elite"),
+    "platinum": ("#7C3AED", "❖", "trust_sub_platinum"),
+    "trusted": ("#0284C7", "◈", "trust_sub_trusted"),
+}
+
+
+def resolve_trust_badge_style(
+    monitor_info: ProfileMonitorInfo,
+    *,
+    score_override: int | None = None,
+    tier_override: str | None = None,
+) -> tuple[int, bool, str, str, str, str]:
+    """Return `(score, is_banned, tier_key, fg_col, sym, sub_key)` for Trust pills."""
+    t_score = int(
+        (score_override if score_override is not None else getattr(monitor_info, "trust_score", 0))
+        or 0
+    )
+    t_tier = str(
+        (tier_override if tier_override is not None else getattr(monitor_info, "trust_tier", "cold"))
+        or "cold"
+    )
+    is_banned = bool(getattr(monitor_info, "is_banned", False) or t_tier == "banned")
+    audit_codes = list(getattr(monitor_info, "audit_codes", ()) or ())
+    has_red_batch = "burned_batch" in audit_codes
+    is_unopened = (
+        float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0) <= 0.0
+        and int(getattr(monitor_info, "cookie_count", 0) or 0) == 0
+        and int(getattr(monitor_info, "session_count", 0) or 0) == 0
+    )
+    if is_banned:
+        return t_score, True, "banned", COLORS["error"], "✕", "trust_sub_banned"
+    if t_tier in _TRUST_TIER_STYLES:
+        fg_col, sym, sub_key = _TRUST_TIER_STYLES[t_tier]
+        return t_score, False, t_tier, fg_col, sym, sub_key
+    if t_tier == "warming":
+        if has_red_batch:
+            return t_score, False, t_tier, "#D97706", "▲", "trust_sub_red_cap"
+        sub_key = "trust_sub_incubating" if is_unopened else "trust_sub_warming"
+        return t_score, False, t_tier, "#475569", "◇", sub_key
+    sub_key = "trust_sub_empty" if t_score <= 0 else "trust_sub_cold"
+    fg_col = "#D97706" if has_red_batch else COLORS["text_dim"]
+    sym = "▲" if has_red_batch else "○"
+    return t_score, False, "cold", fg_col, sym, sub_key
+
+
+def resolve_trust_badge_icon(
+    monitor_info: ProfileMonitorInfo,
+    *,
+    tier_override: str | None = None,
+) -> ft.IconData:
+    """Return distinct Material Rounded vector icon matching each Trust tier."""
+    t_tier = str(
+        (tier_override if tier_override is not None else getattr(monitor_info, "trust_tier", "cold"))
+        or "cold"
+    )
+    is_banned = bool(getattr(monitor_info, "is_banned", False) or t_tier == "banned")
+    audit_codes = list(getattr(monitor_info, "audit_codes", ()) or ())
+    has_red_batch = "burned_batch" in audit_codes
+    if is_banned:
+        return ft.Icons.CANCEL_ROUNDED
+    if t_tier == "diamond":
+        return ft.Icons.DIAMOND_ROUNDED
+    if t_tier == "elite":
+        return ft.Icons.VERIFIED_USER_ROUNDED
+    if t_tier == "platinum":
+        return ft.Icons.STAR_ROUNDED
+    if t_tier == "trusted":
+        return ft.Icons.CHECK_CIRCLE_ROUNDED
+    if has_red_batch:
+        return ft.Icons.WARNING_ROUNDED
+    if t_tier == "warming":
+        return ft.Icons.HOURGLASS_TOP_ROUNDED
+    return ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED
+
+
+def _device_trust_pill(
+    profile: Profile,
+    monitor_info: ProfileMonitorInfo | None = None,
+    *,
+    on_trust_detail: Callable[[str], None] | None = None,
+    on_session_history: Callable[[str], None] | None = None,
+) -> ft.Container:
+    """Render fixed-width Trust Score badge for the left slot of the device cell."""
+    if monitor_info is None:
+        return ft.Container(
+            width=64,
+            height=26,
+            border_radius=5,
+            bgcolor=COLORS["input_bg"],
+            border=ft.Border.all(1, COLORS["rule_strong"]),
+            alignment=ft.Alignment(0, 0),
+            content=ft.Text(
+                "—",
+                size=11.5,
+                font_family=FONT_DATA,
+                weight=ft.FontWeight.W_700,
+                color=COLORS["text_dim"],
+                no_wrap=True,
+            ),
+        )
+
+    t_score, is_banned, tier_key, fg_col, _sym, sub_key = resolve_trust_badge_style(monitor_info)
+    icon_data = resolve_trust_badge_icon(monitor_info)
+    score_label = get_string("trust_pts_short", sym="", score=t_score).strip()
+    is_tinted = t_score > 0 or is_banned
+
+    tier_title = (
+        get_string("trust_tier_banned")
+        if is_banned
+        else get_string(f"trust_tier_{tier_key}", score=t_score)
+    )
+    datr_d = float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0)
+    cal_d = compute_days_since(getattr(profile, "created_at", None))
+    surv_d = max(
+        int(cal_d) if cal_d is not None else int(getattr(monitor_info, "age_days", 0) or 0),
+        int(datr_d),
+    )
+    sess_exp = str(getattr(monitor_info, "sess_exp", "-") or "-")
+    tip = (
+        f"{tier_title} · {get_string(sub_key)} ({t_score}/100)\n"
+        f"Sống {surv_d}d · OIDC datr {datr_d:.1f}d · Muse {sess_exp}\n"
+        f"{get_string('tooltip_trust_breakdown')}"
+    )
+    trust_cb = on_trust_detail or on_session_history
+    return ft.Container(
+        width=64,
+        height=26,
+        padding=ft.Padding.symmetric(horizontal=3, vertical=0),
+        border_radius=5,
+        alignment=ft.Alignment(0, 0),
+        bgcolor=ft.Colors.with_opacity(0.11, fg_col) if is_tinted else COLORS["input_bg"],
+        border=ft.Border.all(
+            1,
+            ft.Colors.with_opacity(0.45, fg_col) if is_tinted else COLORS["rule_strong"],
+        ),
+        ink=trust_cb is not None,
+        tooltip=tip,
+        on_click=(lambda _, n=profile.name: trust_cb(n)) if trust_cb is not None else None,
+        content=ft.Row(
+            spacing=3,
+            tight=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Icon(icon_data, size=14, color=fg_col),
+                ft.Text(
+                    score_label,
+                    size=11.5,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_700,
+                    color=fg_col,
+                    no_wrap=True,
+                ),
+            ],
         ),
     )
 
