@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import dataclasses
 import os
 import re
 import threading
@@ -57,11 +58,93 @@ from .handlers import AppHandlers
 from .refs import UIRefs
 from .state import AppState
 from .theme import COLORS, configure_page
+from .theme import styles as _theme_styles
 from .theme.colors import FONT_SEMIBOLD
 from .theme.page import ASSETS_DIR, setup_windows_taskbar_icon
 from .theme.styles import OUTLINE_STYLE
 
 logger = get_logger("app")
+
+
+def _unfreeze_dataclass_tree(obj: object, seen: set[int] | None = None) -> None:
+    """Strip Flet 1.0.4 `_frozen` markers from controls and value dataclasses."""
+    if obj is None:
+        return
+    if seen is None:
+        seen = set()
+    oid = id(obj)
+    if oid in seen:
+        return
+    if dataclasses.is_dataclass(obj):
+        seen.add(oid)
+        if hasattr(obj, "_frozen"):
+            with contextlib.suppress(AttributeError):
+                object.__delattr__(obj, "_frozen")
+        for field in dataclasses.fields(obj):
+            if field.name == "_parent" or field.metadata.get("skip", False):
+                continue
+            _unfreeze_dataclass_tree(getattr(obj, field.name, None), seen)
+    elif isinstance(obj, (list, tuple)):
+        seen.add(oid)
+        for item in obj:
+            _unfreeze_dataclass_tree(item, seen)
+    elif isinstance(obj, dict):
+        seen.add(oid)
+        for val in obj.values():
+            _unfreeze_dataclass_tree(val, seen)
+
+
+def _unfreeze_session_state(session: object) -> None:
+    """Clear leaked `_frozen` flags across mounted controls and shared style singletons."""
+    for val in vars(_theme_styles).values():
+        if dataclasses.is_dataclass(val):
+            _unfreeze_dataclass_tree(val)
+    idx = getattr(session, "index", None)
+    if idx:
+        for ctrl in list(idx.values()):
+            if hasattr(ctrl, "_frozen"):
+                _unfreeze_dataclass_tree(ctrl)
+
+
+def _install_session_unfreeze_hook(page: ft.Page) -> None:
+    """Wrap Session.patch_control so keyed reconciliation never leaves controls frozen."""
+    try:
+        sess = page.session
+    except Exception:
+        return
+    if sess is None or getattr(sess, "_fox_unfreeze_installed", False):
+        return
+    orig_patch = sess.patch_control
+
+    def _patched_patch_control(
+        control,
+        prev_control=None,
+        parent=None,
+        path=None,
+        frozen=False,
+    ):
+        if hasattr(control, "_frozen"):
+            _unfreeze_dataclass_tree(control)
+        if (
+            prev_control is not None
+            and prev_control is not control
+            and hasattr(prev_control, "_frozen")
+        ):
+            _unfreeze_dataclass_tree(prev_control)
+        try:
+            return orig_patch(
+                control=control,
+                prev_control=prev_control,
+                parent=parent,
+                path=path,
+                frozen=False,
+            )
+        finally:
+            _unfreeze_session_state(sess)
+
+    sess.patch_control = _patched_patch_control
+    sess._fox_unfreeze_installed = True
+    _unfreeze_session_state(sess)
 
 _SEARCH_TOKEN_RE = re.compile(r"[0-9a-z\u00c0-\u024f\u1e00-\u1eff]+")
 _SEARCH_EMAIL_DOM_RE = re.compile(r"@[a-z0-9.-]+\.[a-z]{2,}")
@@ -252,6 +335,7 @@ class App:
 
     def _main(self, page: ft.Page) -> None:
         self.page = page
+        _install_session_unfreeze_hook(page)
         configure_page(page)
         page.on_keyboard_event = self._handle_key_event
         fp = ft.FilePicker()
@@ -381,6 +465,7 @@ class App:
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
         assert self.page is not None
+        _install_session_unfreeze_hook(self.page)
         self._card_cache.clear()
         self._device_label_cache.clear()
         self._pages_bar_sig = None
@@ -1111,10 +1196,15 @@ class App:
         ):
             self.state.hovered_profile = None
 
+        for cached_name in list(self._card_cache):
+            if cached_name not in all_names:
+                stale_card = self._card_cache.pop(cached_name)[1]
+                stale_card._isolated = False
+        old_controls = list(r.profile_list_area.controls or [])
+        old_mounted_ids = {id(c) for c in old_controls}
         selected_set = self.state.selected_names()
         if page_profiles:
             today = date.today()
-            new_cache: dict[str, tuple[tuple, ft.Container]] = {}
             new_controls: list[ft.Control] = []
             has_avatars = os.path.isdir(AVATARS_DIR)
             check_disk = not reuse_snapshot
@@ -1136,6 +1226,11 @@ class App:
                 cached_entry = self._card_cache.get(p.name)
                 if cached_entry is not None and cached_entry[0] == sig:
                     card = cached_entry[1]
+                    if id(card) not in old_mounted_ids:
+                        # Reset isolation before remounting so Flet indexes its full subtree.
+                        card._isolated = False
+                        if hasattr(card, "_frozen"):
+                            _unfreeze_dataclass_tree(card)
                 else:
                     if cached_entry is not None:
                         cached_entry[1]._isolated = False
@@ -1145,22 +1240,27 @@ class App:
                         snap=snap,
                         is_running=is_run,
                     )
-                new_cache[p.name] = (sig, card)
+                    self._card_cache[p.name] = (sig, card)
                 new_controls.append(card)
-            # Only retain currently mounted cards so Flet ObjectPatch skips unchanged subtrees safely.
-            self._card_cache = new_cache
-            old_controls = list(r.profile_list_area.controls or [])
+            new_mounted_ids = {id(c) for c in new_controls}
             list_changed = (
                 r.profile_list_area.item_extent != ROW_HEIGHT
                 or len(new_controls) != len(old_controls)
                 or any(a is not b for a, b in zip(new_controls, old_controls, strict=False))
             )
             if list_changed:
+                for old_c in old_controls:
+                    if id(old_c) not in new_mounted_ids:
+                        old_c._isolated = False
                 r.profile_list_area._isolated = False
                 r.profile_list_area.item_extent = ROW_HEIGHT
                 r.profile_list_area.controls = new_controls
         else:
+            for cached_entry in self._card_cache.values():
+                cached_entry[1]._isolated = False
             self._card_cache.clear()
+            for old_c in old_controls:
+                old_c._isolated = False
             r.profile_list_area._isolated = False
             r.profile_list_area.item_extent = None
             r.profile_list_area.controls = [self._build_empty_or_no_results()]
@@ -1638,32 +1738,44 @@ class App:
         threading.Thread(target=_bg_worker, daemon=True).start()
 
     async def _ui_reconcile_loop(self) -> None:
-        last_minute_tick = time.monotonic()
-        while self.page:
+        started_at = time.monotonic()
+        last_minute_tick = started_at
+        initial_full_snap_done = False
+        while self.page and not getattr(self, "_shutting_down", False):
             try:
                 running_now = self.bl.running_profile_names()
                 changed = running_now != self.state._last_running_snapshot
                 if changed:
                     self.state._last_running_snapshot = running_now
                 now_mono = time.monotonic()
-                minute_elapsed = (
-                    (now_mono - last_minute_tick) >= 30.0
-                    and bool(running_now or self.pm.profiles)
-                    and not self._has_open_dialog()
+                idle_for_bg = (
+                    not self._has_open_dialog()
                     and self.state.editing_acc_no is None
                     and self.state.editing_note is None
                     and self.state.editing_email is None
                     and self.state.editing_proxy is None
                 )
+                warmup_due = (
+                    not initial_full_snap_done
+                    and (now_mono - started_at) >= 0.45
+                    and bool(self.pm.profiles)
+                    and idle_for_bg
+                )
+                minute_elapsed = (
+                    (now_mono - last_minute_tick) >= 30.0
+                    and bool(running_now or self.pm.profiles)
+                    and idle_for_bg
+                )
                 wants_refresh = self.state.consume_refresh()
                 wants_full_snap = self.state.consume_full_snapshot()
-                if changed or wants_refresh or minute_elapsed:
+                if changed or wants_refresh or minute_elapsed or warmup_due:
                     if minute_elapsed:
                         self._maybe_start_daily_mail_scan()
                     last_minute_tick = now_mono
                     need_snap = (
                         changed
                         or minute_elapsed
+                        or warmup_due
                         or wants_full_snap
                         or self._last_monitor_snap is None
                     )
@@ -1675,7 +1787,8 @@ class App:
                             everything,
                             active_names,
                         )
-                        if not self.page:
+                        initial_full_snap_done = True
+                        if not self.page or getattr(self, "_shutting_down", False):
                             break
                         self._refresh_profiles(precomputed_snap=snap)
                     else:

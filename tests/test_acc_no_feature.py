@@ -697,7 +697,7 @@ def test_flet_session_frozen_reconciliation_hover_and_edit_acc_no(isolated_pm, t
             ]
             assert hover_targets == []
 
-            # Double-tap Monica's '+#' ghost, survive a frozen refresh while editing, submit '#15'
+            # Double-tap Monica's '+#' ghost, keep controls unfrozen across refresh while editing, submit '#15'
             monica_row = next(
                 ctrl for ctrl in app.refs.profile_list_area.controls if getattr(ctrl, "key", None) == "Monica"
             )
@@ -717,7 +717,7 @@ def test_flet_session_frozen_reconciliation_hover_and_edit_acc_no(isolated_pm, t
                 if isinstance(ctrl, ft.TextField) and getattr(ctrl, "hint_text", None) == "#"
             ]
             assert len(acc_fields) == 1
-            assert hasattr(acc_fields[0], "_frozen")
+            assert not hasattr(acc_fields[0], "_frozen")
 
             sess.apply_patch(acc_fields[0]._i, {"value": "#15"})
             await sess.dispatch_event(acc_fields[0]._i, "submit", "#15")

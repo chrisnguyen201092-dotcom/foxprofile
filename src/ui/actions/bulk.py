@@ -32,13 +32,21 @@ def bulk_delete_profiles(
         return
 
     def do_bulk_trash() -> None:
-        for name in names:
-            if hasattr(pm, "trash_profile"):
-                pm.trash_profile(name)
-                log(get_string("moved_to_trash", name=name))
-            else:
-                pm.delete_profile(name)
-                log(get_string("deleted_profile", name=name))
+        if hasattr(pm, "bulk_trash_profiles"):
+            moved = pm.bulk_trash_profiles(names)
+            if len(moved) <= 5:
+                for name in moved:
+                    log(get_string("moved_to_trash", name=name))
+            elif moved:
+                log(get_string("bulk_moved_to_trash_log", count=len(moved)))
+        else:
+            for name in names:
+                if hasattr(pm, "trash_profile"):
+                    pm.trash_profile(name)
+                    log(get_string("moved_to_trash", name=name))
+                else:
+                    pm.delete_profile(name)
+                    log(get_string("deleted_profile", name=name))
         on_done()
         refresh()
 

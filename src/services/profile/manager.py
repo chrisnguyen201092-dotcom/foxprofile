@@ -103,6 +103,10 @@ class ProfileManager:
         self._disk_mtime: float = 0.0
         self._trash_mtime: float = -1.0
         self._trash_cache: dict[str, dict] = {}
+        self._purge_seq: int = 0
+        self._purge_lock = threading.Lock()
+        self._purge_threads: list[threading.Thread] = []
+        self._active_purge_paths: set[pathlib.Path] = set()
         set_active_status_tags(self.status_tags)
         self._load_profiles()
         pathlib.Path(DATA_DIR).mkdir(exist_ok=True, parents=True)
@@ -191,6 +195,77 @@ class ProfileManager:
     @staticmethod
     def _trash_data_dir() -> pathlib.Path:
         return pathlib.Path(DATA_DIR) / ".trash"
+
+    def _stage_dir_for_purge(self, target: pathlib.Path) -> pathlib.Path | None:
+        """Atomically rename a trashed folder so background purge runs O(1) off the UI thread."""
+        if not target.exists():
+            return None
+        trash_dir = self._trash_data_dir()
+        if not (
+            target == trash_dir
+            or target.parent == trash_dir
+            or target.name.startswith(".trash_purging_")
+        ):
+            return None
+        data_root = trash_dir.parent
+        data_root.mkdir(exist_ok=True, parents=True)
+        with self._purge_lock:
+            while True:
+                self._purge_seq += 1
+                staged = data_root / f".trash_purging_{time.time_ns()}_{self._purge_seq}"
+                if not staged.exists():
+                    break
+        try:
+            os.replace(str(target), str(staged))
+            return staged
+        except OSError:
+            return target
+
+    def _enqueue_dir_purge(self, targets: list[pathlib.Path]) -> None:
+        """Delete staged trash folders in a daemon thread so the UI never blocks on disk I/O."""
+        trash_dir = self._trash_data_dir()
+        safe_targets = [
+            p
+            for p in targets
+            if p == trash_dir
+            or p.parent == trash_dir
+            or p.name.startswith(".trash_purging_")
+        ]
+        if not safe_targets:
+            return
+        with self._purge_lock:
+            new_targets = [p for p in safe_targets if p not in self._active_purge_paths]
+            if not new_targets:
+                return
+            self._active_purge_paths.update(new_targets)
+            self._purge_threads = [t for t in self._purge_threads if t.is_alive()]
+
+            def _worker() -> None:
+                try:
+                    for p in new_targets:
+                        shutil.rmtree(p, ignore_errors=True)
+                finally:
+                    with self._purge_lock:
+                        for p in new_targets:
+                            self._active_purge_paths.discard(p)
+
+            t = threading.Thread(target=_worker, name="fox-trash-purge", daemon=True)
+            self._purge_threads.append(t)
+        t.start()
+
+    def wait_for_trash_purge(self, timeout: float = 5.0) -> None:
+        """Wait for any queued background trash deletions to finish."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._purge_lock:
+                live = [t for t in self._purge_threads if t.is_alive()]
+                self._purge_threads = live
+            if not live:
+                return
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                return
+            live[0].join(timeout=rem)
 
     def _load_trash_dict(self) -> dict[str, dict]:
         path = self._trash_file()
@@ -1045,32 +1120,55 @@ class ProfileManager:
             )
 
     def trash_profile(self, name: str) -> bool:
+        return bool(self.bulk_trash_profiles([name]))
+
+    def bulk_trash_profiles(self, names: list[str]) -> list[str]:
+        """Move multiple profiles to trash in a single profiles/trash JSON write."""
+        if not names:
+            return []
+        moved: list[str] = []
+        to_purge: list[pathlib.Path] = []
         with self._lock:
             with contextlib.suppress(Exception):
                 self.sync_credentials_from_disk()
-            if name not in self.profiles:
-                return False
-            profile = self.profiles.pop(name)
-            self.save_profiles()
+            target_names = [n for n in dict.fromkeys(names) if n in self.profiles]
+            if not target_names:
+                return []
             trash_data = self._load_trash_dict()
-            entry = profile.to_dict()
-            entry["deleted_at"] = int(time.time())
-            trash_data[name] = entry
+            now_ts = int(time.time())
+            for name in target_names:
+                profile = self.profiles.pop(name)
+                entry = profile.to_dict()
+                entry["deleted_at"] = now_ts
+                trash_data[name] = entry
+                moved.append(name)
+            self.save_profiles()
             self._save_trash_dict(trash_data)
 
-            src_dir = pathlib.Path(self._data_path(name))
-            if src_dir.exists():
-                trash_root = self._trash_data_dir()
-                trash_root.mkdir(exist_ok=True, parents=True)
+            trash_root = self._trash_data_dir()
+            trash_root_ready = False
+            for name in moved:
+                src_dir = pathlib.Path(self._data_path(name))
+                if not src_dir.exists():
+                    continue
+                if not trash_root_ready:
+                    trash_root.mkdir(exist_ok=True, parents=True)
+                    trash_root_ready = True
                 dst_dir = trash_root / name
+                if dst_dir.exists():
+                    staged = self._stage_dir_for_purge(dst_dir)
+                    if staged is not None:
+                        to_purge.append(staged)
                 if dst_dir.exists():
                     shutil.rmtree(dst_dir, ignore_errors=True)
                 try:
                     shutil.move(str(src_dir), str(dst_dir))
                 except OSError:
                     shutil.rmtree(src_dir, ignore_errors=True)
-        logger.info("Moved profile to trash: %s", name)
-        return True
+        self._enqueue_dir_purge(to_purge)
+        for name in moved:
+            logger.info("Moved profile to trash: %s", name)
+        return moved
 
     def restore_profile(self, name: str) -> bool:
         with self._lock:
@@ -1151,6 +1249,7 @@ class ProfileManager:
         return True
 
     def delete_trashed_profile(self, name: str) -> bool:
+        to_purge: list[pathlib.Path] = []
         with self._lock:
             trash_data = self._load_trash_dict()
             key = next(
@@ -1160,16 +1259,29 @@ class ProfileManager:
                 return False
             del trash_data[key]
             self._save_trash_dict(trash_data)
-            shutil.rmtree(self._trash_data_dir() / key, ignore_errors=True)
+            staged = self._stage_dir_for_purge(self._trash_data_dir() / key)
+            if staged is not None:
+                to_purge.append(staged)
+        self._enqueue_dir_purge(to_purge)
         logger.info("Permanently deleted trashed profile: %s", name)
         return True
 
     def empty_trash(self) -> int:
+        to_purge: list[pathlib.Path] = []
         with self._lock:
             trash_data = self._load_trash_dict()
             count = len(trash_data)
             self._save_trash_dict({})
-            shutil.rmtree(self._trash_data_dir(), ignore_errors=True)
+            trash_dir = self._trash_data_dir()
+            staged = self._stage_dir_for_purge(trash_dir)
+            if staged is not None:
+                to_purge.append(staged)
+            data_root = trash_dir.parent
+            if data_root.exists():
+                for stale in data_root.glob(".trash_purging_*"):
+                    if stale.is_dir() and stale not in to_purge:
+                        to_purge.append(stale)
+        self._enqueue_dir_purge(to_purge)
         logger.info("Emptied trash (%d profiles)", count)
         return count
 

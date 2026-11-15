@@ -104,6 +104,11 @@ class AppHandlers:
         except TypeError:
             self._refresh()
 
+    def _refresh_and_schedule_snapshot(self) -> None:
+        """Refresh UI immediately with cached snapshot, then compute full snapshot off-thread."""
+        self._fast_refresh()
+        self._state.schedule_refresh(full_snapshot=True)
+
     def on_launch(self, name: str) -> None:
         if self._state.is_loading(name):
             return
@@ -152,7 +157,7 @@ class AppHandlers:
             if self._monitor is not None:
                 self._monitor.set_cooldown_minutes(mins)
                 self._log(get_string("cooldown_saved_log", mins=mins))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         open_cooldown_settings_dialog(page, self._monitor.cooldown_minutes, _save)
 
@@ -176,7 +181,7 @@ class AppHandlers:
     def on_delete(self, name: str) -> None:
         page = self._get_page()
         assert page is not None
-        delete_profile(page, name, self._pm, self._log, self._refresh)
+        delete_profile(page, name, self._pm, self._log, self._refresh_and_schedule_snapshot)
 
     def on_edit(self, name: str) -> None:
         page = self._get_page()
@@ -184,7 +189,7 @@ class AppHandlers:
 
         def _after_edit() -> None:
             self._state.proxy_status.pop(name, None)
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         edit_profile(
             page,
@@ -233,7 +238,7 @@ class AppHandlers:
         def _clear_ips() -> None:
             if self._monitor is not None:
                 self._monitor.clear_ip_history(name)
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         def _score_ip(ip_addr: str, risk_data: dict) -> None:
             if self._monitor is not None:
@@ -299,24 +304,24 @@ class AppHandlers:
         if pinned is not None:
             msg_key = "pinned_profile_log" if pinned else "unpinned_profile_log"
             self._log(get_string(msg_key, name=name))
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
     def _status_tag_callbacks(self) -> dict:
         def _save_tag(code_or_new: str, label: str, color: str) -> bool:
             ok = self._pm.save_status_tag(code_or_new, label, color)
             if ok:
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _del_tag(code: str) -> bool:
             ok = self._pm.delete_status_tag(code)
             if ok:
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _reset_tags() -> list[dict[str, str]]:
             res = self._pm.reset_status_tags()
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
             return res
 
         return {
@@ -334,7 +339,7 @@ class AppHandlers:
         def _apply(st: str | None) -> None:
             cnt = self._pm.bulk_update_status([name], st)
             self._log(get_string("bulk_status_updated", count=cnt))
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         open_status_dialog(
             page,
@@ -368,20 +373,20 @@ class AppHandlers:
                 names=", ".join(updated),
             )
             self._log(msg)
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
             return True, msg
 
         def _add_to_pool(lines: list[str]) -> tuple[int, int]:
             added, skipped = self._pm.add_proxies_to_pool(lines)
             if added:
                 self._log(get_string("proxy_pool_added_log", added=added, skipped=skipped))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return added, skipped
 
         def _remove_from_pool(px: str) -> bool:
             ok = self._pm.remove_proxy_from_pool(px)
             if ok:
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _assign_to_profile(prof_name: str, px: str) -> bool:
@@ -391,7 +396,7 @@ class AppHandlers:
             if cnt > 0:
                 self._state.proxy_status.pop(prof_name, None)
                 self._log(get_string("quick_saved_proxy", name=prof_name))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
                 return True
             return False
 
@@ -447,7 +452,7 @@ class AppHandlers:
             )
         )
         if self._get_refs() is not None:
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
         else:
             self._state.schedule_refresh()
         return len(valid_names)
@@ -463,7 +468,7 @@ class AppHandlers:
             added, skipped = self._pm.add_mails_to_pool(lines)
             if added > 0:
                 self._log(get_string("mail_pool_added_log", added=added, skipped=skipped))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return added, skipped
 
         def _remove_from_pool(em_or_line: str) -> bool:
@@ -471,7 +476,7 @@ class AppHandlers:
                 return False
             ok = self._pm.remove_mail_from_pool(em_or_line)
             if ok:
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _assign_to_profile(prof_name: str, raw_line: str) -> bool:
@@ -482,7 +487,7 @@ class AppHandlers:
                 p_obj = self._pm.profiles.get(prof_name)
                 em_str = (p_obj.email or "") if p_obj else ""
                 self._log(get_string("mail_pool_assigned_log", email=em_str, name=prof_name))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _record_scan(
@@ -531,7 +536,7 @@ class AppHandlers:
         def _do_clone(new_name: str, copy_proxy: bool) -> None:
             if self._pm.clone_profile(name, new_name, copy_proxy=copy_proxy):
                 self._log(get_string("cloned_profile", src=name, dst=new_name))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         open_clone_dialog(page, name, set(self._pm.profiles.keys()), _do_clone)
 
@@ -542,16 +547,18 @@ class AppHandlers:
         def _restore(n: str) -> None:
             if self._pm.restore_profile(n):
                 self._log(get_string("restored_from_trash", name=n))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         def _del_forever(n: str) -> None:
             if self._pm.delete_trashed_profile(n):
                 self._log(get_string("deleted_profile", name=n))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         def _empty_all() -> None:
-            self._pm.empty_trash()
-            self._refresh()
+            cnt = self._pm.empty_trash()
+            if cnt > 0:
+                self._log(get_string("emptied_trash_log", count=cnt))
+            self._refresh_and_schedule_snapshot()
 
         open_trash_dialog(
             page,
@@ -560,6 +567,7 @@ class AppHandlers:
             _del_forever,
             _empty_all,
             on_open_backups=self.on_open_backups,
+            ui_lock=self._state._ui_update_lock,
         )
 
     def on_open_batch_create(self, active_page: str = "__all__") -> None:
@@ -590,7 +598,7 @@ class AppHandlers:
                     skipped=len(skipped),
                 )
             )
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
             if auto_geo and created and page is not None:
                 with_proxy = [
                     n for n in created if n in self._pm.profiles and self._pm.profiles[n].proxy
@@ -646,7 +654,7 @@ class AppHandlers:
                         count=cnt,
                     )
                 )
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         open_backup_restore_dialog(
             page,
@@ -762,7 +770,7 @@ class AppHandlers:
         if page is not None and hasattr(page, "run_task"):
             page.run_task(_set_clipboard_text, page, code)
         self._log(get_string("copied_2fa_log", name=name, code=code, rem=rem))
-        self._refresh()
+        self._fast_refresh()
 
     def on_copy_password(self, name: str) -> None:
         p = self._pm.profiles.get(name)
@@ -829,7 +837,7 @@ class AppHandlers:
                 )
             if ok:
                 self._log(get_string("mail_saved_log", name=name))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return ok
 
         def _bulk_import(raw_lines: str) -> tuple[int, int]:
@@ -840,7 +848,7 @@ class AppHandlers:
                 self._log(
                     get_string("mail_bulk_saved_log", updated=updated, skipped=skipped)
                 )
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
             return (updated, skipped)
 
         def _copy_text(val: str, log_msg: str) -> None:
@@ -918,13 +926,13 @@ class AppHandlers:
         self._state.editing_proxy = None
         p = self._pm.profiles.get(name)
         if p is None:
-            self._refresh()
+            self._fast_refresh()
             return
         clean = raw_proxy.strip()
         ok, err = validate_proxy_format(clean)
         if not ok:
             self._log(f"[{name}] {err}")
-            self._refresh()
+            self._fast_refresh()
             return
         if (clean or None) != p.proxy:
             self._pm.update_profile(
@@ -941,7 +949,7 @@ class AppHandlers:
             )
             self._state.proxy_status.pop(name, None)
             self._log(get_string("quick_saved_proxy", name=name))
-        self._refresh()
+        self._refresh_and_schedule_snapshot()
 
     def on_quick_check_proxy(self, name: str) -> None:
         page = self._get_page()
@@ -958,7 +966,7 @@ class AppHandlers:
         ]
         for sib in siblings:
             self._state.proxy_status[sib] = ("checking", f"⏳ {get_string('proxy_checking')}")
-        self._refresh()
+        self._fast_refresh()
         self._log(f"[{name}] {get_string('proxy_checking')}")
 
         async def _check() -> None:
@@ -1026,14 +1034,14 @@ class AppHandlers:
             self._pm,
             self._ps,
             self._log,
-            self._refresh,
+            self._refresh_and_schedule_snapshot,
             on_batch_create=lambda: self.on_open_batch_create(active_page),
             active_page=active_page,
         )
 
     def on_move(self, name: str, direction: int) -> None:
         if self._pm.move_profile(name, direction):
-            self._refresh()
+            self._fast_refresh()
 
     async def on_import(self, _: ft.ControlEvent | None = None) -> None:
         refs = self._get_refs()
@@ -1042,7 +1050,7 @@ class AppHandlers:
             refs.file_picker,
             self._pm,
             self._log,
-            self._refresh,
+            self._refresh_and_schedule_snapshot,
             running_names=self._bl.running_profile_names() | set(self._state.loading),
         )
 
@@ -1106,7 +1114,7 @@ class AppHandlers:
                 names,
                 self._pm,
                 self._log,
-                self._refresh,
+                self._refresh_and_schedule_snapshot,
                 on_done=self._state.clear_selection,
             )
 
@@ -1169,7 +1177,7 @@ class AppHandlers:
         msg_key = "bulk_pinned_log" if target_pinned else "bulk_unpinned_log"
         self._log(get_string(msg_key, count=cnt or len(selected)))
         self._state.clear_selection()
-        self._refresh()
+        self._refresh_and_schedule_snapshot()
 
     def on_bulk_set_status(self) -> None:
         page = self._get_page()
@@ -1184,7 +1192,7 @@ class AppHandlers:
             cnt = self._pm.bulk_update_status(selected, st)
             self._log(get_string("bulk_status_updated", count=cnt))
             self._state.clear_selection()
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         open_status_dialog(
             page,
@@ -1209,7 +1217,7 @@ class AppHandlers:
             cnt = self._pm.bulk_update_group(selected, grp)
             self._log(get_string("bulk_group_updated", count=cnt))
             self._state.clear_selection()
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         open_bulk_group_dialog(page, len(selected), existing, _apply)
 
@@ -1224,7 +1232,7 @@ class AppHandlers:
             cnt = self._pm.bulk_update_color(selected, col)
             self._log(get_string("bulk_color_updated", count=cnt))
             self._state.clear_selection()
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         open_bulk_color_dialog(page, len(selected), _apply)
 
@@ -1259,7 +1267,7 @@ class AppHandlers:
                 self._state.proxy_status.pop(pname, None)
             self._log(get_string("bulk_proxy_updated", count=cnt))
             self._state.clear_selection()
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
             if auto_geo and cnt > 0 and page is not None:
                 need_geo = [
                     pname
@@ -1332,7 +1340,8 @@ class AppHandlers:
             if self._state.log_collapsed
             else ft.Icons.KEYBOARD_ARROW_DOWN
         )
-        page.update()
+        with self._state._ui_update_lock:
+            page.update()
 
     def open_log_fullscreen(self) -> None:
         page = self._get_page()
@@ -1349,7 +1358,7 @@ class AppHandlers:
         def _apply(created_at: str | None, banned_at: str | None) -> None:
             if self._pm.update_profile_dates(name, created_at, banned_at):
                 self._log(get_string("dates_updated_log", name=name))
-                self._refresh()
+                self._refresh_and_schedule_snapshot()
 
         open_profile_dates_dialog(
             page,
@@ -1371,7 +1380,7 @@ class AppHandlers:
         def _launch_one(name: str) -> None:
             if not self._bl.is_running(name) and not self._state.is_loading(name):
                 launch_or_stop(name, self._pm, self._bl, self._state, self._log)
-                self._refresh()
+                self._fast_refresh()
 
         def _apply_plan(plan: SchedulePlan) -> None:
             tag_map = plan.status_tag_map()
@@ -1398,7 +1407,7 @@ class AppHandlers:
                     days=plan.cycle_days,
                 )
             )
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         def _copy_md(md_text: str) -> None:
             _set_clipboard_text(page, md_text)
@@ -1417,7 +1426,7 @@ class AppHandlers:
                     else:
                         refs.sort_dropdown.value = "custom"
             self._log(get_string("schedule_cleared_log", count=cnt))
-            self._refresh()
+            self._refresh_and_schedule_snapshot()
 
         open_safe_schedule_dialog(
             page,
@@ -1461,12 +1470,12 @@ class AppHandlers:
                     mode=_mode_label(mode),
                 )
             )
-            self._refresh()
+            self._fast_refresh()
 
         def _launch_one(name: str) -> None:
             if not self._bl.is_running(name) and not self._state.is_loading(name):
                 launch_or_stop(name, self._pm, self._bl, self._state, self._log)
-                self._refresh()
+                self._fast_refresh()
 
         def _save_fixed_squad(key: str, names: list[str] | None, team_idx: int) -> None:
             self._monitor.set_fixed_work_squad(key, names)
@@ -1498,7 +1507,7 @@ class AppHandlers:
                     mode=_mode_label(mode),
                 )
             )
-            self._refresh()
+            self._fast_refresh()
             if to_open:
                 bulk_launch_profiles(
                     to_open,

@@ -16,14 +16,30 @@ def open_trash_dialog(
     on_delete_forever: Callable[[str], None],
     on_empty_all: Callable[[], None],
     on_open_backups: Callable[[], None] | None = None,
+    *,
+    ui_lock: Any = None,
 ) -> None:
     """Trash Bin dialog to restore or permanently delete soft-deleted profiles."""
-    list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=500)
+    list_col = ft.ListView(spacing=8, item_extent=62, height=500)
+    empty_btn = ft.Button(
+        get_string("trash_empty_all_btn"),
+        icon=ft.Icons.DELETE_SWEEP,
+        style=ERROR_STYLE,
+    )
+
+    def _safe_page_update() -> None:
+        if ui_lock is not None:
+            with ui_lock:
+                page.update()
+        else:
+            page.update()
 
     def _rebuild_rows() -> None:
         items = get_trashed()
+        empty_btn.disabled = not bool(items)
         list_col.controls.clear()
         if not items:
+            list_col.item_extent = None
             list_col.controls.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(vertical=40),
@@ -37,6 +53,7 @@ def open_trash_dialog(
             )
             return
 
+        list_col.item_extent = 62
         for item in items:
             pname = str(item.get("name", ""))
             proxy = str(item.get("proxy") or get_string("no_proxy_short"))
@@ -51,7 +68,7 @@ def open_trash_dialog(
                 def _cb(_: ft.ControlEvent) -> None:
                     on_restore(n)
                     _rebuild_rows()
-                    page.update()
+                    _safe_page_update()
 
                 return _cb
 
@@ -59,7 +76,7 @@ def open_trash_dialog(
                 def _cb(_: ft.ControlEvent) -> None:
                     on_delete_forever(n)
                     _rebuild_rows()
-                    page.update()
+                    _safe_page_update()
 
                 return _cb
 
@@ -116,10 +133,22 @@ def open_trash_dialog(
 
     _rebuild_rows()
 
+    busy = False
+
     def _handle_empty_all(_: ft.ControlEvent) -> None:
-        on_empty_all()
-        _rebuild_rows()
-        page.update()
+        nonlocal busy
+        if busy or empty_btn.disabled:
+            return
+        busy = True
+        empty_btn.disabled = True
+        try:
+            on_empty_all()
+            _rebuild_rows()
+            _safe_page_update()
+        finally:
+            busy = False
+
+    empty_btn.on_click = _handle_empty_all
 
     def _switch_to_backups(_: ft.ControlEvent) -> None:
         page.pop_dialog()
@@ -175,12 +204,7 @@ def open_trash_dialog(
             ),
         ),
         actions=[
-            ft.Button(
-                get_string("trash_empty_all_btn"),
-                icon=ft.Icons.DELETE_SWEEP,
-                style=ERROR_STYLE,
-                on_click=_handle_empty_all,
-            ),
+            empty_btn,
             ft.TextButton(
                 get_string("close_btn"),
                 style=ft.ButtonStyle(color=COLORS["text_sub"]),

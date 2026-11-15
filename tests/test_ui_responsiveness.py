@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import dataclasses
 import sqlite3
 import sys
 import threading
@@ -33,11 +34,14 @@ from src.services.browser import window_title as wt_mod
 from src.services.browser.launcher import ProfileBusyError
 from src.services.monitor import MonitorService
 from src.services.profile.manager import ProfileManager
+from src.ui.actions.bulk import bulk_delete_profiles
 from src.ui.app import App
 from src.ui.components.floating_tab_bar import FloatingProfileTabBar, _exceeds_drag_threshold
 from src.ui.components.profile_card import ROW_HEIGHT
+from src.ui.dialogs.trash import open_trash_dialog
 from src.ui.handlers import AppHandlers
 from src.ui.state import AppState
+from src.ui.theme import styles as styles_mod
 
 
 class _FakeBL:
@@ -748,6 +752,294 @@ def test_d6_subtree_isolation_patch_size_and_live_event_dispatch(isolated_env):
             app._flush_log()
             app._safe_update()
             assert _patch_bytes(m2) < 4_000
+
+            assert not [
+                m for m in conn.messages if m.action == MessageAction.SESSION_CRASHED
+            ]
+        finally:
+            app._shutting_down = True
+
+    asyncio.run(_run())
+
+
+def _find_descendant(node, pred):
+    if pred(node):
+        return node
+    for attr in ("content", "leading", "trailing", "title", "subtitle"):
+        child = getattr(node, attr, None)
+        if isinstance(child, ft.BaseControl):
+            found = _find_descendant(child, pred)
+            if found is not None:
+                return found
+    for attr in ("controls", "actions"):
+        for child in getattr(node, attr, None) or []:
+            if isinstance(child, ft.BaseControl):
+                found = _find_descendant(child, pred)
+                if found is not None:
+                    return found
+    return None
+
+
+def _collect_frozen_objects(root, seen=None, found=None):
+    if seen is None:
+        seen = set()
+    if found is None:
+        found = []
+    if root is None:
+        return found
+    oid = id(root)
+    if oid in seen:
+        return found
+    if dataclasses.is_dataclass(root):
+        seen.add(oid)
+        if hasattr(root, "_frozen"):
+            found.append(type(root).__name__)
+        for field in dataclasses.fields(root):
+            if field.name == "_parent" or field.metadata.get("skip", False):
+                continue
+            _collect_frozen_objects(getattr(root, field.name, None), seen, found)
+    elif isinstance(root, (list, tuple)):
+        seen.add(oid)
+        for item in root:
+            _collect_frozen_objects(item, seen, found)
+    elif isinstance(root, dict):
+        seen.add(oid)
+        for val in root.values():
+            _collect_frozen_objects(val, seen, found)
+    return found
+
+
+def test_d7_frozen_controls_never_leak_across_keyed_rebuilds_dialogs_and_styles(isolated_env):
+    pm, _, tmp_path = isolated_env
+    for i in range(6):
+        assert pm.add_profile(f"P{i}", f"http://u:p@1.2.3.4:{10100 + i}", "windows")
+    pm.trash_profile("P5")
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        conn, sess = _connect_session(loop)
+        await sess.connect(conn)
+        app = _create_app(pm, _FakeBL(), tmp_path)
+        try:
+            app._main(sess.page)
+
+            def _assert_unfrozen() -> None:
+                assert _collect_frozen_objects(sess.page) == []
+                style_frozen = [
+                    name
+                    for name, val in vars(styles_mod).items()
+                    if dataclasses.is_dataclass(val) and _collect_frozen_objects(val)
+                ]
+                assert style_frozen == []
+
+            _assert_unfrozen()
+
+            # Keyed card replacement during inline acc_no edit & checkbox toggle
+            app.h.on_start_edit_acc_no("P1")
+            _assert_unfrozen()
+            app.h.on_save_acc_no("P1", "88")
+            _assert_unfrozen()
+            app.h.on_toggle_select("P2")
+            _assert_unfrozen()
+
+            # Imperative mutation on a child control inside a previously replaced card must never raise
+            p1_card = next(c for c in app.refs.profile_list_area.controls if c.key == "P1")
+            p1_cb = _find_descendant(p1_card, lambda c: isinstance(c, ft.Checkbox))
+            assert p1_cb is not None
+            p1_cb.value = True
+            p1_cb.update()
+            _assert_unfrozen()
+
+            # Empty transition and dialog updates keep everything unfrozen
+            app._on_search("__no_such_profile__")
+            _assert_unfrozen()
+            app._clear_filters()
+            _assert_unfrozen()
+
+            app.h.on_open_trash()
+            _assert_unfrozen()
+            sess.page.pop_dialog()
+            _assert_unfrozen()
+
+            assert not [
+                m for m in conn.messages if m.action == MessageAction.SESSION_CRASHED
+            ]
+        finally:
+            app._shutting_down = True
+
+    asyncio.run(_run())
+
+
+def test_d8_empty_trash_delete_trashed_and_bulk_trash_are_nonblocking_and_virtualized(
+    isolated_env, monkeypatch
+):
+    pm, data_dir, tmp_path = isolated_env
+    names: list[str] = []
+    for i in range(120):
+        name = f"Bulk_{i:03d}"
+        names.append(name)
+        assert pm.add_profile(name, f"http://u:p@1.2.3.4:{10100 + i}", "windows")
+        entries_dir = data_dir / name / "cache2" / "entries"
+        entries_dir.mkdir(parents=True, exist_ok=True)
+        (entries_dir / "item.bin").write_bytes(b"cache-entry")
+
+    save_calls = 0
+    orig_save = pm.save_profiles
+
+    def _counting_save() -> None:
+        nonlocal save_calls
+        save_calls += 1
+        orig_save()
+
+    monkeypatch.setattr(pm, "save_profiles", _counting_save)
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        conn, sess = _connect_session(loop)
+        await sess.connect(conn)
+
+        logs: list[str] = []
+        refreshes = 0
+
+        def _on_refresh() -> None:
+            nonlocal refreshes
+            refreshes += 1
+
+        bulk_delete_profiles(
+            sess.page,
+            names,
+            pm,
+            logs.append,
+            _on_refresh,
+            lambda: None,
+        )
+        confirm_dlg = sess.page._dialogs.controls[-1]
+        confirm_btn = _find_descendant(
+            confirm_dlg,
+            lambda c: isinstance(c, ft.Button) and getattr(c, "on_click", None) is not None,
+        )
+        assert confirm_btn is not None
+        confirm_btn.on_click(SimpleNamespace(control=confirm_btn))
+        sess.page.pop_dialog()
+
+        assert save_calls == 1
+        assert len(pm.profiles) == 0
+        assert len(pm.list_trashed_profiles()) == 120
+        assert len(logs) == 1 and "120" in logs[0]
+        assert refreshes == 1
+
+        # Deleting a single trashed item finishes fast without UI blocking
+        t0 = time.perf_counter()
+        assert pm.delete_trashed_profile("Bulk_000") is True
+        assert (time.perf_counter() - t0) < 0.5
+        assert len(pm.list_trashed_profiles()) == 119
+
+        # Open trash dialog -> uses virtualized ListView(item_extent=62) and empty guard
+        empty_calls = 0
+
+        def _on_empty() -> None:
+            nonlocal empty_calls
+            empty_calls += 1
+            t_start = time.perf_counter()
+            removed = pm.empty_trash()
+            assert (time.perf_counter() - t_start) < 0.25
+            assert removed == 119
+
+        open_trash_dialog(
+            sess.page,
+            pm.list_trashed_profiles,
+            pm.restore_profile,
+            pm.delete_trashed_profile,
+            _on_empty,
+            ui_lock=AppState()._ui_update_lock,
+        )
+        trash_dlg = sess.page._dialogs.controls[-1]
+        lv = _find_descendant(trash_dlg, lambda c: isinstance(c, ft.ListView))
+        assert lv is not None
+        assert lv.item_extent == 62
+        assert len(lv.controls) == 119
+
+        empty_btn = _find_descendant(
+            trash_dlg,
+            lambda c: isinstance(c, ft.Button)
+            and getattr(c, "icon", None) == ft.Icons.DELETE_SWEEP,
+        )
+        assert empty_btn is not None and not empty_btn.disabled
+
+        # Trigger empty + redundant rapid clicks -> only executes once and .trash vanishes instantly
+        empty_btn.on_click(SimpleNamespace(control=empty_btn))
+        empty_btn.on_click(SimpleNamespace(control=empty_btn))
+        assert empty_calls == 1
+        assert empty_btn.disabled is True
+        assert lv.item_extent is None
+        assert not pm._trash_data_dir().exists()
+        assert pm.list_trashed_profiles() == []
+
+        pm.wait_for_trash_purge(timeout=5.0)
+        assert not list(data_dir.glob(".trash_purging_*"))
+
+    asyncio.run(_run())
+
+
+def test_d9_cross_tab_card_cache_remount_and_nonblocking_handlers(isolated_env):
+    pm, _, tmp_path = isolated_env
+    for i in range(5):
+        assert pm.add_profile(
+            f"Live_{i}", f"http://u:p@1.2.3.4:{10100 + i}", "windows", pages=["Live"]
+        )
+    for i in range(8):
+        assert pm.add_profile(
+            f"Watch_{i}", f"http://u:p@1.2.3.4:{10200 + i}", "windows", pages=["Watch"]
+        )
+    assert pm.add_profile(
+        "Shared_X",
+        "http://u:p@1.2.3.4:10300",
+        "windows",
+        pages=["Live", "Watch"],
+        two_fa="JBSWY3DPEHPK3PXP",
+    )
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        conn, sess = _connect_session(loop)
+        await sess.connect(conn)
+        app = _create_app(pm, _FakeBL(), tmp_path)
+        try:
+            app._main(sess.page)
+            app._on_select_custom_page("Live")
+            live_cards = {c.key: c for c in app.refs.profile_list_area.controls}
+            assert set(live_cards) == {f"Live_{i}" for i in range(5)} | {"Shared_X"}
+
+            # Switch to Watch and back to Live -> cached cards are retained and reused
+            app._on_select_custom_page("Watch")
+            watch_cards = {c.key: c for c in app.refs.profile_list_area.controls}
+            assert watch_cards["Shared_X"] is live_cards["Shared_X"]
+
+            app._on_select_custom_page("Live")
+            remounted_live = {c.key: c for c in app.refs.profile_list_area.controls}
+            for k, card in live_cards.items():
+                assert remounted_live[k] is card
+
+            # Remounted card's child controls stay indexed and dispatch real events
+            cb_l2 = _find_descendant(remounted_live["Live_2"], lambda c: isinstance(c, ft.Checkbox))
+            assert cb_l2 is not None and cb_l2._i in sess.index
+            await sess.dispatch_event(cb_l2._i, "change", True)
+            assert app.state.is_selected("Live_2")
+
+            # Interactive handlers refresh UI via cached snapshot without blocking on monitor.snapshot
+            with patch.object(
+                app.monitor, "snapshot", side_effect=AssertionError("blocking snapshot call")
+            ):
+                app.state.consume_full_snapshot()
+                app.h.on_toggle_pin("Live_1")
+                assert pm.profiles["Live_1"].pinned is True
+                assert app.state.consume_full_snapshot() is True
+
+                app.h.on_copy_2fa("Shared_X")
+                app.h.on_start_edit_proxy("Live_3")
+                app.h.on_save_proxy("Live_3", "http://u:p@1.2.3.4:10999")
+                assert pm.profiles["Live_3"].proxy == "http://u:p@1.2.3.4:10999"
+                assert app.state.consume_full_snapshot() is True
 
             assert not [
                 m for m in conn.messages if m.action == MessageAction.SESSION_CRASHED
