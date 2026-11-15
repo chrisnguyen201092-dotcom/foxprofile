@@ -23,6 +23,7 @@ class AppState:
         self._last_log_ui_update: float = 0.0
         self._pending_log_flush: bool = False
         self._refresh_requested = threading.Event()
+        self._full_snapshot_requested: bool = False
         self._last_running_snapshot: set[str] = set()
         self._ui_update_lock = threading.Lock()
         self._selected_profiles: set[str] = set()
@@ -65,12 +66,20 @@ class AppState:
             else:
                 self._loading_profiles.discard(name)
 
-    def schedule_refresh(self) -> None:
+    def schedule_refresh(self, *, full_snapshot: bool = True) -> None:
+        if full_snapshot:
+            self._full_snapshot_requested = True
         self._refresh_requested.set()
 
     def consume_refresh(self) -> bool:
         if self._refresh_requested.is_set():
             self._refresh_requested.clear()
+            return True
+        return False
+
+    def consume_full_snapshot(self) -> bool:
+        if self._full_snapshot_requested:
+            self._full_snapshot_requested = False
             return True
         return False
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import gc
 import os
+import queue
 import sys
 import threading
 import time
@@ -34,6 +35,12 @@ from ...services.avatar_store import (
 )
 
 _ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets"))
+_DRAG_THRESHOLD_PX = 7
+
+
+def _exceeds_drag_threshold(dx: int, dy: int) -> bool:
+    """Return True when pointer travel exceeds click jitter tolerance."""
+    return (dx * dx + dy * dy) > (_DRAG_THRESHOLD_PX * _DRAG_THRESHOLD_PX)
 
 # FoxProfile Signature Two-Tone Palette (Passport Forest Rail #17332E + Security Paper #F3F4EF)
 _BG_RAIL = "#17332E"
@@ -233,6 +240,39 @@ class FloatingProfileTabBar:
         self._thread: threading.Thread | None = None
         self._stop_flag = False
         self._pending_snip: tuple[str, int] | None = None
+        self._action_queue: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
+        self._action_worker_lock = threading.Lock()
+        self._action_worker_started = False
+
+    def _enqueue_action(self, fn: Callable[[], None]) -> None:
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            fn()
+            return
+        with self._action_worker_lock:
+            if not self._action_worker_started:
+                self._action_worker_started = True
+
+                def _worker() -> None:
+                    while True:
+                        task = self._action_queue.get()
+                        with contextlib.suppress(Exception):
+                            task()
+
+                threading.Thread(
+                    target=_worker,
+                    name="FoxTabActionWorker",
+                    daemon=True,
+                ).start()
+        self._action_queue.put(fn)
+
+    def _dispatch_select_tab(self, name: str) -> None:
+        with self._lock:
+            running, loading, _prev_active, single_stage, enabled = self._state
+            self._state = (running, loading, name, single_stage, enabled)
+        self._enqueue_action(lambda target=name: self._on_select_tab(target))
+
+    def _dispatch_focus_home(self) -> None:
+        self._enqueue_action(self._on_focus_foxprofile)
 
     def sync(
         self,
@@ -360,6 +400,8 @@ class FloatingProfileTabBar:
         snip_opened_at: list[float] = [0.0]
         file_dialog_active: list[bool] = [False]
         poll_tick: list[int] = [0]
+        avatar_scan_busy: list[bool] = [False]
+        avatar_scan_dirty: list[bool] = [False]
         last_av_click: dict[str, object] = {"name": "", "ts": 0.0, "after_id": None}
 
         win32_user32, _win32_dwm = _tabbar_win32()
@@ -966,9 +1008,10 @@ class FloatingProfileTabBar:
             ry = int(getattr(event, "y_root", 0))
             if (
                 not drag_state["moved"]
-                and abs(rx - int(drag_state["start_root_x"]))
-                + abs(ry - int(drag_state["start_root_y"]))
-                > 3
+                and _exceeds_drag_threshold(
+                    rx - int(drag_state["start_root_x"]),
+                    ry - int(drag_state["start_root_y"]),
+                )
             ):
                 drag_state["moved"] = True
             if not drag_state["moved"]:
@@ -1001,7 +1044,7 @@ class FloatingProfileTabBar:
             drag_state["dragging"] = False
             if not drag_state["moved"]:
                 if click_toggle_home:
-                    self._on_focus_foxprofile()
+                    self._dispatch_focus_home()
                 return
             nx = int(drag_state["win_x"])
             ny = int(drag_state["win_y"])
@@ -1142,34 +1185,22 @@ class FloatingProfileTabBar:
                     pady=2,
                     cursor="hand2",
                 )
+            def _select_this(_e: object = None, n: str = pname) -> None:
+                _cancel_pending_tab_select()
+                _close_popup_menu()
+                self._dispatch_select_tab(n)
+
             def _on_avatar_click(
                 event: object,
                 n: str = pname,
-                direct_menu: bool = (avatar_img is None or is_active),
+                active_tab_now: bool = is_active,
             ) -> None:
-                if direct_menu:
+                if active_tab_now:
                     _cancel_pending_tab_select()
                     last_av_click["ts"] = 0.0
                     _open_avatar_menu(event, n)
                     return
-                now = time.monotonic()
-                prev_ts = float(last_av_click.get("ts", 0.0))  # type: ignore[arg-type]
-                if last_av_click.get("name") == n and (now - prev_ts) <= 0.45:
-                    _cancel_pending_tab_select()
-                    last_av_click["ts"] = 0.0
-                    _open_avatar_menu(event, n)
-                    return
-                last_av_click["name"] = n
-                last_av_click["ts"] = now
-                _cancel_pending_tab_select()
-                _close_popup_menu()
-
-                def _delayed_select() -> None:
-                    last_av_click["after_id"] = None
-                    if active_menu[0] is None and not snip_active[0]:
-                        self._on_select_tab(n)
-
-                last_av_click["after_id"] = root.after(220, _delayed_select)
+                _select_this(event, n)
 
             def _on_avatar_double_click(event: object, n: str = pname) -> None:
                 _cancel_pending_tab_select()
@@ -1181,6 +1212,9 @@ class FloatingProfileTabBar:
             av_lbl.bind("<Button-1>", _on_avatar_click)
             av_lbl.bind("<Double-Button-1>", _on_avatar_double_click)
             av_lbl.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
+            tab_frame.bind("<Button-3>", lambda e, n=pname: _open_avatar_menu(e, n))
+            if not is_active:
+                tab_frame.bind("<Button-1>", _select_this)
 
             btn_select = tk.Label(
                 tab_frame,
@@ -1194,10 +1228,7 @@ class FloatingProfileTabBar:
                 cursor="hand2",
             )
             btn_select.pack(side="left", fill="x" if vertical else "none", expand=vertical)
-            btn_select.bind(
-                "<Button-1>",
-                lambda _e, n=pname: (_cancel_pending_tab_select(), _close_popup_menu(), self._on_select_tab(n)),
-            )
+            btn_select.bind("<Button-1>", _select_this)
             btn_select.bind(
                 "<Button-3>",
                 lambda e, n=pname: _open_avatar_menu(e, n),
@@ -1426,18 +1457,38 @@ class FloatingProfileTabBar:
                     if drag_state["dragging"] or snip_active[0] or file_dialog_active[0]:
                         next_delay = 80
                     else:
+                        if avatar_scan_dirty[0]:
+                            avatar_scan_dirty[0] = False
+                            _notify_avatar_updated()
                         poll_tick[0] += 1
-                        if poll_tick[0] % 5 == 0 and any(get_avatar_path(n, 22) is None for n in running):
-                            fg_prof = detect_foreground_running_profile(running)
-                            if (
-                                fg_prof
-                                and get_avatar_path(fg_prof, 22) is None
-                                and auto_capture_muse_avatar_from_active_window(
-                                    fg_prof,
-                                    allow_unprefixed_single=(len(running) == 1),
-                                )
-                            ):
-                                _notify_avatar_updated()
+                        if (
+                            poll_tick[0] % 20 == 0
+                            and not avatar_scan_busy[0]
+                            and any(get_avatar_path(n, 22) is None for n in running)
+                        ):
+                            avatar_scan_busy[0] = True
+                            scan_running = tuple(running)
+
+                            def _bg_avatar_scan(run_snap: tuple[str, ...] = scan_running) -> None:
+                                try:
+                                    fg_prof = detect_foreground_running_profile(run_snap)
+                                    if (
+                                        fg_prof
+                                        and get_avatar_path(fg_prof, 22) is None
+                                        and auto_capture_muse_avatar_from_active_window(
+                                            fg_prof,
+                                            allow_unprefixed_single=(len(run_snap) == 1),
+                                        )
+                                    ):
+                                        avatar_scan_dirty[0] = True
+                                finally:
+                                    avatar_scan_busy[0] = False
+
+                            threading.Thread(
+                                target=_bg_avatar_scan,
+                                name="FoxTabAvatarScan",
+                                daemon=True,
+                            ).start()
 
                         cur_orient = _compute_orientation(
                             int(drag_state["win_x"]),

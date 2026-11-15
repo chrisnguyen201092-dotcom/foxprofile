@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import date
 
 import flet as ft
 
@@ -23,10 +24,12 @@ from ..models.profile import (
     parse_schedule_tag,
     schedule_sort_key,
 )
-from ..services.browser.window_title import focus_foxprofile_window
+from ..services.avatar_store import AVATARS_DIR, avatar_version
+from ..services.browser.window_title import enqueue_window_action, focus_foxprofile_window
 from ..services.monitor import (
     MonitorService,
     MonitorSnapshot,
+    ProfileMonitorInfo,
     extract_proxy_endpoint,
     extract_proxy_port,
 )
@@ -42,7 +45,7 @@ from .components import (
 )
 from .components.content_area import build_monitor_bar
 from .components.floating_tab_bar import FloatingProfileTabBar
-from .components.profile_card import build_header_row
+from .components.profile_card import ROW_HEIGHT, build_header_row, resolve_status_display
 from .components.sidebar import build_filter_buttons
 from .dialogs import (
     open_add_to_page_dialog,
@@ -167,6 +170,13 @@ class App:
         if isinstance(saved_sort, str) and saved_sort:
             self.state.sort_by = saved_sort
         self._last_monitor_snap: MonitorSnapshot | None = None
+        self._card_cache: dict[str, tuple[tuple, ft.Container]] = {}
+        self._device_label_cache: dict[str, tuple[str, float, str]] = {}
+        self._pages_bar_sig: tuple | None = None
+        self._filter_col_sig: tuple | None = None
+        self._header_row_sig: tuple | None = None
+        self._monitor_bar_sig: tuple | None = None
+        self._bulk_bar_sig: tuple | None = None
         self._filter_column = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
         self._header_slot = ft.Container()
         self._pages_bar_slot = ft.Container()
@@ -177,7 +187,7 @@ class App:
             on_close_tab=self._on_close_browser_tab,
             on_toggle_single_stage=self._on_toggle_single_stage,
             on_focus_foxprofile=self._on_focus_foxprofile,
-            on_avatar_changed=self.state.schedule_refresh,
+            on_avatar_changed=lambda: self.state.schedule_refresh(full_snapshot=False),
         )
         self._trash_btn = ft.Container(
             width=34,
@@ -282,7 +292,11 @@ class App:
             running_ordered = self._ordered_running_names()
             if 0 <= idx < len(running_ordered):
                 self._on_select_browser_tab(running_ordered[idx])
+            with contextlib.suppress(Exception):
+                _ = ft.context.page
+                ft.context.mark_update_called()
             return
+        mutated_sync = False
         if ctrl and key == "f":
             if (
                 self.refs is not None
@@ -293,6 +307,7 @@ class App:
                 self.page.run_task(self.refs.search_field.focus)
         elif ctrl and key == "n":
             self.h.open_add_dialog(self.active_page)
+            mutated_sync = True
         elif no_mod and key == "escape":
             if (
                 self.state.editing_acc_no is not None
@@ -304,7 +319,8 @@ class App:
                 self.state.editing_note = None
                 self.state.editing_email = None
                 self.state.editing_proxy = None
-                self._refresh_profiles()
+                self._refresh_profiles(reuse_snapshot=True)
+                mutated_sync = True
             elif self.state.selected_names():
                 self.h.on_clear_selection()
             elif self.state.search_query:
@@ -314,17 +330,31 @@ class App:
                     if isinstance(self.refs.search_field.suffix, ft.Control):
                         self.refs.search_field.suffix.visible = False
                 self._refresh_profiles(reuse_snapshot=True)
+                mutated_sync = True
+        if not mutated_sync:
+            # Suppress Flet's automatic page.update() after unhandled keystrokes (e.g. Shift).
+            with contextlib.suppress(Exception):
+                _ = ft.context.page
+                ft.context.mark_update_called()
 
-    def _ordered_running_names(self) -> list[str]:
-        running_set = self.bl.running_profile_names() | self.state.loading
-        if not running_set:
+    def _ordered_running_names(self, running_set: set[str] | None = None) -> list[str]:
+        run_set = (
+            running_set
+            if running_set is not None
+            else (self.bl.running_profile_names() | self.state.loading)
+        )
+        if not run_set:
             return []
-        ordered = [p.name for p in self.pm.list_profiles() if p.name in running_set]
+        ordered = [p.name for p in self.pm.list_profiles() if p.name in run_set]
         seen = set(ordered)
-        for extra in sorted(running_set):
+        for extra in sorted(run_set):
             if extra not in seen:
                 ordered.append(extra)
         return ordered
+
+    def _enqueue_window_action(self, fn: Callable[[], None]) -> None:
+        """Serialize Win32 focus/restore calls on a dedicated daemon thread."""
+        enqueue_window_action(fn)
 
     def _on_select_browser_tab(self, name: str) -> None:
         self.h.on_focus_window(name)
@@ -338,18 +368,26 @@ class App:
         if self.state.active_browser_tab:
             self.h.on_focus_window(self.state.active_browser_tab)
         else:
-            self.state.schedule_refresh()
+            self.state.schedule_refresh(full_snapshot=False)
 
     def _on_toggle_floating_bar(self) -> None:
         self.state.floating_tab_bar = not self.state.floating_tab_bar
-        self.state.schedule_refresh()
+        self.state.schedule_refresh(full_snapshot=False)
 
     def _on_focus_foxprofile(self) -> None:
-        focus_foxprofile_window(get_string("window_title"), toggle=True)
+        title = get_string("window_title")
+        self._enqueue_window_action(lambda: focus_foxprofile_window(title, toggle=True))
 
     def _build_ui(self) -> None:
         """(Re)build every control; strings are read at build time."""
         assert self.page is not None
+        self._card_cache.clear()
+        self._device_label_cache.clear()
+        self._pages_bar_sig = None
+        self._filter_col_sig = None
+        self._header_row_sig = None
+        self._monitor_bar_sig = None
+        self._bulk_bar_sig = None
         self.refs = build_ui_refs(
             pm=self.pm,
             on_change_page=self._change_page,
@@ -398,6 +436,7 @@ class App:
         self.page.title = get_string("window_title")
         self.page.controls.clear()
         self.page.add(self._build_root_layout(self.refs))
+        self._seal_mounted_subtrees()
 
     def _restore_log(self) -> None:
         """Refill a freshly built log pane (flush_log only returns new lines)."""
@@ -532,7 +571,7 @@ class App:
             return
         if self.pm.remove_profiles_from_page(self.active_page, selected):
             self.state.clear_selection()
-            self._refresh_profiles()
+            self._refresh_profiles(reuse_snapshot=True)
 
     def _on_reorder_custom_page(self, src_page: str, target_page: str) -> None:
         pages = self.pm.list_custom_pages()
@@ -551,7 +590,7 @@ class App:
         moved = tabs_order.pop(src_idx)
         tabs_order.insert(target_idx, moved)
         if self.pm.reorder_custom_pages(tabs_order):
-            self._refresh_profiles()
+            self._refresh_profiles(reuse_snapshot=True)
 
     def _on_reorder(self, old_index: int, new_index: int) -> None:
         if self.state.sort_by != "custom" or old_index == new_index:
@@ -567,7 +606,7 @@ class App:
         it = iter(visible_names)
         full_order = [next(it) if k in visible_set else k for k in self.pm.profiles]
         if self.pm.reorder_profiles(full_order):
-            self._refresh_profiles()
+            self._refresh_profiles(reuse_snapshot=True)
 
     def _is_archive_view(self) -> bool:
         if self.filter == "archived" or is_ban_page(self.active_page):
@@ -628,7 +667,8 @@ class App:
             "chrome": lambda p: p.engine == "chrome",
         }
 
-    def _get_page_profiles(self) -> tuple[list, list, int]:
+    def _get_page_profiles(self, *, running: set[str] | None = None) -> tuple[list, list, int]:
+        run_set = running if running is not None else self.bl.running_profile_names()
         all_profiles = self.pm.list_profiles()
         in_archive = self._is_archive_view()
         if self.filter == "archived":
@@ -663,7 +703,7 @@ class App:
                 else:
                     all_profiles = [p for p in all_profiles if _matches_status(p)]
             else:
-                test = self._filter_tests().get(self.filter, lambda p: True)
+                test = self._filter_tests(run_set).get(self.filter, lambda p: True)
                 all_profiles = [p for p in all_profiles if test(p)]
         if q := self.state.search_query:
             ranked = [
@@ -719,19 +759,19 @@ class App:
                 )
             elif sort_by == "running":
                 all_profiles.sort(
-                    key=lambda p: (not self.bl.is_running(p.name), natural_name_key(p.name))
+                    key=lambda p: (p.name not in run_set, natural_name_key(p.name))
                 )
             elif sort_by == "proxy":
                 all_profiles.sort(key=lambda p: (not bool(p.proxy), natural_name_key(p.name)))
             elif sort_by in ("cooldown_desc", "cooldown_asc"):
                 snap = self._last_monitor_snap or self.monitor.snapshot(
                     self.pm.list_profiles(),
-                    self.bl.running_profile_names() | self.state.loading,
+                    run_set | self.state.loading,
                 )
 
                 def _cd_desc_key(p: object) -> tuple:
                     pname = getattr(p, "name", "")
-                    if self.bl.is_running(pname):
+                    if pname in run_set:
                         return (2, 0, natural_name_key(pname))
                     info = snap.profiles.get(pname)
                     if info is not None and info.cooldown_mins is not None:
@@ -741,7 +781,7 @@ class App:
 
                 def _cd_asc_key(p: object) -> tuple:
                     pname = getattr(p, "name", "")
-                    if self.bl.is_running(pname):
+                    if pname in run_set:
                         return (0, 0, natural_name_key(pname))
                     info = snap.profiles.get(pname)
                     if info is not None and info.cooldown_mins is not None:
@@ -752,7 +792,7 @@ class App:
             elif sort_by in ("trust_desc", "trust_asc"):
                 snap = self._last_monitor_snap or self.monitor.snapshot(
                     self.pm.list_profiles(),
-                    self.bl.running_profile_names() | self.state.loading,
+                    run_set | self.state.loading,
                 )
 
                 def _trust_key(p: object) -> tuple:
@@ -765,7 +805,7 @@ class App:
             elif sort_by in ("age_desc", "age_asc"):
                 snap = self._last_monitor_snap or self.monitor.snapshot(
                     self.pm.list_profiles(),
-                    self.bl.running_profile_names() | self.state.loading,
+                    run_set | self.state.loading,
                 )
 
                 def _age_key(p: object) -> tuple:
@@ -800,9 +840,12 @@ class App:
         reuse_snapshot: bool = False,
         update_page: bool = True,
         fast_init: bool = False,
+        precomputed_snap: MonitorSnapshot | None = None,
     ) -> None:
         r = self.refs
-        assert r is not None
+        if r is None:
+            self.state.schedule_refresh(full_snapshot=not reuse_snapshot)
+            return
         self._update_stats()
         self._flush_log()
 
@@ -811,7 +854,8 @@ class App:
             self.state.toggle_selection(stale)
 
         running = self.bl.running_profile_names()
-        active_or_loading = running | self.state.loading
+        loading_set = self.state.loading
+        active_or_loading = running | loading_set
         self._staged_launches.intersection_update(active_or_loading)
         for name in active_or_loading - self._staged_launches:
             self._staged_launches.add(name)
@@ -836,7 +880,7 @@ class App:
 
         # A failure mark lasts until the profile runs again or is gone.
         self.state.failed.intersection_update(all_names - running)
-        ready_running = running - self.state.loading
+        ready_running = running - loading_set
         newly_ready = ready_running - set(self._live_since)
         for name in newly_ready:
             self._live_since[name] = time.strftime("%H:%M")
@@ -844,7 +888,9 @@ class App:
             self.monitor.record_started(name, p_live.proxy if p_live else None)
             if hasattr(self.bl, "switch_profile"):
                 cur_tab = self.state.active_browser_tab or name
-                self.bl.switch_profile(cur_tab, single_stage=True)
+                self._enqueue_window_action(
+                    lambda target=cur_tab: self.bl.switch_profile(target, single_stage=True)
+                )
         stopped_scheduled: list[str] = []
         for name in set(self._live_since) - running:
             del self._live_since[name]
@@ -860,22 +906,25 @@ class App:
         self._alerted_token_bursts.intersection_update(running)
 
         everything = self.pm.list_profiles()
-        if reuse_snapshot and self._last_monitor_snap is not None:
+        if precomputed_snap is not None:
+            snap = precomputed_snap
+            self._last_monitor_snap = snap
+        elif reuse_snapshot and self._last_monitor_snap is not None:
             snap = self._last_monitor_snap
         else:
             if fast_init:
                 try:
                     snap = self.monitor.snapshot(
                         everything,
-                        running | self.state.loading,
+                        active_or_loading,
                         fast_init=True,
                     )
                 except TypeError:
-                    snap = self.monitor.snapshot(everything, running | self.state.loading)
+                    snap = self.monitor.snapshot(everything, active_or_loading)
             else:
-                snap = self.monitor.snapshot(everything, running | self.state.loading)
+                snap = self.monitor.snapshot(everything, active_or_loading)
             self._last_monitor_snap = snap
-        ordered_running = self._ordered_running_names()
+        ordered_running = self._ordered_running_names(active_or_loading)
         if ordered_running:
             if self.state.active_browser_tab not in ordered_running:
                 self.state.active_browser_tab = ordered_running[0]
@@ -886,19 +935,31 @@ class App:
         self._running_tabs_slot.visible = False
         self._floating_tab_bar.sync(
             ordered_running,
-            self.state.loading,
+            loading_set,
             self.state.active_browser_tab,
             self.state.single_stage_mode,
             self.state.floating_tab_bar,
         )
 
-        alert_bar = build_monitor_bar(
-            snap,
-            len(everything),
-            on_open_mail_pool=self.h.on_open_mail_pool,
+        lang = current_language()
+        monitor_bar_sig = (
+            lang,
+            tuple(snap.mail_checkpoint_hits),
+            tuple((port, tuple(members)) for port, members in snap.proxy_collisions),
+            tuple(snap.token_bursts),
+            bool(snap.disk_low),
+            round(float(snap.free_gb), 1) if snap.disk_low else None,
         )
-        self._monitor_bar_slot.content = alert_bar
-        self._monitor_bar_slot.visible = alert_bar is not None
+        if monitor_bar_sig != self._monitor_bar_sig:
+            self._monitor_bar_sig = monitor_bar_sig
+            self._monitor_bar_slot._isolated = False
+            alert_bar = build_monitor_bar(
+                snap,
+                len(everything),
+                on_open_mail_pool=self.h.on_open_mail_pool,
+            )
+            self._monitor_bar_slot.content = alert_bar
+            self._monitor_bar_slot.visible = alert_bar is not None
         new_bursts = [
             (pname, cnt)
             for pname, cnt in snap.token_bursts
@@ -919,7 +980,7 @@ class App:
                 count=len(self.pm.list_trashed_profiles()),
             )
 
-        all_profiles, page_profiles, total_pages = self._get_page_profiles()
+        all_profiles, page_profiles, total_pages = self._get_page_profiles(running=running)
         in_archive = self._is_archive_view()
         active_everything = [p for p in everything if not is_archived_profile(p)]
         archived_everything = [p for p in everything if is_archived_profile(p)]
@@ -932,16 +993,27 @@ class App:
                 pg_tally[k] = pg_tally.get(k, 0) + 1
         page_counts = [(pg, pg_tally.get(pg.casefold(), 0)) for pg in custom_pages]
         effective_active_page = "__archived__" if in_archive else self.active_page
-        self._pages_bar_slot.content = build_pages_bar(
+        all_page_idx = getattr(self.pm, "all_page_index", 0)
+        pages_bar_sig = (
+            lang,
             effective_active_page,
             len(active_everything),
-            page_counts,
-            self._on_select_custom_page,
-            self._on_add_custom_page,
-            self._on_edit_custom_page,
-            self._on_reorder_custom_page,
-            all_tab_index=getattr(self.pm, "all_page_index", 0),
+            tuple(page_counts),
+            all_page_idx,
         )
+        if pages_bar_sig != self._pages_bar_sig:
+            self._pages_bar_sig = pages_bar_sig
+            self._pages_bar_slot._isolated = False
+            self._pages_bar_slot.content = build_pages_bar(
+                effective_active_page,
+                len(active_everything),
+                page_counts,
+                self._on_select_custom_page,
+                self._on_add_custom_page,
+                self._on_edit_custom_page,
+                self._on_reorder_custom_page,
+                all_tab_index=all_page_idx,
+            )
 
         tests = self._filter_tests(running)
         sidebar_pool = archived_everything if in_archive else active_everything
@@ -970,44 +1042,68 @@ class App:
             )
             for fid, test in tests.items()
         }
-        self._filter_column.controls = build_filter_buttons(
-            "archived" if in_archive and self.filter == "all" else self.filter,
-            filter_counts,
-            self._on_filter,
-            group_counts=group_counts,
-            status_counts=status_counts,
+        active_filter_id = "archived" if in_archive and self.filter == "all" else self.filter
+        filter_col_sig = (
+            lang,
+            active_filter_id,
+            tuple(sorted(filter_counts.items())),
+            tuple(group_counts.items()),
+            tuple(status_counts.items()),
         )
+        if filter_col_sig != self._filter_col_sig:
+            self._filter_col_sig = filter_col_sig
+            self._filter_column._isolated = False
+            self._filter_column.controls = build_filter_buttons(
+                active_filter_id,
+                filter_counts,
+                self._on_filter,
+                group_counts=group_counts,
+                status_counts=status_counts,
+            )
         names = [p.name for p in page_profiles]
         all_sel = bool(names) and all(self.state.is_selected(n) for n in names)
         any_sel = any(self.state.is_selected(n) for n in names)
-        self._header_slot.content = (
-            build_header_row(
-                all_sel,
-                any_sel,
-                lambda select: self.h.on_select_all_page() if select else self.h.on_deselect_page(),
-                on_open_proxy_pool=self.h.on_open_proxy_pool,
-                on_open_mail_pool=self.h.on_open_mail_pool,
-                cooldown_chip_label=self._cooldown_chip_text(),
-                on_open_cooldown=self.h.on_open_cooldown_settings,
-                on_open_warmup_sites=self.h.on_open_warmup_sites,
-                on_open_trust_monitor=self.h.on_open_trust_monitor,
-                on_open_work_squad=self.h.on_open_work_squad,
-                audit_alert=any(
-                    f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
-                    for f in snap.audit_findings
-                ),
-                mail_alert=bool(snap.mail_checkpoint_hits),
-                sort_by=self.state.sort_by,
-                on_sort_trust=lambda: self._on_sort(
-                    "trust_asc" if self.state.sort_by == "trust_desc" else "trust_desc"
-                ),
-                on_sort_acc_no=lambda: self._on_sort(
-                    "acc_no_desc" if self.state.sort_by == "acc_no_asc" else "acc_no_asc"
-                ),
-            )
-            if page_profiles
-            else None
+        cooldown_chip = self._cooldown_chip_text()
+        audit_alert = any(
+            f.code not in ("burned_proxy", "burned_ip", "burned_subnet", "burned_batch")
+            for f in snap.audit_findings
         )
+        mail_alert = bool(snap.mail_checkpoint_hits)
+        header_row_sig: tuple = (
+            (lang, True, all_sel, any_sel, cooldown_chip, audit_alert, mail_alert, self.state.sort_by)
+            if page_profiles
+            else (lang, False)
+        )
+        if header_row_sig != self._header_row_sig:
+            self._header_row_sig = header_row_sig
+            self._header_slot._isolated = False
+            self._header_slot.content = (
+                build_header_row(
+                    all_sel,
+                    any_sel,
+                    lambda select: self.h.on_select_all_page()
+                    if select
+                    else self.h.on_deselect_page(),
+                    on_open_proxy_pool=self.h.on_open_proxy_pool,
+                    on_open_mail_pool=self.h.on_open_mail_pool,
+                    cooldown_chip_label=cooldown_chip,
+                    on_open_cooldown=self.h.on_open_cooldown_settings,
+                    on_open_warmup_sites=self.h.on_open_warmup_sites,
+                    on_open_trust_monitor=self.h.on_open_trust_monitor,
+                    on_open_work_squad=self.h.on_open_work_squad,
+                    audit_alert=audit_alert,
+                    mail_alert=mail_alert,
+                    sort_by=self.state.sort_by,
+                    on_sort_trust=lambda: self._on_sort(
+                        "trust_asc" if self.state.sort_by == "trust_desc" else "trust_desc"
+                    ),
+                    on_sort_acc_no=lambda: self._on_sort(
+                        "acc_no_desc" if self.state.sort_by == "acc_no_asc" else "acc_no_asc"
+                    ),
+                )
+                if page_profiles
+                else None
+            )
 
         is_custom_sort = self.state.sort_by == "custom"
         if self.state.hovered_profile is not None and all(
@@ -1015,38 +1111,95 @@ class App:
         ):
             self.state.hovered_profile = None
 
-        r.profile_list_area.controls = (
-            [
-                self._build_card_for_profile(p, is_custom_sort=is_custom_sort, snap=snap)
-                for p in page_profiles
-            ]
-            if page_profiles
-            else [self._build_empty_or_no_results()]
-        )
-        rebuild_bulk_bar(
-            r.bulk_bar,
-            self.state,
-            page_profiles,
-            {
-                "launch": self.h.on_bulk_launch,
-                "stop": self.h.on_bulk_stop,
-                "delete": self.h.on_bulk_delete,
-                "select_range": self.h.on_bulk_select_range,
-                "toggle_pin": self.h.on_bulk_toggle_pin,
-                "set_status": self.h.on_bulk_set_status,
-                "set_group": self.h.on_bulk_set_group,
-                "set_color": self.h.on_bulk_set_color,
-                "set_proxy": self.h.on_bulk_set_proxy,
-                "check_proxy": self.h.on_bulk_check_proxy,
-                "export_zip": self.h.on_export_open,
-                "add_to_page": self._on_bulk_add_to_page,
-                "remove_from_page": self._on_bulk_remove_from_page,
-                "select_page": self.h.on_select_all_page,
-                "deselect_page": self.h.on_deselect_page,
-                "clear": self.h.on_clear_selection,
-            },
-            active_page=self.active_page,
-        )
+        selected_set = self.state.selected_names()
+        if page_profiles:
+            today = date.today()
+            new_cache: dict[str, tuple[tuple, ft.Container]] = {}
+            new_controls: list[ft.Control] = []
+            has_avatars = os.path.isdir(AVATARS_DIR)
+            check_disk = not reuse_snapshot
+            for p in page_profiles:
+                minfo = snap.profiles.get(p.name) if snap is not None else None
+                is_run = p.name in running
+                sig = self._card_render_signature(
+                    p,
+                    is_custom_sort=is_custom_sort,
+                    is_loading=p.name in loading_set,
+                    is_running=is_run,
+                    is_selected=p.name in selected_set,
+                    monitor_info=minfo,
+                    lang=lang,
+                    today=today,
+                    avatar_ver=avatar_version(p.name) if has_avatars else 0.0,
+                    check_disk=check_disk,
+                )
+                cached_entry = self._card_cache.get(p.name)
+                if cached_entry is not None and cached_entry[0] == sig:
+                    card = cached_entry[1]
+                else:
+                    if cached_entry is not None:
+                        cached_entry[1]._isolated = False
+                    card = self._build_card_for_profile(
+                        p,
+                        is_custom_sort=is_custom_sort,
+                        snap=snap,
+                        is_running=is_run,
+                    )
+                new_cache[p.name] = (sig, card)
+                new_controls.append(card)
+            # Only retain currently mounted cards so Flet ObjectPatch skips unchanged subtrees safely.
+            self._card_cache = new_cache
+            old_controls = list(r.profile_list_area.controls or [])
+            list_changed = (
+                r.profile_list_area.item_extent != ROW_HEIGHT
+                or len(new_controls) != len(old_controls)
+                or any(a is not b for a, b in zip(new_controls, old_controls, strict=False))
+            )
+            if list_changed:
+                r.profile_list_area._isolated = False
+                r.profile_list_area.item_extent = ROW_HEIGHT
+                r.profile_list_area.controls = new_controls
+        else:
+            self._card_cache.clear()
+            r.profile_list_area._isolated = False
+            r.profile_list_area.item_extent = None
+            r.profile_list_area.controls = [self._build_empty_or_no_results()]
+
+        sel_count = len(selected_set)
+        if sel_count == 0:
+            range_count = 0
+        else:
+            sel_indices = [i for i, p in enumerate(page_profiles) if p.name in selected_set]
+            range_span = (sel_indices[-1] - sel_indices[0] + 1) if len(sel_indices) >= 2 else 0
+            range_count = range_span if range_span > len(sel_indices) else 0
+        bulk_bar_sig = (lang, self.active_page, sel_count, range_count)
+        if bulk_bar_sig != self._bulk_bar_sig:
+            self._bulk_bar_sig = bulk_bar_sig
+            r.bulk_bar._isolated = False
+            rebuild_bulk_bar(
+                r.bulk_bar,
+                self.state,
+                page_profiles,
+                {
+                    "launch": self.h.on_bulk_launch,
+                    "stop": self.h.on_bulk_stop,
+                    "delete": self.h.on_bulk_delete,
+                    "select_range": self.h.on_bulk_select_range,
+                    "toggle_pin": self.h.on_bulk_toggle_pin,
+                    "set_status": self.h.on_bulk_set_status,
+                    "set_group": self.h.on_bulk_set_group,
+                    "set_color": self.h.on_bulk_set_color,
+                    "set_proxy": self.h.on_bulk_set_proxy,
+                    "check_proxy": self.h.on_bulk_check_proxy,
+                    "export_zip": self.h.on_export_open,
+                    "add_to_page": self._on_bulk_add_to_page,
+                    "remove_from_page": self._on_bulk_remove_from_page,
+                    "select_page": self.h.on_select_all_page,
+                    "deselect_page": self.h.on_deselect_page,
+                    "clear": self.h.on_clear_selection,
+                },
+                active_page=self.active_page,
+            )
         self._set_subtitle(r.content_subtitle)
         r.page_label.value = get_string(
             "page_of",
@@ -1057,6 +1210,149 @@ class App:
         r.next_btn.disabled = self.state.current_page >= total_pages
         if update_page:
             self._safe_update()
+            self._seal_mounted_subtrees()
+
+    def _seal_mounted_subtrees(self) -> None:
+        """Mark mounted subtrees isolated so Flet ObjectPatch skips unchanged internals."""
+        if not self.page:
+            return
+        try:
+            idx = self.page.session.index
+        except Exception:
+            return
+        for _, card in self._card_cache.values():
+            if getattr(card, "_i", None) in idx:
+                card._isolated = True
+        r = self.refs
+        for slot in (
+            self._filter_column,
+            self._header_slot,
+            self._pages_bar_slot,
+            self._monitor_bar_slot,
+            r.bulk_bar if r is not None else None,
+            r.profile_list_area if r is not None else None,
+        ):
+            if slot is not None and getattr(slot, "_i", None) in idx:
+                slot._isolated = True
+
+    @staticmethod
+    def _monitor_info_sig(info: ProfileMonitorInfo | None, today: date) -> tuple | None:
+        if info is None:
+            return None
+        return (
+            info.port,
+            info.shared_count,
+            info.shared_port_count,
+            info.last_closed,
+            today if info.last_closed is not None else None,
+            info.cooldown_mins,
+            info.running_mins,
+            info.today_minutes,
+            info.busy_by,
+            info.port_cooldown_by,
+            info.has_thread_url,
+            info.tab_count,
+            info.hatch_gw,
+            info.hatch_sess,
+            info.sess_exp,
+            info.sess_exp_days,
+            info.burst_10m,
+            info.last_used_port,
+            info.proxy_port_changed,
+            info.last_exit_ip,
+            info.last_exit_country,
+            info.last_exit_ts,
+            info.last_exit_isp,
+            info.last_exit_ip_type,
+            info.prev_exit_ip,
+            info.prev_exit_country,
+            info.ip_country_changed,
+            info.ip_fraud_score,
+            info.ip_scamalytics,
+            info.ip_proxycheck_risk,
+            info.ip_proxy_flag,
+            info.ip_asn,
+            info.has_grecaptcha,
+            info.has_meta,
+            info.has_microsoft,
+            info.has_cache2,
+            info.hatch_vml,
+            info.has_ps_l,
+            info.has_meta_checkpoint,
+            info.datr_age_days,
+            info.cookie_count,
+            info.age_days,
+            info.session_count,
+            info.active_days,
+            info.total_minutes,
+            info.is_banned,
+            info.trust_score,
+            info.trust_tier,
+            tuple(info.audit_codes or ()),
+            info.cluster,
+            info.cluster_collision_label,
+            info.cluster_busy_by,
+            info.can_open_parallel,
+            info.has_muse_auth,
+            info.has_proxy,
+            info.has_geo_pin,
+            info.has_recovery_key,
+            info.has_recovery_armor,
+            info.has_accountscenter,
+        )
+
+    def _card_render_signature(
+        self,
+        p: Profile,
+        *,
+        is_custom_sort: bool,
+        is_loading: bool,
+        is_running: bool,
+        is_selected: bool,
+        monitor_info: ProfileMonitorInfo | None,
+        lang: str,
+        today: date,
+        avatar_ver: float = 0.0,
+        check_disk: bool = True,
+    ) -> tuple:
+        return (
+            lang,
+            p.name,
+            p.proxy,
+            p.os_type,
+            p.timezone,
+            p.locale,
+            getattr(p, "engine", "camoufox"),
+            p.color,
+            p.group,
+            p.notes,
+            tuple(p.pages),
+            p.status,
+            resolve_status_display(p.status, get_string),
+            bool(getattr(p, "pinned", False)),
+            p.created_at,
+            p.banned_at,
+            p.email,
+            p.password,
+            p.two_fa,
+            p.recovery_email,
+            p.mail_token,
+            getattr(p, "acc_no", None),
+            is_loading,
+            is_running,
+            is_selected,
+            self._device_label(p.name, check_disk=check_disk),
+            self._live_since.get(p.name, ""),
+            p.name in self.state.failed,
+            is_custom_sort,
+            self.state.editing_acc_no == p.name,
+            self.state.editing_note == p.name,
+            self.state.editing_email == p.name,
+            self.state.editing_proxy == p.name,
+            self.state.proxy_status.get(p.name),
+            avatar_ver,
+            self._monitor_info_sig(monitor_info, today),
+        )
 
     def _build_card_for_profile(
         self,
@@ -1064,11 +1360,13 @@ class App:
         *,
         is_custom_sort: bool,
         snap: MonitorSnapshot | None,
+        is_running: bool | None = None,
     ) -> ft.Container:
+        run_flag = self.bl.is_running(p.name) if is_running is None else is_running
         return build_profile_card(
             p,
             self.state.is_loading(p.name),
-            self.bl.is_running(p.name),
+            run_flag,
             self.h.on_launch,
             self.h.on_edit,
             self.h.on_delete,
@@ -1082,8 +1380,8 @@ class App:
             editing_acc_no=self.state.editing_acc_no == p.name,
             on_start_edit_acc_no=self.h.on_start_edit_acc_no,
             on_save_acc_no=self.h.on_save_acc_no,
-            row_hovered=self.state.hovered_profile == p.name,
-            on_row_hover=self._on_row_hover,
+            row_hovered=False,
+            on_row_hover=None,
             editing_note=self.state.editing_note == p.name,
             on_start_edit_note=self.h.on_start_edit_note,
             on_save_note=self.h.on_save_note,
@@ -1146,7 +1444,7 @@ class App:
         except Exception as e:
             logger.debug("Row hover update skipped: %s", e)
 
-    def _device_label(self, name: str) -> str:
+    def _device_label(self, name: str, *, check_disk: bool = True) -> str:
         cached = self.monitor._disk_cache.get(name) if hasattr(self, "monitor") else None
         if cached is not None:
             if cached.get("_fp_mtime", 0.0) > 0:
@@ -1157,13 +1455,28 @@ class App:
                 prof = self.pm.profiles.get(name) if hasattr(self, "pm") else None
                 if prof is not None and getattr(prof, "engine", "camoufox") != "chrome":
                     return ""
+        prof = self.pm.profiles.get(name) if hasattr(self, "pm") else None
+        engine = getattr(prof, "engine", "camoufox") if prof is not None else "camoufox"
+        mem = self._device_label_cache.get(name)
+        if not check_disk and mem is not None and mem[0] == engine:
+            return mem[2]
+        fp_path = os.path.join(DATA_DIR, name, "fingerprint.json")
+        try:
+            fp_mtime = os.path.getmtime(fp_path)
+        except OSError:
+            fp_mtime = 0.0
+        if mem is not None and mem[0] == engine and mem[1] == fp_mtime:
+            return mem[2]
         from ..services.browser import fingerprint
 
         info = fingerprint.summary(os.path.join(DATA_DIR, name))
         if not info:
+            self._device_label_cache[name] = (engine, fp_mtime, "")
             return ""
         cpu = f"{info['hardware_concurrency']} CPU"
-        return f"{info['screen']} · {cpu}" if info.get("screen") else cpu
+        label = f"{info['screen']} · {cpu}" if info.get("screen") else cpu
+        self._device_label_cache[name] = (engine, fp_mtime, label)
+        return label
 
     def _build_empty_or_no_results(self) -> ft.Control:
         if self.pm.profiles:
@@ -1342,11 +1655,31 @@ class App:
                     and self.state.editing_email is None
                     and self.state.editing_proxy is None
                 )
-                if changed or self.state.consume_refresh() or minute_elapsed:
+                wants_refresh = self.state.consume_refresh()
+                wants_full_snap = self.state.consume_full_snapshot()
+                if changed or wants_refresh or minute_elapsed:
                     if minute_elapsed:
                         self._maybe_start_daily_mail_scan()
                     last_minute_tick = now_mono
-                    self._refresh_profiles()
+                    need_snap = (
+                        changed
+                        or minute_elapsed
+                        or wants_full_snap
+                        or self._last_monitor_snap is None
+                    )
+                    if need_snap:
+                        everything = self.pm.list_profiles()
+                        active_names = running_now | set(self.state.loading)
+                        snap = await asyncio.to_thread(
+                            self.monitor.snapshot,
+                            everything,
+                            active_names,
+                        )
+                        if not self.page:
+                            break
+                        self._refresh_profiles(precomputed_snap=snap)
+                    else:
+                        self._refresh_profiles(reuse_snapshot=True)
                 elif self.state._pending_log_flush:
                     self._flush_log()
                     self._safe_update()

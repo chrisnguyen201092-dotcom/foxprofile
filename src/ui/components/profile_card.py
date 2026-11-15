@@ -401,6 +401,8 @@ def _build_acc_no_ghost(
     on_start_edit_acc_no: Callable[[str], None],
     *,
     visible: bool = False,
+    resting_opacity: float = 0.30,
+    animate_opacity: int | None = None,
 ) -> ft.Container:
     ghost_txt = ft.Text(
         "+#",
@@ -416,8 +418,8 @@ def _build_acc_no_ghost(
         content=ghost_txt,
     )
     return ft.Container(
-        opacity=1.0 if visible else 0.0,
-        animate_opacity=120,
+        opacity=1.0 if visible else resting_opacity,
+        animate_opacity=animate_opacity,
         content=ft.GestureDetector(
             content=ghost_box,
             mouse_cursor=ft.MouseCursor.CLICK,
@@ -641,6 +643,8 @@ def build_profile_card(
             profile,
             on_start_edit_acc_no,
             visible=row_hovered,
+            resting_opacity=0.0 if on_row_hover is not None else 0.30,
+            animate_opacity=120 if on_row_hover is not None else None,
         )
         top_line_controls.append(add_acc_ghost_wrap)
     top_line: ft.Control = (

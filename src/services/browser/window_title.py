@@ -11,14 +11,69 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import queue
 import sys
 import threading
 import time
+from collections.abc import Callable
+
+_WINDOW_ACTION_LOCK = threading.Lock()
+_WINDOW_ACTION_QUEUE: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
+_WINDOW_ACTION_WORKER_STARTED = False
 
 
-def _child_pids_win32(root_pid: int) -> set[int]:
-    if sys.platform != "win32" or root_pid <= 0:
-        return set()
+def enqueue_window_action(fn: Callable[[], None]) -> None:
+    """Serialize Win32 focus/restore calls on a dedicated daemon thread."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        fn()
+        return
+    global _WINDOW_ACTION_WORKER_STARTED
+    with _WINDOW_ACTION_LOCK:
+        if not _WINDOW_ACTION_WORKER_STARTED:
+            _WINDOW_ACTION_WORKER_STARTED = True
+
+            def _worker() -> None:
+                while True:
+                    task = _WINDOW_ACTION_QUEUE.get()
+                    with contextlib.suppress(Exception):
+                        task()
+
+            threading.Thread(
+                target=_worker,
+                name="fox-window-action",
+                daemon=True,
+            ).start()
+    _WINDOW_ACTION_QUEUE.put(fn)
+
+
+def _safe_get_window_title_win32(user32: object, hwnd: int) -> str:
+    """Read a top-level HWND caption without blocking on hung threads."""
+    import ctypes
+
+    with contextlib.suppress(Exception):
+        internal_fn = getattr(user32, "InternalGetWindowText", None)
+        if callable(internal_fn):
+            buf = ctypes.create_unicode_buffer(512)
+            n = int(internal_fn(hwnd, buf, 512) or 0)
+            if n > 0 and buf.value:
+                return str(buf.value)
+    with contextlib.suppress(Exception):
+        is_hung = getattr(user32, "IsHungAppWindow", None)
+        if callable(is_hung) and bool(is_hung(hwnd)):
+            return ""
+    length = int(user32.GetWindowTextLengthW(hwnd) or 0)  # type: ignore[attr-defined]
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)  # type: ignore[attr-defined]
+    return str(buf.value or "")
+
+
+def _multi_child_pids_win32(root_pids: list[int]) -> dict[int, set[int]]:
+    """Return descendant PID sets for each valid root PID using a single process snapshot."""
+    clean_roots = [int(p) for p in dict.fromkeys(root_pids) if p and int(p) > 0]
+    if sys.platform != "win32" or not clean_roots:
+        return {}
     try:
         import ctypes
         from ctypes import wintypes
@@ -83,7 +138,7 @@ def _child_pids_win32(root_pid: int) -> set[int]:
         snap = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
         invalid_handle = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
         if not snap or int(snap) == invalid_handle:
-            return set()
+            return {}
         parent_map: dict[int, list[int]] = {}
         try:
             entry = PROCESSENTRY32()
@@ -98,43 +153,63 @@ def _child_pids_win32(root_pid: int) -> set[int]:
             kernel32.CloseHandle(snap)
 
         self_pid = os.getpid()
-        ctime_cache: dict[int, int] = {root_pid: _proc_ctime(root_pid)}
-        descendants: set[int] = {root_pid}
-        queue = [root_pid]
-        while queue:
-            cur = queue.pop()
-            t_cur = ctime_cache.get(cur, 0)
-            for child in parent_map.get(cur, []):
-                if child in descendants:
-                    continue
-                if root_pid != self_pid and child == self_pid:
-                    continue
-                t_child = ctime_cache.get(child)
-                if t_child is None:
-                    t_child = _proc_ctime(child)
-                    ctime_cache[child] = t_child
-                # Guard against Windows PID reuse: a real child cannot be older than its parent
-                if t_cur > 0 and t_child > 0 and t_child < t_cur:
-                    continue
-                descendants.add(child)
-                queue.append(child)
-        return descendants
+        ctime_cache: dict[int, int] = {}
+        result: dict[int, set[int]] = {}
+        for root_pid in clean_roots:
+            if root_pid not in ctime_cache:
+                ctime_cache[root_pid] = _proc_ctime(root_pid)
+            descendants: set[int] = {root_pid}
+            bfs_queue = [root_pid]
+            while bfs_queue:
+                cur = bfs_queue.pop()
+                t_cur = ctime_cache.get(cur, 0)
+                for child in parent_map.get(cur, []):
+                    if child in descendants:
+                        continue
+                    if root_pid != self_pid and child == self_pid:
+                        continue
+                    t_child = ctime_cache.get(child)
+                    if t_child is None:
+                        t_child = _proc_ctime(child)
+                        ctime_cache[child] = t_child
+                    # Guard against Windows PID reuse: a real child cannot be older than its parent
+                    if t_cur > 0 and t_child > 0 and t_child < t_cur:
+                        continue
+                    descendants.add(child)
+                    bfs_queue.append(child)
+            result[root_pid] = descendants
+        return result
     except Exception:
+        return {}
+
+
+def _child_pids_win32(root_pid: int) -> set[int]:
+    if root_pid <= 0:
         return set()
+    return _multi_child_pids_win32([root_pid]).get(int(root_pid), set())
 
 
-def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) -> list[int]:
-    """Return visible top-level HWNDs belonging to `profile_name`, main window first."""
-    if sys.platform != "win32":
-        return []
+def _find_all_profile_hwnds_win32(
+    profile_pids: list[tuple[str, int | None]],
+) -> dict[str, list[int]]:
+    """Return visible top-level HWNDs keyed by profile name in one EnumWindows pass."""
+    result: dict[str, list[int]] = {pname: [] for pname, _ in profile_pids}
+    if sys.platform != "win32" or not profile_pids:
+        return result
     try:
         import ctypes
         from ctypes import wintypes
 
-        pids = _child_pids_win32(root_pid) if root_pid else set()
-        prefix = f"[{profile_name}] "
         user32 = ctypes.windll.user32
-        candidates: list[tuple[int, int, int]] = []
+        prefix_entries: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
+        for pname, _pid in profile_pids:
+            if pname not in seen_names:
+                seen_names.add(pname)
+                prefix_entries.append((pname, f"[{pname}] "))
+        candidates: dict[str, list[tuple[int, int, int]]] = {pname: [] for pname, _ in prefix_entries}
+        has_any_root_pid = any(pid for _, pid in profile_pids)
+        fallback_hwnds: list[int] = []
 
         class RECT(ctypes.Structure):
             _fields_ = [
@@ -143,6 +218,17 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
                 ("right", wintypes.LONG),
                 ("bottom", wintypes.LONG),
             ]
+
+        def _measure_hwnd(hwnd: int) -> tuple[bool, int] | None:
+            is_iconic = bool(user32.IsIconic(hwnd))
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if not is_iconic and (w < 200 or h < 150):
+                return None
+            area = 1_000_000 if is_iconic else (w * h)
+            return is_iconic, area
 
         enum_windows_proc = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
@@ -153,38 +239,53 @@ def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) ->
         def _callback(hwnd: int, _lparam: int) -> bool:
             if not user32.IsWindowVisible(hwnd):
                 return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length <= 0:
+            title = _safe_get_window_title_win32(user32, hwnd)
+            if not title:
                 return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            title = buf.value or ""
-            is_prefix_match = title.startswith(prefix)
-            is_pid_match = False
-            if not is_prefix_match and pids:
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                is_pid_match = bool(pid.value in pids and title)
-            if not (is_prefix_match or is_pid_match):
-                return True
-
-            is_iconic = bool(user32.IsIconic(hwnd))
-            rect = RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            w = int(rect.right - rect.left)
-            h = int(rect.bottom - rect.top)
-            if not is_iconic and (w < 200 or h < 150):
-                return True
-            area = 1_000_000 if is_iconic else (w * h)
-            priority = 2 if is_prefix_match else 1
-            candidates.append((priority, area, int(hwnd)))
+            for pname, prefix in prefix_entries:
+                if title.startswith(prefix):
+                    measured = _measure_hwnd(hwnd)
+                    if measured is not None:
+                        _, area = measured
+                        candidates[pname].append((2, area, int(hwnd)))
+                    return True
+            if has_any_root_pid:
+                fallback_hwnds.append(int(hwnd))
             return True
 
         user32.EnumWindows(enum_windows_proc(_callback), 0)
-        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [hwnd for _, _, hwnd in candidates]
+
+        missing = [
+            (pname, int(pid))
+            for pname, pid in profile_pids
+            if pid and int(pid) > 0 and not candidates.get(pname)
+        ]
+        if missing and fallback_hwnds:
+            pid_trees = _multi_child_pids_win32([pid for _, pid in missing])
+            for hwnd in fallback_hwnds:
+                pid_val = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_val))
+                win_pid = int(pid_val.value)
+                if not win_pid:
+                    continue
+                for pname, root_pid in missing:
+                    if win_pid in pid_trees.get(root_pid, ()):
+                        measured = _measure_hwnd(hwnd)
+                        if measured is not None:
+                            _, area = measured
+                            candidates[pname].append((1, area, hwnd))
+
+        for pname, items in candidates.items():
+            items.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            result[pname] = [hwnd for _, _, hwnd in items]
+        return result
     except Exception:
-        return []
+        return result
+
+
+def _find_profile_hwnds_win32(profile_name: str, root_pid: int | None = None) -> list[int]:
+    """Return visible top-level HWNDs belonging to `profile_name`, main window first."""
+    return _find_all_profile_hwnds_win32([(profile_name, root_pid)]).get(profile_name, [])
 
 
 _locked_hwnd_sizes: dict[int, tuple[int, int]] = {}
@@ -560,7 +661,8 @@ def switch_browser_window(
     if not single_stage:
         return focus_browser_window(target_name, target_pid)
 
-    target_hwnds = _find_profile_hwnds_win32(target_name, target_pid)
+    hwnd_map = _find_all_profile_hwnds_win32(profile_pids)
+    target_hwnds = hwnd_map.get(target_name, [])
     if not target_hwnds:
         return False
     try:
@@ -582,10 +684,10 @@ def switch_browser_window(
 
         target_set = set(target_hwnds)
         # 1. Save position & minimize all other running profile browser windows FIRST
-        for pname, pid in profile_pids:
+        for pname, _pid in profile_pids:
             if pname == target_name:
                 continue
-            for other_hwnd in _find_profile_hwnds_win32(pname, pid):
+            for other_hwnd in hwnd_map.get(pname, []):
                 _lock_window_size_win32(other_hwnd)
                 if other_hwnd not in target_set and not user32.IsIconic(wintypes.HWND(other_hwnd)):
                     other_rect = RECT()
@@ -599,7 +701,7 @@ def switch_browser_window(
                             int(other_rect.top),
                         )
                     user32.ShowWindowAsync(wintypes.HWND(other_hwnd), sw_showminnoactive)
-                    user32.ShowWindow(wintypes.HWND(other_hwnd), sw_forceminimize)
+                    user32.ShowWindowAsync(wintypes.HWND(other_hwnd), sw_forceminimize)
 
         # 2. Restore target window to its exact previous position (with SWP_NOSIZE) and focus it
         for hwnd in reversed(target_hwnds):
@@ -624,7 +726,7 @@ def focus_foxprofile_window(
     """Bring the main FoxProfile desktop window to the foreground using SWP_NOSIZE.
 
     When `toggle=True`, minimizes (hides) the FoxProfile window if it is already
-    visible and in front of running browser windows.
+    visible and currently the foreground window.
     """
     if sys.platform != "win32":
         return False
@@ -633,24 +735,11 @@ def focus_foxprofile_window(
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
-        gwl_exstyle = -20
-        ws_ex_topmost = 0x00000008
-        ws_ex_toolwindow = 0x00000080
         sw_showminnoactive = 7
         sw_forceminimize = 11
-        get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
 
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ("left", wintypes.LONG),
-                ("top", wintypes.LONG),
-                ("right", wintypes.LONG),
-                ("bottom", wintypes.LONG),
-            ]
-
-        pids = _child_pids_win32(os.getpid())
+        pids: set[int] | None = None
         matches: list[int] = []
-        covered_by_other = False
 
         enum_windows_proc = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
@@ -659,32 +748,22 @@ def focus_foxprofile_window(
         )
 
         def _callback(hwnd: int, _lparam: int) -> bool:
-            nonlocal covered_by_other
+            nonlocal pids
             if not user32.IsWindowVisible(hwnd):
                 return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length <= 0:
+            title = _safe_get_window_title_win32(user32, hwnd).strip()
+            if not title or title.startswith("["):
                 return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            title = (buf.value or "").strip()
-            if not title:
+            if title == window_title:
+                matches.append(int(hwnd))
                 return True
-            if not title.startswith("["):
+            if window_title.lower() in title.lower():
+                if pids is None:
+                    pids = _child_pids_win32(os.getpid())
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if title == window_title or (
-                    pid.value in pids and window_title.lower() in title.lower()
-                ):
+                if pid.value in pids:
                     matches.append(int(hwnd))
-                    return True
-            if not matches and not user32.IsIconic(hwnd):
-                exstyle = int(get_long(wintypes.HWND(hwnd), gwl_exstyle))
-                if not (exstyle & (ws_ex_topmost | ws_ex_toolwindow)):
-                    rect = RECT()
-                    user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect))
-                    if (rect.right - rect.left) >= 300 and (rect.bottom - rect.top) >= 200:
-                        covered_by_other = True
             return True
 
         user32.EnumWindows(enum_windows_proc(_callback), 0)
@@ -692,10 +771,11 @@ def focus_foxprofile_window(
             return False
 
         is_minimized = any(bool(user32.IsIconic(wintypes.HWND(h))) for h in matches)
-        if toggle and not is_minimized and not covered_by_other:
+        fg_hwnd = int(user32.GetForegroundWindow() or 0)
+        if toggle and not is_minimized and fg_hwnd in matches:
             for hwnd in matches:
                 user32.ShowWindowAsync(wintypes.HWND(hwnd), sw_showminnoactive)
-                user32.ShowWindow(wintypes.HWND(hwnd), sw_forceminimize)
+                user32.ShowWindowAsync(wintypes.HWND(hwnd), sw_forceminimize)
             return True
 
         for hwnd in reversed(matches):
@@ -736,10 +816,11 @@ def arrange_browser_windows(profile_pids: list[tuple[str, int | None]]) -> int:
         work_w = max(800, int(work.right - work.left))
         work_h = max(600, int(work.bottom - work.top))
 
+        hwnd_map = _find_all_profile_hwnds_win32(profile_pids)
         targets: list[int] = []
         seen_hwnds: set[int] = set()
-        for pname, pid in profile_pids:
-            for hwnd in _find_profile_hwnds_win32(pname, pid):
+        for pname, _pid in profile_pids:
+            for hwnd in hwnd_map.get(pname, []):
                 if hwnd not in seen_hwnds:
                     seen_hwnds.add(hwnd)
                     targets.append(hwnd)
@@ -811,12 +892,7 @@ def _prefix_child_windows_win32(root_pid: int, prefix: str) -> None:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if pid.value not in pids:
                 return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length <= 0:
-                return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            title = buf.value
+            title = _safe_get_window_title_win32(user32, hwnd)
             if title and not title.startswith(prefix):
                 user32.SetWindowTextW(hwnd, f"{prefix}{title}")
             _lock_window_size_win32(int(hwnd))
@@ -848,9 +924,12 @@ def guard_profile_windows_loop(
     if sys.platform != "win32" or "PYTEST_CURRENT_TEST" in os.environ:
         return
     prefix = f"[{profile_name}] "
+    ticks = 0
     while not stop_event.is_set():
         _prefix_child_windows_win32(root_pid, prefix)
-        if stop_event.wait(0.25):
+        ticks += 1
+        delay = 0.35 if ticks <= 3 else 1.0
+        if stop_event.wait(delay):
             break
 
 

@@ -637,7 +637,7 @@ def test_flet_session_frozen_reconciliation_hover_and_edit_acc_no(isolated_pm, t
         for node in _walk_controls(cards[0].content.controls[1]):
             if (
                 isinstance(node, ft.Container)
-                and node.animate_opacity == 120
+                and isinstance(node.content, ft.GestureDetector)
                 and any(isinstance(x, ft.Text) and x.value == "+#" for x in _walk_controls(node))
             ):
                 return node.opacity
@@ -672,7 +672,12 @@ def test_flet_session_frozen_reconciliation_hover_and_edit_acc_no(isolated_pm, t
         app = App(container=c)
         try:
             app._main(sess.page)
-            # Second refresh matches real startup / monitor reconcile that marks keyed rows _frozen=True
+            initial_cards = {
+                getattr(ctrl, "key", None): ctrl
+                for ctrl in app.refs.profile_list_area.controls
+                if getattr(ctrl, "key", None) in {"Kayla", "Monica", "Sienna"}
+            }
+            # Subsequent unchanged refresh reuses exact mounted row instances instead of rebuilding
             app._refresh_profiles(reuse_snapshot=True)
 
             row_cards = [
@@ -681,34 +686,16 @@ def test_flet_session_frozen_reconciliation_hover_and_edit_acc_no(isolated_pm, t
                 if getattr(ctrl, "key", None) in {"Kayla", "Monica", "Sienna"}
             ]
             assert len(row_cards) == 3
-            assert all(hasattr(card, "_frozen") for card in row_cards)
-            assert _ghost_opacity_for(app, "Monica") == 0.0
-            assert _ghost_opacity_for(app, "Sienna") == 0.0
+            assert all(ctrl is initial_cards[ctrl.key] for ctrl in row_cards)
+            assert all(getattr(card, "on_hover", None) is None for card in row_cards)
+            assert _ghost_opacity_for(app, "Monica") == 0.30
+            assert _ghost_opacity_for(app, "Sienna") == 0.30
 
-            # Hover every indexed control that defines on_hover without raising Frozen controls error
+            # Live App rows keep hover disabled so moving across rows cannot rebuild widgets mid-click
             hover_targets = [
                 ctrl for ctrl in list(sess.index.values()) if getattr(ctrl, "on_hover", None) is not None
             ]
-            assert {getattr(ctrl, "key", None) for ctrl in hover_targets} == {"Monica", "Sienna"}
-
-            monica_card = next(ctrl for ctrl in hover_targets if getattr(ctrl, "key", None) == "Monica")
-            sienna_card = next(ctrl for ctrl in hover_targets if getattr(ctrl, "key", None) == "Sienna")
-
-            await sess.dispatch_event(monica_card._i, "hover", True)
-            assert app.state.hovered_profile == "Monica"
-            assert _ghost_opacity_for(app, "Monica") == 1.0
-            assert _ghost_opacity_for(app, "Sienna") == 0.0
-
-            # Moving directly from Monica -> Sienna turns Monica off and reveals only Sienna
-            await sess.dispatch_event(sienna_card._i, "hover", True)
-            assert app.state.hovered_profile == "Sienna"
-            assert _ghost_opacity_for(app, "Monica") == 0.0
-            assert _ghost_opacity_for(app, "Sienna") == 1.0
-
-            await sess.dispatch_event(sienna_card._i, "hover", False)
-            assert app.state.hovered_profile is None
-            assert _ghost_opacity_for(app, "Monica") == 0.0
-            assert _ghost_opacity_for(app, "Sienna") == 0.0
+            assert hover_targets == []
 
             # Double-tap Monica's '+#' ghost, survive a frozen refresh while editing, submit '#15'
             monica_row = next(

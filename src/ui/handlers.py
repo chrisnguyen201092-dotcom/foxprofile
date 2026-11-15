@@ -1,12 +1,14 @@
 """Event handlers extracted from App for Single Responsibility compliance."""
 
 import asyncio
+import threading
 from collections.abc import Callable
 
 import flet as ft
 
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
+from ..services.browser.window_title import enqueue_window_action
 from ..services.monitor import MonitorService, extract_proxy_endpoint
 from ..services.proxy.geo_check import (
     derive_ip_metadata,
@@ -92,9 +94,22 @@ class AppHandlers:
         self._get_page_profiles = get_page_profiles
         self._monitor = monitor
 
+    def _fast_refresh(self) -> None:
+        """Refresh UI immediately while reusing the cached monitor snapshot."""
+        if threading.current_thread() is not threading.main_thread():
+            self._state.schedule_refresh(full_snapshot=False)
+            return
+        try:
+            self._refresh(reuse_snapshot=True)  # type: ignore[call-arg]
+        except TypeError:
+            self._refresh()
+
     def on_launch(self, name: str) -> None:
+        if self._state.is_loading(name):
+            return
         if self._bl.is_running(name):
             launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+            self._fast_refresh()
             return
         profile = self._pm.profiles.get(name)
         if not profile:
@@ -110,13 +125,23 @@ class AppHandlers:
             if warnings:
 
                 def _force() -> None:
+                    if self._state.is_loading(name):
+                        return
                     if self._monitor is not None:
                         self._monitor.acknowledge_proxy_change(name, profile.proxy)
+                    self._state.set_loading(name, True)
+                    self._fast_refresh()
                     launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+                    if not self._state.is_loading(name):
+                        self._fast_refresh()
 
                 open_prelaunch_guard_dialog(page, name, warnings, _force)
                 return
+        self._state.set_loading(name, True)
+        self._fast_refresh()
         launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+        if not self._state.is_loading(name):
+            self._fast_refresh()
 
     def on_open_cooldown_settings(self) -> None:
         page = self._get_page()
@@ -133,11 +158,13 @@ class AppHandlers:
 
     def on_focus_window(self, name: str) -> None:
         self._state.active_browser_tab = name
+        self._fast_refresh()
         if hasattr(self._bl, "switch_profile"):
-            self._bl.switch_profile(name, single_stage=True)
+            enqueue_window_action(
+                lambda target=name: self._bl.switch_profile(target, single_stage=True)
+            )
         elif hasattr(self._bl, "focus_profile"):
-            self._bl.focus_profile(name)
-        self._state.schedule_refresh()
+            enqueue_window_action(lambda target=name: self._bl.focus_profile(target))
 
     def on_arrange_windows(self) -> None:
         if hasattr(self._bl, "arrange_windows"):
@@ -636,7 +663,7 @@ class AppHandlers:
         self._state.editing_proxy = None
         self._state.editing_email = None
         self._state.editing_note = name
-        self._refresh()
+        self._fast_refresh()
 
     def on_save_note(self, name: str, raw_note: str) -> None:
         if self._state.editing_note != name:
@@ -644,11 +671,11 @@ class AppHandlers:
         self._state.editing_note = None
         p = self._pm.profiles.get(name)
         if p is None:
-            self._refresh()
+            self._fast_refresh()
             return
         clean = raw_note.strip()
         if clean and not validate_notes(clean)[0]:
-            self._refresh()
+            self._fast_refresh()
             return
         if (clean or None) != p.notes:
             self._pm.update_profile(
@@ -664,7 +691,7 @@ class AppHandlers:
                 p.pages,
             )
             self._log(get_string("quick_saved_notes", name=name))
-        self._refresh()
+        self._fast_refresh()
 
     def on_start_edit_email(self, name: str) -> None:
         self._state.hovered_profile = None
@@ -672,7 +699,7 @@ class AppHandlers:
         self._state.editing_proxy = None
         self._state.editing_note = None
         self._state.editing_email = name
-        self._refresh()
+        self._fast_refresh()
 
     def on_save_email(self, name: str, raw_email: str) -> None:
         if self._state.editing_email != name:
@@ -680,7 +707,7 @@ class AppHandlers:
         self._state.editing_email = None
         p = self._pm.profiles.get(name)
         if p is None:
-            self._refresh()
+            self._fast_refresh()
             return
         clean = raw_email.strip()
         if "|" in clean or "\t" in clean:
@@ -700,10 +727,10 @@ class AppHandlers:
                     mail_token=tok or getattr(p, "mail_token", None),
                 )
                 self._log(get_string("mail_saved_log", name=name))
-                self._refresh()
+                self._fast_refresh()
                 return
         if clean and not validate_email(clean)[0]:
-            self._refresh()
+            self._fast_refresh()
             return
         if (clean or None) != getattr(p, "email", None):
             if hasattr(self._pm, "update_profile_email"):
@@ -711,7 +738,7 @@ class AppHandlers:
             else:
                 p.email = clean or None
             self._log(get_string("quick_saved_email", name=name))
-        self._refresh()
+        self._fast_refresh()
 
     def on_copy_email(self, name: str) -> None:
         p = self._pm.profiles.get(name)
@@ -849,7 +876,7 @@ class AppHandlers:
         self._state.editing_email = None
         self._state.editing_proxy = None
         self._state.editing_acc_no = name
-        self._refresh()
+        self._fast_refresh()
 
     def on_save_acc_no(self, name: str, raw_acc_no: str) -> None:
         if self._state.editing_acc_no != name:
@@ -857,13 +884,13 @@ class AppHandlers:
         self._state.editing_acc_no = None
         p = self._pm.profiles.get(name)
         if p is None:
-            self._refresh()
+            self._fast_refresh()
             return
         raw = (raw_acc_no or "").strip()
         ok, err = validate_acc_no(raw)
         if not ok:
             self._log(f"[{name}] {err}")
-            self._refresh()
+            self._fast_refresh()
             return
         clean = normalize_acc_no(raw)
         if clean != getattr(p, "acc_no", None):
@@ -875,7 +902,7 @@ class AppHandlers:
                 self._log(get_string("quick_saved_acc_no", name=name, acc_no=clean))
             else:
                 self._log(get_string("quick_cleared_acc_no", name=name))
-        self._refresh()
+        self._fast_refresh()
 
     def on_start_edit_proxy(self, name: str) -> None:
         self._state.hovered_profile = None
@@ -883,7 +910,7 @@ class AppHandlers:
         self._state.editing_note = None
         self._state.editing_email = None
         self._state.editing_proxy = name
-        self._refresh()
+        self._fast_refresh()
 
     def on_save_proxy(self, name: str, raw_proxy: str) -> None:
         if self._state.editing_proxy != name:
@@ -1040,29 +1067,29 @@ class AppHandlers:
             self._state.select_range(visible_names, name)
         else:
             self._state.toggle_selection(name)
-        self._state.schedule_refresh()
+        self._fast_refresh()
 
     def on_bulk_select_range(self) -> None:
         _, page_profiles, _ = self._get_page_profiles()
         visible_names = [p.name for p in page_profiles]
         self._state.select_range(visible_names)
-        self._state.schedule_refresh()
+        self._fast_refresh()
 
     def on_select_all_page(self) -> None:
         _, page_profiles, _ = self._get_page_profiles()
         self._state.select_all([p.name for p in page_profiles])
-        self._state.schedule_refresh()
+        self._fast_refresh()
 
     def on_deselect_page(self) -> None:
         _, page_profiles, _ = self._get_page_profiles()
         for p in page_profiles:
             if self._state.is_selected(p.name):
                 self._state.toggle_selection(p.name)
-        self._state.schedule_refresh()
+        self._fast_refresh()
 
     def on_clear_selection(self) -> None:
         self._state.clear_selection()
-        self._state.schedule_refresh()
+        self._fast_refresh()
 
     # --- Bulk action handlers ---
 
