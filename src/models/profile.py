@@ -361,6 +361,7 @@ class Profile:
     two_fa: str | None = None
     recovery_email: str | None = None
     mail_token: str | None = None
+    acc_no: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

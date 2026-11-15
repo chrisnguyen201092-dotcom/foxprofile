@@ -193,7 +193,9 @@ _shield_lock = threading.Lock()
 _shield_started = False
 
 
-def _is_point_on_maximize_zone_win32(hwnd: int, x: int, y: int, is_double_click: bool = False) -> bool:
+def _is_point_on_maximize_zone_win32(
+    hwnd: int, x: int, y: int, is_double_click: bool = False
+) -> bool:
     """Return True if screen point `(x, y)` is on `hwnd`'s `[ □ ]` Maximize button (or caption dblclick)."""
     if sys.platform != "win32" or hwnd <= 0:
         return False
@@ -850,3 +852,170 @@ def guard_profile_windows_loop(
         _prefix_child_windows_win32(root_pid, prefix)
         if stop_event.wait(0.25):
             break
+
+
+_WRAPPER_EXE_NAMES = frozenset({"python.exe", "pythonw.exe", "node.exe"})
+
+
+def trim_runner_wrapper_memory(root_pid: int) -> int:
+    """Trim physical working sets of Python/Node wrapper processes in `root_pid`'s tree.
+
+    Never touches `camoufox.exe`, `chrome.exe`, `firefox.exe`, or `os.getpid()`.
+    Returns the number of wrapper processes trimmed.
+    """
+    if (
+        sys.platform != "win32"
+        or isinstance(root_pid, bool)
+        or not isinstance(root_pid, int)
+        or root_pid <= 0
+    ):
+        return 0
+    self_pid = os.getpid()
+    if root_pid == self_pid:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        th32cs_snapprocess = 0x00000002
+        process_query_limited_information = 0x1000
+        process_set_quota = 0x0100
+        kernel32 = ctypes.windll.kernel32
+        psapi = ctypes.windll.psapi
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.Process32FirstW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetProcessTimes.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+        psapi.EmptyWorkingSet.restype = wintypes.BOOL
+
+        def _handle_ctime(handle: int) -> int:
+            c_ft = wintypes.FILETIME()
+            e_ft = wintypes.FILETIME()
+            k_ft = wintypes.FILETIME()
+            u_ft = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(c_ft),
+                ctypes.byref(e_ft),
+                ctypes.byref(k_ft),
+                ctypes.byref(u_ft),
+            ):
+                return 0
+            return (int(c_ft.dwHighDateTime) << 32) | int(c_ft.dwLowDateTime)
+
+        def _proc_ctime(pid: int) -> int:
+            h = kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if not h:
+                return 0
+            try:
+                return _handle_ctime(h)
+            finally:
+                kernel32.CloseHandle(h)
+
+        snap = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+        invalid_handle = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        if not snap or int(snap) == invalid_handle:
+            return 0
+
+        parent_map: dict[int, list[int]] = {}
+        exe_map: dict[int, str] = {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                pid = int(entry.th32ProcessID)
+                ppid = int(entry.th32ParentProcessID)
+                exe_map[pid] = (entry.szExeFile or "").lower()
+                parent_map.setdefault(ppid, []).append(pid)
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+
+        if root_pid not in exe_map:
+            return 0
+
+        root_ctime = _proc_ctime(root_pid)
+        ctime_cache: dict[int, int] = {root_pid: root_ctime}
+        descendants: set[int] = {root_pid}
+        queue = [root_pid]
+        while queue:
+            cur = queue.pop()
+            t_cur = ctime_cache.get(cur, 0)
+            for child in parent_map.get(cur, []):
+                if child in descendants or child == self_pid:
+                    continue
+                t_child = ctime_cache.get(child)
+                if t_child is None:
+                    t_child = _proc_ctime(child)
+                    ctime_cache[child] = t_child
+                if t_cur > 0 and t_child > 0 and t_child < t_cur:
+                    continue
+                descendants.add(child)
+                queue.append(child)
+
+        target_pids = [
+            pid for pid in descendants if pid != self_pid and exe_map.get(pid) in _WRAPPER_EXE_NAMES
+        ]
+        if not target_pids:
+            return 0
+
+        trimmed = 0
+        for pid in target_pids:
+            h = kernel32.OpenProcess(
+                process_query_limited_information | process_set_quota,
+                False,
+                pid,
+            )
+            if not h:
+                continue
+            try:
+                t_open = _handle_ctime(h)
+                if root_ctime > 0 and t_open > 0 and t_open < root_ctime:
+                    continue
+                t_cached = ctime_cache.get(pid, 0)
+                if t_cached > 0 and t_open > 0 and t_open != t_cached:
+                    continue
+                if psapi.EmptyWorkingSet(h):
+                    trimmed += 1
+            finally:
+                kernel32.CloseHandle(h)
+        return trimmed
+    except Exception:
+        return 0

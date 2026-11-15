@@ -176,6 +176,7 @@ def monitor_overview(
         items.append(
             {
                 "name": p.name,
+                "acc_no": getattr(p, "acc_no", None),
                 "status": p.status,
                 "group": p.group,
                 "pages": list(p.pages),
@@ -389,6 +390,7 @@ def create_profile(
         body.pages,
         status=(body.status or "").strip() or None,
         pinned=bool(body.pinned),
+        acc_no=body.acc_no,
     ):
         raise HTTPException(status_code=409, detail="Profile already exists")
 
@@ -589,6 +591,11 @@ def update_profile(
         **(
             {"new_pinned": bool(supplied["pinned"])}
             if "pinned" in supplied and supplied.get("pinned") is not None
+            else {}
+        ),
+        **(
+            {"new_acc_no": body.acc_no}
+            if "acc_no" in body.model_fields_set
             else {}
         ),
     ):

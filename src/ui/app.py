@@ -14,6 +14,7 @@ from ..core.logging import get_logger
 from ..core.strings import current_language, get_string, set_language
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..models.profile import (
+    Profile,
     compute_days_since,
     is_archived_profile,
     is_ban_page,
@@ -92,14 +93,20 @@ def _search_match_rank(prof: object, query: str) -> tuple[int, tuple] | None:
     group_l = (getattr(prof, "group", None) or "").lower()
     status_l = (getattr(prof, "status", None) or "").lower()
     notes_l = (getattr(prof, "notes", None) or "").lower()
+    acc_raw = (getattr(prof, "acc_no", None) or "").strip().lower()
+    q_acc = q.lstrip("#").strip()
 
     nkey = natural_name_key(name_raw)
 
-    # Tier 0: Exact profile name or exact word/number token in profile name
-    if name_clean == q or q in name_tokens:
+    # Tier 0: Exact profile name, word/number token, or account sequence number (#)
+    if name_clean == q or q in name_tokens or (q_acc and acc_raw == q_acc):
         return (0, nkey)
-    # Tier 1: Profile name or word/number token starts with query
-    if name_clean.startswith(q) or any(tok.startswith(q) for tok in name_tokens):
+    # Tier 1: Profile name, word/number token, or account number starts with query
+    if (
+        name_clean.startswith(q)
+        or any(tok.startswith(q) for tok in name_tokens)
+        or (q_acc and acc_raw.startswith(q_acc))
+    ):
         return (1, nkey)
     # Tier 2: Email username starts with query, or proxy port starts with query
     if (email_target and email_target.startswith(q)) or (
@@ -114,13 +121,14 @@ def _search_match_rank(prof: object, query: str) -> tuple[int, tuple] | None:
         or any(tok.startswith(q) for tok in _SEARCH_TOKEN_RE.findall(notes_l))
     ):
         return (3, nkey)
-    # Tier 4: Substring in email username, recovery email, group, status, notes, or proxy port
+    # Tier 4: Substring in email username, recovery email, group, status, notes, acc_no, or port
     if len(q) >= 2 and (
         q in email_target
         or q in rec_target
         or q in group_l
         or q in status_l
         or q in notes_l
+        or (q_acc and len(q_acc) >= 2 and q_acc in acc_raw)
         or (q_port.isdigit() and q_port in port_digits)
     ):
         return (4, nkey)
@@ -287,10 +295,12 @@ class App:
             self.h.open_add_dialog(self.active_page)
         elif no_mod and key == "escape":
             if (
-                self.state.editing_note is not None
+                self.state.editing_acc_no is not None
+                or self.state.editing_note is not None
                 or self.state.editing_email is not None
                 or self.state.editing_proxy is not None
             ):
+                self.state.editing_acc_no = None
                 self.state.editing_note = None
                 self.state.editing_email = None
                 self.state.editing_proxy = None
@@ -678,7 +688,20 @@ class App:
             all_profiles = [p for _, p in ranked]
         else:
             sort_by = self.state.sort_by
-            if sort_by == "schedule":
+            if sort_by in ("acc_no_asc", "acc_no_desc"):
+                reverse_acc = sort_by == "acc_no_desc"
+                numbered = [p for p in all_profiles if getattr(p, "acc_no", None)]
+                unnumbered = [p for p in all_profiles if not getattr(p, "acc_no", None)]
+                numbered.sort(
+                    key=lambda p: (
+                        natural_name_key(getattr(p, "acc_no", "") or ""),
+                        natural_name_key(p.name),
+                    ),
+                    reverse=reverse_acc,
+                )
+                unnumbered.sort(key=lambda p: natural_name_key(p.name))
+                all_profiles = numbered + unnumbered
+            elif sort_by == "schedule":
                 all_profiles.sort(
                     key=lambda p: (schedule_sort_key(p.status), natural_name_key(p.name))
                 )
@@ -978,57 +1001,23 @@ class App:
                 on_sort_trust=lambda: self._on_sort(
                     "trust_asc" if self.state.sort_by == "trust_desc" else "trust_desc"
                 ),
+                on_sort_acc_no=lambda: self._on_sort(
+                    "acc_no_desc" if self.state.sort_by == "acc_no_asc" else "acc_no_asc"
+                ),
             )
             if page_profiles
             else None
         )
 
         is_custom_sort = self.state.sort_by == "custom"
+        if self.state.hovered_profile is not None and all(
+            p.name != self.state.hovered_profile for p in page_profiles
+        ):
+            self.state.hovered_profile = None
 
         r.profile_list_area.controls = (
             [
-                build_profile_card(
-                    p,
-                    self.state.is_loading(p.name),
-                    self.bl.is_running(p.name),
-                    self.h.on_launch,
-                    self.h.on_edit,
-                    self.h.on_delete,
-                    is_selected=self.state.is_selected(p.name),
-                    on_select=self.h.on_toggle_select,
-                    on_cookies=self.h.on_cookies,
-                    device=self._device_label(p.name),
-                    since=self._live_since.get(p.name, ""),
-                    failed=p.name in self.state.failed,
-                    draggable=is_custom_sort,
-                    editing_note=self.state.editing_note == p.name,
-                    on_start_edit_note=self.h.on_start_edit_note,
-                    on_save_note=self.h.on_save_note,
-                    editing_email=self.state.editing_email == p.name,
-                    on_start_edit_email=self.h.on_start_edit_email,
-                    on_save_email=self.h.on_save_email,
-                    editing_proxy=self.state.editing_proxy == p.name,
-                    on_start_edit_proxy=self.h.on_start_edit_proxy,
-                    on_save_proxy=self.h.on_save_proxy,
-                    on_check_proxy=self.h.on_quick_check_proxy if p.proxy else None,
-                    on_clone=self.h.on_clone,
-                    on_focus_window=self.h.on_focus_window,
-                    on_status_click=self.h.on_set_status,
-                    on_session_history=self.h.on_open_session_history,
-                    on_ip_history=self.h.on_open_ip_history,
-                    on_trust_detail=self.h.on_open_trust_detail,
-                    on_toggle_pin=self.h.on_toggle_pin,
-                    on_edit_dates=self.h.on_edit_dates,
-                    on_copy_email=self.h.on_copy_email,
-                    on_copy_2fa=self.h.on_copy_2fa,
-                    on_copy_password=self.h.on_copy_password,
-                    on_copy_recovery=self.h.on_copy_recovery,
-                    on_copy_token=self.h.on_copy_token,
-                    on_fetch_mail_otp=self.h.on_fetch_mail_otp,
-                    on_open_mail_credentials=self.h.on_open_mail_credentials,
-                    monitor_info=snap.profiles.get(p.name),
-                    proxy_check_state=self.state.proxy_status.get(p.name),
-                )
+                self._build_card_for_profile(p, is_custom_sort=is_custom_sort, snap=snap)
                 for p in page_profiles
             ]
             if page_profiles
@@ -1068,6 +1057,94 @@ class App:
         r.next_btn.disabled = self.state.current_page >= total_pages
         if update_page:
             self._safe_update()
+
+    def _build_card_for_profile(
+        self,
+        p: Profile,
+        *,
+        is_custom_sort: bool,
+        snap: MonitorSnapshot | None,
+    ) -> ft.Container:
+        return build_profile_card(
+            p,
+            self.state.is_loading(p.name),
+            self.bl.is_running(p.name),
+            self.h.on_launch,
+            self.h.on_edit,
+            self.h.on_delete,
+            is_selected=self.state.is_selected(p.name),
+            on_select=self.h.on_toggle_select,
+            on_cookies=self.h.on_cookies,
+            device=self._device_label(p.name),
+            since=self._live_since.get(p.name, ""),
+            failed=p.name in self.state.failed,
+            draggable=is_custom_sort,
+            editing_acc_no=self.state.editing_acc_no == p.name,
+            on_start_edit_acc_no=self.h.on_start_edit_acc_no,
+            on_save_acc_no=self.h.on_save_acc_no,
+            row_hovered=self.state.hovered_profile == p.name,
+            on_row_hover=self._on_row_hover,
+            editing_note=self.state.editing_note == p.name,
+            on_start_edit_note=self.h.on_start_edit_note,
+            on_save_note=self.h.on_save_note,
+            editing_email=self.state.editing_email == p.name,
+            on_start_edit_email=self.h.on_start_edit_email,
+            on_save_email=self.h.on_save_email,
+            editing_proxy=self.state.editing_proxy == p.name,
+            on_start_edit_proxy=self.h.on_start_edit_proxy,
+            on_save_proxy=self.h.on_save_proxy,
+            on_check_proxy=self.h.on_quick_check_proxy if p.proxy else None,
+            on_clone=self.h.on_clone,
+            on_focus_window=self.h.on_focus_window,
+            on_status_click=self.h.on_set_status,
+            on_session_history=self.h.on_open_session_history,
+            on_ip_history=self.h.on_open_ip_history,
+            on_trust_detail=self.h.on_open_trust_detail,
+            on_toggle_pin=self.h.on_toggle_pin,
+            on_edit_dates=self.h.on_edit_dates,
+            on_copy_email=self.h.on_copy_email,
+            on_copy_2fa=self.h.on_copy_2fa,
+            on_copy_password=self.h.on_copy_password,
+            on_copy_recovery=self.h.on_copy_recovery,
+            on_copy_token=self.h.on_copy_token,
+            on_fetch_mail_otp=self.h.on_fetch_mail_otp,
+            on_open_mail_credentials=self.h.on_open_mail_credentials,
+            monitor_info=snap.profiles.get(p.name) if snap is not None else None,
+            proxy_check_state=self.state.proxy_status.get(p.name),
+        )
+
+    def _on_row_hover(self, name: str, hovered: bool) -> None:
+        prev = self.state.hovered_profile
+        nxt = name if hovered else (None if prev == name else prev)
+        if nxt == prev:
+            return
+        self.state.hovered_profile = nxt
+        if not self.refs or not self.page:
+            return
+        dirty = {x for x in (prev, nxt) if x is not None}
+        is_custom_sort = self.state.sort_by == "custom"
+        snap = self._last_monitor_snap
+        controls = list(self.refs.profile_list_area.controls or ())
+        changed = False
+        for idx, ctrl in enumerate(controls):
+            ck = getattr(ctrl, "key", None)
+            if ck in dirty:
+                prof = self.pm.profiles.get(ck)
+                if prof is not None:
+                    controls[idx] = self._build_card_for_profile(
+                        prof,
+                        is_custom_sort=is_custom_sort,
+                        snap=snap,
+                    )
+                    changed = True
+        if not changed:
+            return
+        self.refs.profile_list_area.controls = controls
+        try:
+            with self.state._ui_update_lock:
+                self.refs.profile_list_area.update()
+        except Exception as e:
+            logger.debug("Row hover update skipped: %s", e)
 
     def _device_label(self, name: str) -> str:
         cached = self.monitor._disk_cache.get(name) if hasattr(self, "monitor") else None
@@ -1260,6 +1337,7 @@ class App:
                     (now_mono - last_minute_tick) >= 30.0
                     and bool(running_now or self.pm.profiles)
                     and not self._has_open_dialog()
+                    and self.state.editing_acc_no is None
                     and self.state.editing_note is None
                     and self.state.editing_email is None
                     and self.state.editing_proxy is None

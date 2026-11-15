@@ -62,6 +62,7 @@ def build_header_row(
     mail_alert: bool = False,
     sort_by: str = "custom",
     on_sort_trust: Callable[[], None] | None = None,
+    on_sort_acc_no: Callable[[], None] | None = None,
 ) -> ft.Container:
     def label(key: str) -> ft.Text:
         return ft.Text(
@@ -106,6 +107,60 @@ def build_header_row(
         on_change=lambda e: on_select_all(not all_selected),
     )
     prof_chips: list[ft.Control] = [label("col_profile")]
+    is_acc_no_sort = sort_by in ("acc_no_asc", "acc_no_desc")
+    hdr_acc_col = COLORS["accent"] if is_acc_no_sort else COLORS["text_sub"]
+    acc_sort_icon_data = (
+        ft.Icons.ARROW_UPWARD_ROUNDED
+        if sort_by == "acc_no_asc"
+        else (
+            ft.Icons.ARROW_DOWNWARD_ROUNDED
+            if sort_by == "acc_no_desc"
+            else ft.Icons.UNFOLD_MORE_ROUNDED
+        )
+    )
+    if on_sort_acc_no is not None or is_acc_no_sort:
+        prof_chips.append(
+            ft.Container(
+                width=None if is_acc_no_sort else 24,
+                height=21,
+                padding=ft.Padding.symmetric(horizontal=5 if is_acc_no_sort else 0, vertical=0),
+                alignment=ft.Alignment(0, 0),
+                border_radius=4,
+                bgcolor=(
+                    ft.Colors.with_opacity(0.12, COLORS["accent"])
+                    if is_acc_no_sort
+                    else COLORS["input_bg"]
+                ),
+                border=ft.Border.all(
+                    1,
+                    COLORS["accent"] if is_acc_no_sort else COLORS["rule_strong"],
+                ),
+                ink=on_sort_acc_no is not None,
+                tooltip=get_string("tooltip_sort_acc_no"),
+                on_click=(lambda _: on_sort_acc_no()) if on_sort_acc_no is not None else None,
+                content=ft.Row(
+                    spacing=1,
+                    tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(
+                            get_string("col_acc_no"),
+                            size=11.5,
+                            font_family=FONT_DATA,
+                            weight=ft.FontWeight.W_700,
+                            color=hdr_acc_col,
+                            no_wrap=True,
+                        ),
+                        *(
+                            [ft.Icon(acc_sort_icon_data, size=11, color=hdr_acc_col)]
+                            if is_acc_no_sort
+                            else []
+                        ),
+                    ],
+                ),
+            )
+        )
     if on_open_warmup_sites is not None:
         prof_chips.append(
             _head_chip(
@@ -277,6 +332,100 @@ def _format_running(mins: int | None, since: str = "") -> str:
     return get_string("running_hours", hours=mins // 60, mins=mins % 60)
 
 
+def _build_acc_no_editor(
+    profile: Profile,
+    on_save_acc_no: Callable[[str, str], None],
+) -> ft.TextField:
+    acc_val = (getattr(profile, "acc_no", None) or "").strip()
+    return ft.TextField(
+        value=acc_val,
+        hint_text="#",
+        width=46,
+        height=22,
+        dense=True,
+        text_size=11.5,
+        text_style=ft.TextStyle(
+            font_family=FONT_DATA,
+            weight=ft.FontWeight.W_700,
+            color=COLORS["sidebar"],
+        ),
+        hint_style=ft.TextStyle(
+            font_family=FONT_DATA,
+            size=11,
+            color=COLORS["text_dim"],
+        ),
+        text_align=ft.TextAlign.CENTER,
+        content_padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+        bgcolor=COLORS["input_bg"],
+        border_color=COLORS["accent"],
+        focused_border_color=COLORS["accent"],
+        border_width=1.5,
+        focused_border_width=1.5,
+        cursor_color=COLORS["accent"],
+        border_radius=4,
+        autofocus=True,
+        on_submit=lambda e, n=profile.name: on_save_acc_no(n, e.control.value or ""),
+        on_blur=lambda e, n=profile.name: on_save_acc_no(n, e.control.value or ""),
+    )
+
+
+def _build_acc_no_pill(
+    profile: Profile,
+    on_start_edit_acc_no: Callable[[str], None] | None,
+) -> ft.Control:
+    acc_val = (getattr(profile, "acc_no", None) or "").strip()
+    pill_txt = ft.Text(
+        f"#{acc_val}",
+        size=12.5,
+        font_family=FONT_DATA,
+        weight=ft.FontWeight.W_600,
+        color=COLORS["text_dim"],
+        no_wrap=True,
+    )
+    pill_box = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=1, vertical=0),
+        tooltip=get_string("tooltip_edit_acc_no"),
+        content=pill_txt,
+    )
+    if on_start_edit_acc_no is None:
+        return pill_box
+    return ft.GestureDetector(
+        content=pill_box,
+        mouse_cursor=ft.MouseCursor.CLICK,
+        on_double_tap=lambda _, n=profile.name: on_start_edit_acc_no(n),
+    )
+
+
+def _build_acc_no_ghost(
+    profile: Profile,
+    on_start_edit_acc_no: Callable[[str], None],
+    *,
+    visible: bool = False,
+) -> ft.Container:
+    ghost_txt = ft.Text(
+        "+#",
+        size=11,
+        font_family=FONT_DATA,
+        weight=ft.FontWeight.W_600,
+        color=COLORS["text_dim"],
+        no_wrap=True,
+    )
+    ghost_box = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=2, vertical=0),
+        tooltip=get_string("tooltip_add_acc_no"),
+        content=ghost_txt,
+    )
+    return ft.Container(
+        opacity=1.0 if visible else 0.0,
+        animate_opacity=120,
+        content=ft.GestureDetector(
+            content=ghost_box,
+            mouse_cursor=ft.MouseCursor.CLICK,
+            on_double_tap=lambda _, n=profile.name: on_start_edit_acc_no(n),
+        ),
+    )
+
+
 def build_profile_card(
     profile: Profile,
     is_loading: bool,
@@ -292,6 +441,11 @@ def build_profile_card(
     failed: bool = False,
     draggable: bool = False,
     *,
+    editing_acc_no: bool = False,
+    on_start_edit_acc_no: Callable[[str], None] | None = None,
+    on_save_acc_no: Callable[[str, str], None] | None = None,
+    row_hovered: bool = False,
+    on_row_hover: Callable[[str, bool], None] | None = None,
     editing_note: bool = False,
     on_start_edit_note: Callable[[str], None] | None = None,
     on_save_note: Callable[[str, str], None] | None = None,
@@ -337,10 +491,24 @@ def build_profile_card(
         else ft.Border.only(bottom=ft.BorderSide(1, COLORS["card_border"]))
     )
 
+    def _drag_wrap(ctrl: ft.Control, disable_drag: bool = False) -> ft.Control:
+        if not draggable or disable_drag:
+            return ctrl
+        return ft.ReorderableDragHandle(
+            mouse_cursor=ft.MouseCursor.GRAB,
+            content=ctrl,
+        )
+
     show_failed = failed and not is_loading and not is_running
     status_disp = resolve_status_display(profile.status, get_string)
     is_pinned = bool(getattr(profile, "pinned", False))
-    has_badges = bool(is_pinned or profile.group or show_failed or status_disp is not None)
+    acc_val = (getattr(profile, "acc_no", None) or "").strip()
+    edit_acc = bool(editing_acc_no and on_save_acc_no is not None)
+    add_acc_ghost_wrap: ft.Container | None = None
+    has_acc_item = bool(acc_val or edit_acc or (on_start_edit_acc_no is not None))
+    has_badges = bool(
+        is_pinned or profile.group or show_failed or status_disp is not None or has_acc_item
+    )
     primary_quick_edit = on_start_edit_email or on_start_edit_note
     quick_edit_tip_key = (
         "tooltip_quick_edit_email" if on_start_edit_email is not None else "tooltip_quick_edit_note"
@@ -359,19 +527,26 @@ def build_profile_card(
         overflow=ft.TextOverflow.ELLIPSIS,
         tooltip=name_tooltip,
     )
-    name_control: ft.Control = (
+    name_inner: ft.Control = (
         ft.Container(
-            expand=has_badges,
-            expand_loose=has_badges,
             on_click=lambda _, n=profile.name, fn=primary_quick_edit: fn(n),
             content=name_text,
         )
         if primary_quick_edit is not None
-        else (
-            ft.Container(expand=True, expand_loose=True, content=name_text)
-            if has_badges
-            else name_text
+        else name_text
+    )
+    name_drag = _drag_wrap(
+        name_inner,
+        disable_drag=editing_acc_no or editing_note or editing_email,
+    )
+    name_control: ft.Control = (
+        ft.Container(
+            expand=True,
+            expand_loose=True,
+            content=name_drag,
         )
+        if has_badges
+        else name_drag
     )
     top_line_controls: list[ft.Control] = []
     if is_pinned:
@@ -392,6 +567,10 @@ def build_profile_card(
                 ),
             )
         )
+    if edit_acc and on_save_acc_no is not None:
+        top_line_controls.append(_build_acc_no_editor(profile, on_save_acc_no))
+    elif acc_val:
+        top_line_controls.append(_build_acc_no_pill(profile, on_start_edit_acc_no))
     top_line_controls.append(name_control)
     if show_failed:
         top_line_controls.append(
@@ -457,6 +636,13 @@ def build_profile_card(
                 ),
             )
         )
+    if not acc_val and not edit_acc and on_start_edit_acc_no is not None:
+        add_acc_ghost_wrap = _build_acc_no_ghost(
+            profile,
+            on_start_edit_acc_no,
+            visible=row_hovered,
+        )
+        top_line_controls.append(add_acc_ghost_wrap)
     top_line: ft.Control = (
         ft.Row(
             spacing=6,
@@ -600,14 +786,15 @@ def build_profile_card(
             if sub_parts:
                 sub_parts.append(ft.Text("·", size=11.5, color=COLORS["text_dim"]))
             sub_parts.append(note_widget)
-        sub_line: ft.Control = (
+        sub_line: ft.Control = _drag_wrap(
             sub_parts[0]
             if len(sub_parts) == 1
             else ft.Row(
                 spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=sub_parts,
-            )
+            ),
+            disable_drag=editing_acc_no or editing_note or editing_email,
         )
         text_block = _stack(top_line, sub_line)
     else:
@@ -619,53 +806,63 @@ def build_profile_card(
     if avatar_path:
         ring_color = dot_color or COLORS["rule_strong"]
         name_parts.append(
-            ft.Container(
-                width=36,
-                height=36,
-                border_radius=18,
-                padding=1.5,
-                bgcolor=COLORS["input_bg"],
-                border=ft.Border.all(1.5, ring_color),
-                ink=on_status_click is not None,
-                tooltip=(
-                    get_string("tooltip_click_status")
-                    if on_status_click is not None
-                    else profile.name
-                ),
-                on_click=(
-                    (lambda _, n=profile.name: on_status_click(n))
-                    if on_status_click is not None
-                    else None
-                ),
-                content=ft.Container(
-                    width=33,
-                    height=33,
-                    border_radius=17,
-                    clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-                    content=ft.Image(
-                        src=avatar_path,
+            _drag_wrap(
+                ft.Container(
+                    width=36,
+                    height=36,
+                    border_radius=18,
+                    padding=1.5,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1.5, ring_color),
+                    ink=on_status_click is not None,
+                    tooltip=(
+                        get_string("tooltip_click_status")
+                        if on_status_click is not None
+                        else profile.name
+                    ),
+                    on_click=(
+                        (lambda _, n=profile.name: on_status_click(n))
+                        if on_status_click is not None
+                        else None
+                    ),
+                    content=ft.Container(
                         width=33,
                         height=33,
-                        gapless_playback=True,
+                        border_radius=17,
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                        content=ft.Image(
+                            src=avatar_path,
+                            width=33,
+                            height=33,
+                            gapless_playback=True,
+                        ),
                     ),
                 ),
+                disable_drag=editing_acc_no or editing_note or editing_email,
             )
         )
     elif dot_color or on_status_click is not None:
         name_parts.append(
-            ft.Container(
-                width=10,
-                height=10,
-                border_radius=5,
-                bgcolor=dot_color,
-                border=(None if dot_color else ft.Border.all(1.5, COLORS["rule_strong"])),
-                ink=on_status_click is not None,
-                tooltip=get_string("tooltip_click_status") if on_status_click is not None else None,
-                on_click=(
-                    (lambda _, n=profile.name: on_status_click(n))
-                    if on_status_click is not None
-                    else None
+            _drag_wrap(
+                ft.Container(
+                    width=10,
+                    height=10,
+                    border_radius=5,
+                    bgcolor=dot_color,
+                    border=(None if dot_color else ft.Border.all(1.5, COLORS["rule_strong"])),
+                    ink=on_status_click is not None,
+                    tooltip=(
+                        get_string("tooltip_click_status")
+                        if on_status_click is not None
+                        else None
+                    ),
+                    on_click=(
+                        (lambda _, n=profile.name: on_status_click(n))
+                        if on_status_click is not None
+                        else None
+                    ),
                 ),
+                disable_drag=editing_acc_no or editing_note or editing_email,
             )
         )
     if name_parts:
@@ -678,18 +875,18 @@ def build_profile_card(
     else:
         name_cell_content = text_block
 
-    def _drag_wrap(ctrl: ft.Control, disable_drag: bool = False) -> ft.Control:
-        if not draggable or disable_drag:
-            return ctrl
-        return ft.ReorderableDragHandle(
-            mouse_cursor=ft.MouseCursor.GRAB,
-            content=ctrl,
-        )
-
     launch_btn = build_launch_button(profile.name, is_loading, is_running, on_launch)
     launch_btn.width = 100
     if is_running and since:
         launch_btn.tooltip = f"{get_string('stamp_live')} ({since})"
+
+    has_hover_ghost = add_acc_ghost_wrap is not None and on_row_hover is not None
+
+    def _handle_row_hover(e: ft.ControlEvent, n: str = profile.name) -> None:
+        if on_row_hover is None:
+            return
+        hovered = e.data is True or str(e.data).lower() == "true"
+        on_row_hover(n, hovered)
 
     return ft.Container(
         key=profile.name,
@@ -700,6 +897,7 @@ def build_profile_card(
         ),
         bgcolor=bg,
         border=row_border,
+        on_hover=_handle_row_hover if has_hover_ghost else None,
         content=ft.Row(
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -712,7 +910,7 @@ def build_profile_card(
                         on_change=lambda _, n=profile.name: on_select(n) if on_select else None,
                     ),
                 ),
-                _cell("name", _drag_wrap(name_cell_content, disable_drag=editing_note)),
+                _cell("name", name_cell_content),
                 _cell(
                     "device",
                     _drag_wrap(
@@ -1250,7 +1448,11 @@ def resolve_trust_badge_style(
     )
     is_banned = bool(getattr(monitor_info, "is_banned", False) or t_tier == "banned")
     audit_codes = list(getattr(monitor_info, "audit_codes", ()) or ())
-    has_red_batch = "burned_batch" in audit_codes
+    surv_age = max(
+        float(getattr(monitor_info, "age_days", 0) or 0),
+        float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0),
+    )
+    has_red_batch = ("burned_batch" in audit_codes) and (surv_age < 30.0)
     is_unopened = (
         float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0) <= 0.0
         and int(getattr(monitor_info, "cookie_count", 0) or 0) == 0
@@ -1284,7 +1486,11 @@ def resolve_trust_badge_icon(
     )
     is_banned = bool(getattr(monitor_info, "is_banned", False) or t_tier == "banned")
     audit_codes = list(getattr(monitor_info, "audit_codes", ()) or ())
-    has_red_batch = "burned_batch" in audit_codes
+    surv_age = max(
+        float(getattr(monitor_info, "age_days", 0) or 0),
+        float(getattr(monitor_info, "datr_age_days", 0.0) or 0.0),
+    )
+    has_red_batch = ("burned_batch" in audit_codes) and (surv_age < 30.0)
     if is_banned:
         return ft.Icons.CANCEL_ROUNDED
     if t_tier == "diamond":

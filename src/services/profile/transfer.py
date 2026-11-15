@@ -9,7 +9,9 @@ from ...core.logging import get_logger
 from ...models.profile import ENGINES, Profile, parse_flexible_date
 from ...utils.totp import normalize_totp_secret
 from ...utils.validation import (
+    normalize_acc_no,
     valid_or_none,
+    validate_acc_no,
     validate_color,
     validate_email,
     validate_group,
@@ -133,6 +135,12 @@ def import_from_zip(
                 mail_token=valid_or_none(
                     profile_data.get("mail_token"),
                     validate_mail_token,
+                ),
+                acc_no=(
+                    _norm_acc
+                    if (_norm_acc := normalize_acc_no(profile_data.get("acc_no"))) is not None
+                    and validate_acc_no(_norm_acc)[0]
+                    else None
                 ),
             )
 

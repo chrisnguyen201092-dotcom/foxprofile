@@ -157,6 +157,36 @@ def validate_status(value: str) -> tuple[bool, str]:
     return True, ""
 
 
+def normalize_acc_no(value: object) -> str | None:
+    """Normalize a manual account sequence label (strips spaces and leading '#')."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        s = str(value)
+    elif isinstance(value, str):
+        s = value
+    else:
+        return None
+    s = s.strip()
+    while s.startswith("#"):
+        s = s[1:].strip()
+    return s or None
+
+
+def validate_acc_no(value: str) -> tuple[bool, str]:
+    """Optional short account order tag (up to 12 chars after '#', no control chars)."""
+    if not value:
+        return True, ""
+    if _CONTROL_CHAR_RE.search(value):
+        return False, get_string("validation_acc_no_invalid")
+    cleaned = normalize_acc_no(value)
+    if cleaned is None:
+        return True, ""
+    if len(cleaned) > 12:
+        return False, get_string("validation_acc_no_too_long")
+    return True, ""
+
+
 def validate_profile_name(name: str) -> tuple[bool, str]:
     if not name:
         return False, get_string("validation_empty_name")

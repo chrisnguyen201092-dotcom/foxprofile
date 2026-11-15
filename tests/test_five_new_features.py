@@ -5994,6 +5994,209 @@ def test_trust_score_incubated_account_survival_vs_datr_stabilization():
     assert bd_emb["final_score"] == 44
 
 
+def test_trust_score_30d_lifts_origin_and_creation_ceiling_caps():
+    """Verify accounts surviving >= 30 days have origin/creation stage caps lifted."""
+    import datetime as dt
+
+    import flet as ft
+
+    from src.models.profile import Profile
+    from src.services.monitor import ProfileMonitorInfo, compute_trust_breakdown
+    from src.ui.components.profile_card import (
+        resolve_trust_badge_icon,
+        resolve_trust_badge_style,
+    )
+
+    today = dt.date.today()
+
+    def _mk_info(
+        name: str,
+        *,
+        age_days: int,
+        datr_age_days: float,
+        hatch_gw: bool = True,
+        has_muse_auth: bool = True,
+        hatch_sess: bool = True,
+        cookie_count: int = 24,
+        sess_exp_days: int | None = 25,
+        audit_codes: list[str] | None = None,
+    ) -> ProfileMonitorInfo:
+        return ProfileMonitorInfo(
+            name=name,
+            port=":10001",
+            cluster="usa101",
+            age_days=age_days,
+            hatch_gw=hatch_gw,
+            hatch_vml=hatch_gw,
+            hatch_sess=hatch_sess,
+            has_muse_auth=has_muse_auth,
+            sess_exp=f"Còn {sess_exp_days}d" if sess_exp_days is not None else "-",
+            has_ps_l=hatch_gw,
+            has_meta=hatch_gw,
+            has_cache2=hatch_gw,
+            datr_age_days=datr_age_days,
+            datr_domains=3 if hatch_gw else 0,
+            cookie_count=cookie_count,
+            ip_fraud_score=10,
+            ip_proxy_flag=False,
+            has_proxy=True,
+            has_geo_pin=True,
+            audit_codes=audit_codes or [],
+        )
+
+    # 1. orange_mutation (Spam SDT / Dual-Mail Bridge) surviving >= 30d -> Stage 4 (89 cap, no 75 cap)
+    p_orange = Profile(
+        name="Orange32d",
+        group="3. Trung bình (Spam SĐT)",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10001",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=32)).isoformat(),
+        email="orange32@hotmail.com",
+        recovery_email="bridge@smvmail.com",
+        mail_token="M.C501_BAY.0.U.-token|client",
+    )
+    bd_orange = compute_trust_breakdown(
+        _mk_info("Orange32d", age_days=32, datr_age_days=25.0),
+        p_orange,
+    )
+    assert bd_orange["stage_code"] == "stage_4_over_1m"
+    assert bd_orange["stage_cap"] == 89
+    assert bd_orange["capped_by"] == 0
+    assert bd_orange["final_score"] >= 80
+    assert bd_orange["trust_tier"] == "elite"
+
+    # 2a. red_taint (< 30d) stays capped at 44 ("Trần Đỏ")
+    p_red_25 = Profile(
+        name="Red25d",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10002",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=25)).isoformat(),
+        email="red25@hotmail.com",
+        notes="SĐT gốc +19376123124",
+        mail_token="M.C501_BAY.0.U.-token|client",
+    )
+    info_red_25 = _mk_info(
+        "Red25d",
+        age_days=25,
+        datr_age_days=25.0,
+        audit_codes=["burned_batch"],
+    )
+    bd_red_25 = compute_trust_breakdown(info_red_25, p_red_25)
+    assert bd_red_25["stage_code"] == "stage_1_red_taint"
+    assert bd_red_25["stage_cap"] == 44
+    assert bd_red_25["final_score"] == 44
+    info_red_25.trust_score = bd_red_25["final_score"]
+    info_red_25.trust_tier = bd_red_25["trust_tier"]
+    assert resolve_trust_badge_style(info_red_25)[5] == "trust_sub_red_cap"
+    assert resolve_trust_badge_icon(info_red_25) == ft.Icons.WARNING_ROUNDED
+
+    # 2b. red_taint surviving >= 30d lifts the 44 cap -> enters Stage 4 (89 cap)
+    p_red_31 = Profile(
+        name="Red31d",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10003",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=31)).isoformat(),
+        email="red31@hotmail.com",
+        notes="SĐT gốc +19376123124",
+        mail_token="M.C501_BAY.0.U.-token|client",
+    )
+    info_red_31 = _mk_info(
+        "Red31d",
+        age_days=31,
+        datr_age_days=25.0,
+        audit_codes=["burned_batch"],
+    )
+    bd_red_31 = compute_trust_breakdown(info_red_31, p_red_31)
+    assert bd_red_31["stage_code"] == "stage_4_over_1m"
+    assert bd_red_31["stage_cap"] == 89
+    assert bd_red_31["capped_by"] == 0
+    assert bd_red_31["final_score"] >= 70
+    assert bd_red_31["trust_tier"] in ("platinum", "elite")
+    info_red_31.trust_score = bd_red_31["final_score"]
+    info_red_31.trust_tier = bd_red_31["trust_tier"]
+    assert resolve_trust_badge_icon(info_red_31) in (
+        ft.Icons.STAR_ROUNDED,
+        ft.Icons.VERIFIED_USER_ROUNDED,
+    )
+
+    # 2c. red_taint >= 30d but freshly logged in (datr < 7d) -> held by normal Stage 1 <7d, NOT "Trần Đỏ"
+    p_red_fresh = Profile(
+        name="RedFresh35d",
+        proxy="http://u:p@sp02-usa101.nguonproxy.com:10004",
+        timezone="America/Detroit",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=35)).isoformat(),
+        email="redfresh@hotmail.com",
+        notes="SĐT gốc +19376123124",
+        mail_token="M.C501_BAY.0.U.-token|client",
+    )
+    info_red_fresh = _mk_info(
+        "RedFresh35d",
+        age_days=35,
+        datr_age_days=2.0,
+        audit_codes=["burned_batch"],
+    )
+    bd_red_fresh = compute_trust_breakdown(info_red_fresh, p_red_fresh)
+    assert bd_red_fresh["stage_code"] == "stage_1_under_7d"
+    assert bd_red_fresh["stage_cap"] == 44
+    assert bd_red_fresh["final_score"] == 44
+    info_red_fresh.trust_score = bd_red_fresh["final_score"]
+    info_red_fresh.trust_tier = bd_red_fresh["trust_tier"]
+    assert resolve_trust_badge_style(info_red_fresh)[5] == "trust_sub_warming"
+    assert resolve_trust_badge_icon(info_red_fresh) == ft.Icons.HOURGLASS_TOP_ROUNDED
+
+    # 3. dead_tuan89 (@tuan89.site) at 35d: unopened remains capped at 12; verified session lifts cap
+    p_tuan89 = Profile(
+        name="Tuan89_35d",
+        group="5. Nguy hiểm nhất (@tuan89)",
+        proxy="http://u:p@209.141.40.174:5300",
+        timezone="America/Los_Angeles",
+        locale="en-US",
+        created_at=(today - dt.timedelta(days=35)).isoformat(),
+        email="user123@tuan89.site",
+    )
+    bd_tuan_unopened = compute_trust_breakdown(
+        _mk_info(
+            "Tuan89_35d",
+            age_days=35,
+            datr_age_days=0.0,
+            hatch_gw=False,
+            has_muse_auth=False,
+            hatch_sess=False,
+            cookie_count=0,
+            sess_exp_days=None,
+            audit_codes=["burned_batch"],
+        ),
+        p_tuan89,
+    )
+    assert bd_tuan_unopened["stage_code"] == "stage_0_tuan89"
+    assert bd_tuan_unopened["stage_cap"] == 12
+    assert bd_tuan_unopened["final_score"] == 12
+
+    bd_tuan_alive = compute_trust_breakdown(
+        _mk_info(
+            "Tuan89_35d",
+            age_days=35,
+            datr_age_days=15.0,
+            hatch_gw=True,
+            has_muse_auth=True,
+            hatch_sess=True,
+            cookie_count=24,
+            sess_exp_days=25,
+            audit_codes=["burned_batch"],
+        ),
+        p_tuan89,
+    )
+    assert bd_tuan_alive["stage_code"] == "stage_4_over_1m"
+    assert bd_tuan_alive["stage_cap"] == 89
+    assert bd_tuan_alive["capped_by"] == 0
+    assert bd_tuan_alive["final_score"] >= 68
+
+
+
 
 
 

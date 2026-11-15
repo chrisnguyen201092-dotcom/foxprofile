@@ -1,4 +1,18 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from ...utils.validation import normalize_acc_no, validate_acc_no
+
+
+def _clean_acc_no_input(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("acc_no must be a short string or integer")
+    raw = str(value)
+    ok, msg = validate_acc_no(raw)
+    if not ok:
+        raise ValueError(msg)
+    return normalize_acc_no(raw)
 
 
 class ProfileCreate(BaseModel):
@@ -21,9 +35,15 @@ class ProfileCreate(BaseModel):
     notes: str | None = Field(None, description="Optional free-text notes")
     status: str | None = Field(None, description="Optional operational status tag")
     pinned: bool = Field(False, description="Whether this profile is pinned to the top")
+    acc_no: str | None = Field(None, description="Optional manual account order number (#)")
     pages: list[str] = Field(
         default_factory=list, description="Custom pages this profile belongs to"
     )
+
+    @field_validator("acc_no", mode="before")
+    @classmethod
+    def _validate_acc_no(cls, value: object) -> str | None:
+        return _clean_acc_no_input(value)
 
 
 class ProfileUpdate(BaseModel):
@@ -41,6 +61,12 @@ class ProfileUpdate(BaseModel):
     pages: list[str] | None = Field(None, description="Custom pages this profile belongs to")
     status: str | None = Field(None, description='"" clears the status tag')
     pinned: bool | None = Field(None, description="Pin or unpin profile")
+    acc_no: str | None = Field(None, description='"" or null clears account number (#)')
+
+    @field_validator("acc_no", mode="before")
+    @classmethod
+    def _validate_acc_no(cls, value: object) -> str | None:
+        return _clean_acc_no_input(value)
 
 
 class BulkProfileOpsRequest(BaseModel):
@@ -87,6 +113,7 @@ class ProfileResponse(BaseModel):
     pages: list[str] = Field(default_factory=list)
     status: str | None = None
     pinned: bool = False
+    acc_no: str | None = None
     data_dir: str
     is_running: bool
 

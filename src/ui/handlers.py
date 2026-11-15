@@ -20,7 +20,13 @@ from ..utils.totp import (
     generate_totp,
     parse_mail_credentials_line,
 )
-from ..utils.validation import validate_email, validate_notes, validate_proxy_format
+from ..utils.validation import (
+    normalize_acc_no,
+    validate_acc_no,
+    validate_email,
+    validate_notes,
+    validate_proxy_format,
+)
 from .actions.browser import launch_or_stop
 from .actions.bulk import (
     bulk_check_proxies,
@@ -625,6 +631,8 @@ class AppHandlers:
     # --- Inline quick-edit & proxy check handlers ---
 
     def on_start_edit_note(self, name: str) -> None:
+        self._state.hovered_profile = None
+        self._state.editing_acc_no = None
         self._state.editing_proxy = None
         self._state.editing_email = None
         self._state.editing_note = name
@@ -659,6 +667,8 @@ class AppHandlers:
         self._refresh()
 
     def on_start_edit_email(self, name: str) -> None:
+        self._state.hovered_profile = None
+        self._state.editing_acc_no = None
         self._state.editing_proxy = None
         self._state.editing_note = None
         self._state.editing_email = name
@@ -833,7 +843,43 @@ class AppHandlers:
 
         open_warmup_sites_dialog(page, on_copy_text=_copy_text)
 
+    def on_start_edit_acc_no(self, name: str) -> None:
+        self._state.hovered_profile = None
+        self._state.editing_note = None
+        self._state.editing_email = None
+        self._state.editing_proxy = None
+        self._state.editing_acc_no = name
+        self._refresh()
+
+    def on_save_acc_no(self, name: str, raw_acc_no: str) -> None:
+        if self._state.editing_acc_no != name:
+            return
+        self._state.editing_acc_no = None
+        p = self._pm.profiles.get(name)
+        if p is None:
+            self._refresh()
+            return
+        raw = (raw_acc_no or "").strip()
+        ok, err = validate_acc_no(raw)
+        if not ok:
+            self._log(f"[{name}] {err}")
+            self._refresh()
+            return
+        clean = normalize_acc_no(raw)
+        if clean != getattr(p, "acc_no", None):
+            if hasattr(self._pm, "update_profile_acc_no"):
+                self._pm.update_profile_acc_no(name, clean)
+            else:
+                p.acc_no = clean
+            if clean:
+                self._log(get_string("quick_saved_acc_no", name=name, acc_no=clean))
+            else:
+                self._log(get_string("quick_cleared_acc_no", name=name))
+        self._refresh()
+
     def on_start_edit_proxy(self, name: str) -> None:
+        self._state.hovered_profile = None
+        self._state.editing_acc_no = None
         self._state.editing_note = None
         self._state.editing_email = None
         self._state.editing_proxy = name

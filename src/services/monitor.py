@@ -453,11 +453,20 @@ def _classify_profile_lineage(
         or group_low.startswith("5.")
         or "nguy hiểm nhất" in group_low
     ):
+        verified_30d = (
+            eff_acc_age >= 30.0
+            and bool(info.hatch_gw or info.has_muse_auth)
+            and float(info.datr_age_days or 0.0) > 0.0
+        )
         return (
             "dead_tuan89",
             0,
             "Nhóm 5 (@tuan89.site · Miền blacklist trực tiếp)",
-            "Phôi phế phẩm (@tuan89.site) — Tuyệt đối không gắn proxy chính",
+            (
+                "Đã sống thực tế qua 30 ngày (Đã gỡ trần 12đ) · Vẫn giữ cách ly IP, không bấm Referral"
+                if verified_30d
+                else "Dưới 30 ngày / chưa xác thực giữ trần 12đ · Tuyệt đối không gắn proxy chính"
+            ),
         )
 
     if (
@@ -473,7 +482,11 @@ def _classify_profile_lineage(
             "red_taint",
             2,
             "Báo động Đỏ (Dính +19376123124 / Gốc @tuan89.site)",
-            "Giữ trần cứng 44đ · Chỉ dùng cách ly, tuyệt đối không bấm Referral",
+            (
+                "Đã sống qua 30 ngày (Đã gỡ trần 44đ) · Giữ cách ly IP, không bấm Referral"
+                if eff_acc_age >= 30.0
+                else "Dưới 30 ngày giữ trần 44đ (Sống qua 30d tự gỡ trần) · Không bấm Referral"
+            ),
         )
 
     if (
@@ -491,7 +504,11 @@ def _classify_profile_lineage(
             "orange_mutation",
             8,
             "Di sản Đổi mail 2 tầng / Spam SĐT (18/10–22/10)",
-            "Giữ trần 75đ (❖ Bền vững) cho đến khi sống > 3 tháng (90d+)",
+            (
+                "Đã sống qua 30 ngày — Không còn giới hạn trần điểm do cách tạo"
+                if eff_acc_age >= 30.0
+                else "Qua mốc 30 ngày tuổi mở thẳng lên trần ◆ Tin cậy (89đ) như phôi chuẩn"
+            ),
         )
 
     if (
@@ -547,8 +564,15 @@ def _compute_stage_cap_and_code(
     ):
         return 0, "stage_0_empty", "Hồ sơ trống chưa khởi tạo phiên trình duyệt (0đ)"
 
-    if lineage_tier == "dead_tuan89":
-        return 12, "stage_0_tuan89", "Nhóm 5 (@tuan89.site) — Phôi phế phẩm (Trần 12đ)"
+    is_verified_30d_survivor = (
+        eff_acc_age >= 30.0 and (hatch_gw or has_muse_auth) and eff_datr_age > 0.0
+    )
+    if lineage_tier == "dead_tuan89" and not is_verified_30d_survivor:
+        return (
+            12,
+            "stage_0_tuan89",
+            "Nhóm 5 (@tuan89.site) — Dưới 30 ngày / Chưa xác thực sống (Trần 12đ)",
+        )
 
     if eff_acc_age < 3.0:
         return 20, "stage_0_under_3d", "Mới tạo < 3 ngày — Vùng quét hậu kiểm T+48h (Trần 20đ)"
@@ -562,11 +586,11 @@ def _compute_stage_cap_and_code(
             "Chưa hoàn tất xác thực cổng Muse / Meta OIDC (Trần 20đ)",
         )
 
-    if lineage_tier == "red_taint":
+    if lineage_tier == "red_taint" and eff_acc_age < 30.0:
         return (
             44,
             "stage_1_red_taint",
-            "Báo động Đỏ — Dính +19376123124 / Gốc @tuan89 (Trần cứng 44đ)",
+            "Báo động Đỏ (< 30 ngày) — Dính +19376123124 / Gốc @tuan89 (Trần 44đ · Qua 30d tự gỡ)",
         )
 
     if eff_datr_age <= 0.0:
@@ -606,13 +630,6 @@ def _compute_stage_cap_and_code(
             75,
             "stage_3_21d_to_30d",
             "Giai đoạn 3 — ❖ Bền vững 21–29 ngày tuổi (Hướng tới mốc > 1 tháng · Trần 75đ)",
-        )
-
-    if lineage_tier == "orange_mutation" and eff_acc_age < 90.0:
-        return (
-            75,
-            "stage_3_orange_cap",
-            "Di sản đổi mail 2 tầng — Giữ trần 75đ đến khi sống > 3 tháng (90d+)",
         )
 
     if eff_acc_age < 90.0:
@@ -1071,7 +1088,7 @@ def compute_trust_breakdown(
                 "passed": clean_env and (sess_exp_days is None or sess_exp_days >= 0),
             },
         ]
-    elif stage_code in ("stage_3_21d_to_30d", "stage_3_orange_cap"):
+    elif stage_code == "stage_3_21d_to_30d":
         next_tier_title = (
             "Điều kiện mở trần 75đ → Hạng ◆ Tin cậy (76–89đ · Sống > 1 tháng / 30d+)"
         )
@@ -1082,9 +1099,9 @@ def compute_trust_breakdown(
                 "passed": eff_acc_age >= 30.0,
             },
             {
-                "label": "Không dính vết Đổi mail 2 tầng (Orange cần ≥ 90d)",
-                "current": "Vết 18–22/10" if lineage_tier == "orange_mutation" else "Phôi sạch",
-                "passed": lineage_tier != "orange_mutation" or eff_acc_age >= 90.0,
+                "label": "Định danh thiết bị OIDC ổn định (datr ≥ 7 ngày)",
+                "current": f"{eff_datr_age:.1f}/7 ngày",
+                "passed": eff_datr_age >= 7.0,
             },
             {
                 "label": "Giữ nguyên Proxy/Quốc gia & Phiên hatch_sess còn hạn",
@@ -1125,6 +1142,9 @@ def compute_trust_breakdown(
         next_tier_title = (
             "Điều kiện vượt trần 20đ/44đ → Hạng ◈ Ổn định (45–61đ · Đã login & Qua mốc 7 ngày)"
         )
+        is_verified_30d_survivor = (
+            eff_acc_age >= 30.0 and (bool(info.hatch_gw) or has_muse_auth) and eff_datr_age > 0.0
+        )
         gates = [
             {
                 "label": "Tuổi phôi ≥ 3 ngày (Vượt cửa sổ hậu kiểm T+48h)",
@@ -1142,9 +1162,21 @@ def compute_trust_breakdown(
                 "passed": eff_datr_age >= 7.0,
             },
             {
-                "label": "Không dính Báo động Đỏ (+19376123124 / @tuan89.site)",
-                "current": "Cần cách ly" if lineage_tier in ("red_taint", "dead_tuan89") else "Sạch",
-                "passed": lineage_tier not in ("red_taint", "dead_tuan89"),
+                "label": "Phôi sạch hoặc đã sống qua 30 ngày (Gỡ trần phôi gốc)",
+                "current": (
+                    f"Chờ đủ 30d ({eff_acc_age:.0f}/30d)"
+                    if lineage_tier in ("red_taint", "dead_tuan89") and eff_acc_age < 30.0
+                    else (
+                        "Chưa mở xác thực"
+                        if lineage_tier == "dead_tuan89" and not is_verified_30d_survivor
+                        else "Đạt chuẩn"
+                    )
+                ),
+                "passed": (
+                    lineage_tier not in ("red_taint", "dead_tuan89")
+                    or (lineage_tier == "red_taint" and eff_acc_age >= 30.0)
+                    or is_verified_30d_survivor
+                ),
             },
         ]
 

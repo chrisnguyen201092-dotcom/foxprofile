@@ -7,6 +7,12 @@ try:
 except ImportError:
     pass
 
+# Cap NumPy/OpenBLAS background thread pools inherited by profile runner subprocesses.
+# Importing camoufox pulls in numpy/OpenBLAS, which otherwise spawns N-1 idle worker
+# threads and pre-commits ~32 MB of virtual memory per thread on multi-core Windows CPUs.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 
 def _env(key: str, default: str) -> str:
     """Read the FOXPROFILE_<key> environment variable."""

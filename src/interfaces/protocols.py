@@ -27,6 +27,8 @@ class IProfileManager(Protocol):
         password: str | None = None,
         two_fa: str | None = None,
         recovery_email: str | None = None,
+        mail_token: str | None = None,
+        acc_no: str | None = None,
     ) -> bool: ...
 
     def update_profile(
@@ -47,6 +49,8 @@ class IProfileManager(Protocol):
         new_password: Any = ...,
         new_two_fa: Any = ...,
         new_recovery_email: Any = ...,
+        new_mail_token: Any = ...,
+        new_acc_no: Any = ...,
     ) -> bool: ...
 
     def move_profile(self, name: str, direction: int) -> bool: ...
@@ -107,6 +111,8 @@ class IProfileManager(Protocol):
     ) -> bool: ...
 
     def update_profile_email(self, name: str, email: str | None) -> bool: ...
+
+    def update_profile_acc_no(self, name: str, acc_no: str | None) -> bool: ...
 
     def update_profile_credentials(
         self,

@@ -3,6 +3,7 @@ import contextlib
 import json
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
@@ -13,9 +14,16 @@ from ...core.strings import get_string
 from ...models.profile import Profile
 from .control import TOKEN_HEADER
 from .process import spawn_browser, terminate, wait_for_exit
-from .window_title import arrange_browser_windows, focus_browser_window, switch_browser_window
+from .window_title import (
+    arrange_browser_windows,
+    focus_browser_window,
+    switch_browser_window,
+    trim_runner_wrapper_memory,
+)
 
 logger = get_logger("browser.launcher")
+
+_WRAPPER_TRIM_DELAY_SECONDS = 6.0
 
 _NOISY_PREFIXES = (
     "- [pid=",
@@ -170,7 +178,15 @@ class BrowserLauncher:
 
                 threading.Thread(
                     target=self._monitor_process,
-                    args=(proc, profile.name, log_callback, on_ready, notify_stopped, result),
+                    args=(
+                        proc,
+                        profile.name,
+                        log_callback,
+                        on_ready,
+                        notify_stopped,
+                        result,
+                        stop_event,
+                    ),
                     daemon=True,
                 ).start()
                 threading.Thread(
@@ -294,6 +310,27 @@ class BrowserLauncher:
             self._controls.pop(profile_name, None)
             return False
 
+    def _schedule_wrapper_trim(
+        self,
+        proc: subprocess.Popen,
+        stop_event: threading.Event | None,
+    ) -> None:
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return
+
+        def _delayed_trim() -> None:
+            if stop_event is not None:
+                if stop_event.wait(_WRAPPER_TRIM_DELAY_SECONDS):
+                    return
+            else:
+                time.sleep(_WRAPPER_TRIM_DELAY_SECONDS)
+            if proc.poll() is not None or (stop_event is not None and stop_event.is_set()):
+                return
+            trim_runner_wrapper_memory(pid)
+
+        threading.Thread(target=_delayed_trim, daemon=True).start()
+
     def _monitor_process(
         self,
         proc: subprocess.Popen,
@@ -302,6 +339,7 @@ class BrowserLauncher:
         on_ready: Callable[[], None] | None,
         notify_stopped: Callable[[], None],
         result: _LaunchResult,
+        stop_event: threading.Event | None = None,
     ) -> None:
         ready_notified = False
         try:
@@ -323,6 +361,7 @@ class BrowserLauncher:
                         ready_notified = True
                         if on_ready:
                             on_ready()
+                        self._schedule_wrapper_trim(proc, stop_event)
                     log_callback(get_string("browser_started"))
                     logger.info("Browser started for profile: %s", name)
                     continue

@@ -19,6 +19,8 @@ from ...utils.totp import (
     parse_mail_credentials_line,
 )
 from ...utils.validation import (
+    normalize_acc_no,
+    validate_acc_no,
     validate_color,
     validate_email,
     validate_group,
@@ -61,6 +63,13 @@ def open_profile_dialog(
     save_label = get_string("save_changes") if is_edit else get_string("create_profile_btn")
     save_icon = ft.Icons.SAVE if is_edit else ft.Icons.ADD
 
+    acc_no_field = ft.TextField(
+        value=(getattr(profile, "acc_no", None) or "") if profile is not None else "",
+        hint_text=get_string("acc_no_hint"),
+        text_style=_DATA,
+        text_align=ft.TextAlign.CENTER,
+        **DLG_FIELD_KWARGS,
+    )
     name_field = ft.TextField(
         value=profile.name if profile is not None else "",
         hint_text="" if profile is not None else get_string("enter_profile_name"),
@@ -445,6 +454,7 @@ def open_profile_dialog(
     )
 
     def on_submit(_: ft.ControlEvent) -> None:
+        raw_acc_no = (acc_no_field.value or "").strip()
         name = (name_field.value or "").strip()
         email = existing_email
         password = (password_field.value or "").strip()
@@ -458,6 +468,14 @@ def open_profile_dialog(
         timezone = (timezone_field.value or "").strip()
         locale = (locale_field.value or "").strip()
         name_error.visible = proxy_error.visible = geo_error.visible = False
+
+        valid_acc, acc_err = validate_acc_no(raw_acc_no)
+        if not valid_acc:
+            name_error.value = acc_err
+            name_error.visible = True
+            page.update()
+            return
+        acc_no = normalize_acc_no(raw_acc_no)
 
         valid_name, name_err = validate_profile_name(name)
         if not valid_name:
@@ -498,7 +516,26 @@ def open_profile_dialog(
         has_varargs = any(
             p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()
         )
-        if has_varargs or len(sig.parameters) >= 15:
+        if has_varargs or len(sig.parameters) >= 16:
+            error = on_save(
+                name,
+                proxy,
+                os_type,
+                timezone,
+                locale,
+                engine,
+                selected_color[0],
+                group or None,
+                notes or None,
+                selected_status[0],
+                email or None,
+                password or None,
+                two_fa or None,
+                recovery_email or None,
+                existing_mail_token or None,
+                acc_no,
+            )
+        elif len(sig.parameters) >= 15:
             error = on_save(
                 name,
                 proxy,
@@ -654,6 +691,10 @@ def open_profile_dialog(
                         spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.START,
                         controls=[
+                            ft.Container(
+                                width=96,
+                                content=_field(get_string("acc_no_optional"), acc_no_field),
+                            ),
                             ft.Container(
                                 expand=3,
                                 content=_field(get_string("profile_name"), name_field),

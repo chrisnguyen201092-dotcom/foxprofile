@@ -31,7 +31,9 @@ from ...utils.totp import (
     parse_mail_credentials_line,
 )
 from ...utils.validation import (
+    normalize_acc_no,
     valid_or_none,
+    validate_acc_no,
     validate_color,
     validate_email,
     validate_group,
@@ -49,6 +51,13 @@ from .transfer import export_to_zip, import_from_zip, read_profile_meta
 
 logger = get_logger("profile.manager")
 _UNSET = object()
+
+
+def _clean_acc_no(raw: object) -> str | None:
+    norm = normalize_acc_no(raw)
+    if norm is None or not validate_acc_no(norm)[0]:
+        return None
+    return norm
 
 
 def _engine_or_default(value: object) -> str:
@@ -421,6 +430,7 @@ class ProfileManager:
                                 p_data.get("mail_token"),
                                 validate_mail_token,
                             ),
+                            "acc_no": _clean_acc_no(p_data.get("acc_no")),
                         }
                         self.profiles[name] = Profile(**clean_data)
                     # Auto-enrich legacy schedule tags (e.g. T2-C1 -> T2-C1-S / T2-C7-T) with shift suffix:
@@ -531,6 +541,7 @@ class ProfileManager:
                                 p_data.get("mail_token"),
                                 validate_mail_token,
                             ),
+                            acc_no=_clean_acc_no(p_data.get("acc_no")),
                         )
                         merged += 1
                     continue
@@ -653,7 +664,10 @@ class ProfileManager:
         two_fa: str | None = None,
         recovery_email: str | None = None,
         mail_token: str | None = None,
+        acc_no: str | None = None,
     ) -> bool:
+        if acc_no is not None and not validate_acc_no(acc_no)[0]:
+            return False
         with self._lock:
             if self._find_by_casefold(name) is not None:
                 return False
@@ -689,6 +703,7 @@ class ProfileManager:
                 two_fa=normalize_totp_secret(valid_or_none(two_fa, validate_two_fa)) or None,
                 recovery_email=valid_or_none(recovery_email, validate_email),
                 mail_token=valid_or_none(mail_token, validate_mail_token),
+                acc_no=normalize_acc_no(acc_no) if acc_no is not None else None,
             )
             self.save_profiles()
             logger.info("Created profile: %s", name)
@@ -713,8 +728,18 @@ class ProfileManager:
         new_two_fa: object = _UNSET,
         new_recovery_email: object = _UNSET,
         new_mail_token: object = _UNSET,
+        new_acc_no: object = _UNSET,
     ) -> bool:
         """Replace every field; a None/empty timezone or locale means automatic."""
+        norm_acc_no: str | None = None
+        if new_acc_no is not _UNSET:
+            if isinstance(new_acc_no, str):
+                if not validate_acc_no(new_acc_no)[0]:
+                    return False
+                norm_acc_no = normalize_acc_no(new_acc_no)
+            elif new_acc_no is not None:
+                return False
+
         with self._lock:
             if original_name not in self.profiles:
                 return False
@@ -800,6 +825,8 @@ class ProfileManager:
                     new_mail_token if isinstance(new_mail_token, str) else None,
                     validate_mail_token,
                 )
+            if new_acc_no is not _UNSET:
+                profile.acc_no = norm_acc_no
             if not profile.created_at:
                 profile.created_at = self._infer_created_at(new_name)
             self._sync_ban_state(profile, was_banned=was_banned)
@@ -1116,6 +1143,7 @@ class ProfileManager:
                     p_data.get("mail_token"),
                     validate_mail_token,
                 ),
+                acc_no=_clean_acc_no(p_data.get("acc_no")),
             )
             self._save_trash_dict(trash_data)
             self.save_profiles()
@@ -1262,6 +1290,19 @@ class ProfileManager:
             if p is None:
                 return False
             p.email = clean_email
+            self.save_profiles()
+            return True
+
+    def update_profile_acc_no(self, name: str, acc_no: str | None) -> bool:
+        raw = acc_no if isinstance(acc_no, str) else ("" if acc_no is None else str(acc_no))
+        if raw and not validate_acc_no(raw)[0]:
+            return False
+        clean_acc_no = normalize_acc_no(raw)
+        with self._lock:
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            p.acc_no = clean_acc_no
             self.save_profiles()
             return True
 
@@ -1782,6 +1823,7 @@ class ProfileManager:
             "two_fa",
             "recovery_email",
             "mail_token",
+            "acc_no",
         ]
         with self._lock:
             selected_set = set(names) if names is not None else None
@@ -1797,6 +1839,7 @@ class ProfileManager:
                 writer.writerow(
                     {
                         "name": p.name,
+                        "acc_no": p.acc_no or "",
                         "email": p.email or "",
                         "password": p.password or "",
                         "two_fa": p.two_fa or "",
@@ -1893,6 +1936,8 @@ class ProfileManager:
                     str(row.get("mail_token") or "").strip(),
                     validate_mail_token,
                 )
+                has_acc_col = "acc_no" in row and row.get("acc_no") is not None
+                acc_val = _clean_acc_no(row.get("acc_no"))
                 has_created_col = "created_at" in row and row.get("created_at") is not None
                 created_val = parse_flexible_date(row.get("created_at"))
                 has_banned_col = "banned_at" in row and row.get("banned_at") is not None
@@ -1923,6 +1968,8 @@ class ProfileManager:
                         cur.recovery_email = rec_val
                     if has_tok_col:
                         cur.mail_token = tok_val
+                    if has_acc_col:
+                        cur.acc_no = acc_val
                     if has_pinned_col:
                         cur.pinned = pinned_val
                     if canonical_pages:
@@ -1966,6 +2013,7 @@ class ProfileManager:
                         two_fa=two_fa_val,
                         recovery_email=rec_val,
                         mail_token=tok_val,
+                        acc_no=acc_val,
                     )
                     created += 1
             if created or updated:
@@ -2104,6 +2152,7 @@ class ProfileManager:
                         or (b_data.get("timezone") or None) != cur.timezone
                         or (b_data.get("locale") or None) != cur.locale
                         or (b_data.get("color") or None) != cur.color
+                        or _clean_acc_no(b_data.get("acc_no")) != cur.acc_no
                     ):
                         changed += 1
             return {
@@ -2194,6 +2243,7 @@ class ProfileManager:
                         p_data.get("mail_token"),
                         validate_mail_token,
                     ),
+                    acc_no=_clean_acc_no(p_data.get("acc_no")),
                 )
                 if existing_key is None or self.profiles[existing_key].to_dict() != prof.to_dict():
                     updated_count += 1

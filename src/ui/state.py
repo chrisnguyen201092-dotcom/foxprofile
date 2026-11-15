@@ -29,6 +29,8 @@ class AppState:
         self._selection_lock = threading.Lock()
         self.last_selected_name: str | None = None
         self.shift_down: bool = False
+        self.editing_acc_no: str | None = None
+        self.hovered_profile: str | None = None
         self.editing_note: str | None = None
         self.editing_email: str | None = None
         self.editing_proxy: str | None = None

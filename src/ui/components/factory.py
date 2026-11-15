@@ -9,6 +9,7 @@ from ..theme.colors import COLORS, FONT_DATA, FONT_MEDIUM, FONT_SEMIBOLD
 
 _SORT_CATEGORIES = (
     ("custom", "sort_cat_custom", ft.Icons.DRAG_INDICATOR_ROUNDED, ("custom",)),
+    ("acc_no", "sort_cat_acc_no", ft.Icons.NUMBERS_ROUNDED, ("acc_no_asc", "acc_no_desc")),
     ("schedule", "sort_cat_schedule", ft.Icons.CALENDAR_MONTH_ROUNDED, ("schedule",)),
     (
         "cooldown",
@@ -28,6 +29,8 @@ _SORT_CATEGORIES = (
 )
 
 _SORT_DIR_KEY_MAP = {
+    "acc_no_asc": "sort_dir_acc_no_asc",
+    "acc_no_desc": "sort_dir_acc_no_desc",
     "cooldown_desc": "sort_dir_cooldown_desc",
     "cooldown_asc": "sort_dir_cooldown_asc",
     "trust_desc": "sort_dir_trust_desc",
@@ -39,6 +42,8 @@ _SORT_DIR_KEY_MAP = {
 }
 
 _SORT_FLIP_MAP = {
+    "acc_no_asc": "acc_no_desc",
+    "acc_no_desc": "acc_no_asc",
     "cooldown_desc": "cooldown_asc",
     "cooldown_asc": "cooldown_desc",
     "trust_desc": "trust_asc",

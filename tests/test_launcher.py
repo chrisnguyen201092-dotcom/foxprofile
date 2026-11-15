@@ -1,4 +1,10 @@
+import importlib
+import io
+import os
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
 
@@ -145,3 +151,136 @@ def test_api_launch_answers_409_when_the_browser_appeared_meanwhile(tmp_path, mo
 
     assert r.status_code == 409
     assert r.json()["detail"] == "Browser already running"
+
+
+class _FakeStdoutProc:
+    def __init__(self, pid: int, lines: list[str]) -> None:
+        self.pid = pid
+        self.stdout = io.StringIO("".join(f"{line}\n" for line in lines))
+        self.terminated = False
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout=None) -> int:
+        self.terminated = True
+        return 0
+
+
+def test_config_sets_single_thread_openblas_env(monkeypatch):
+    import src.core.config as config_mod
+    from src.services.browser import process
+
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    importlib.reload(config_mod)
+
+    assert os.environ.get("OPENBLAS_NUM_THREADS") == "1"
+    assert os.environ.get("OMP_NUM_THREADS") == "1"
+
+    captured = {}
+    monkeypatch.setattr(process.subprocess, "Popen", lambda args, **kw: captured.update(kw))
+    process.spawn_browser(Profile(name="p"))
+    assert captured["env"].get("OPENBLAS_NUM_THREADS") == "1"
+    assert captured["env"].get("OMP_NUM_THREADS") == "1"
+
+
+def test_browser_started_triggers_delayed_wrapper_trim(monkeypatch):
+    proc = _FakeStdoutProc(12345, ["CONTROL:9999:tok", "BROWSER_STARTED"])
+    trimmed: list[int] = []
+    called = threading.Event()
+
+    monkeypatch.setattr(launcher_mod, "spawn_browser", lambda _profile: proc)
+    monkeypatch.setattr(launcher_mod, "wait_for_exit", lambda *a: None)
+    monkeypatch.setattr(launcher_mod, "_WRAPPER_TRIM_DELAY_SECONDS", 0.01)
+
+    def fake_trim(pid: int) -> int:
+        trimmed.append(pid)
+        called.set()
+        return 1
+
+    monkeypatch.setattr(launcher_mod, "trim_runner_wrapper_memory", fake_trim)
+    b = BrowserLauncher()
+    try:
+        assert b.start_thread(Profile(name="p"), lambda _m: None) is True
+        ok, err = b.wait_for_launch("p", timeout=2.0)
+        assert ok is True
+        assert err is None
+        assert called.wait(timeout=2.0)
+        assert trimmed == [12345]
+    finally:
+        b._active_sessions.clear()
+
+
+def test_wrapper_trim_skipped_when_stopped_before_delay(monkeypatch):
+    # Case 1: stopped cleanly before the trim delay expires
+    proc_stop = _FakeStdoutProc(22345, ["CONTROL:9999:tok", "BROWSER_STARTED"])
+    trimmed: list[int] = []
+
+    monkeypatch.setattr(launcher_mod, "spawn_browser", lambda _profile: proc_stop)
+    monkeypatch.setattr(launcher_mod, "wait_for_exit", lambda *a: None)
+    monkeypatch.setattr(launcher_mod, "terminate", lambda p, *_a: p.terminate())
+    monkeypatch.setattr(launcher_mod, "_WRAPPER_TRIM_DELAY_SECONDS", 2.0)
+    monkeypatch.setattr(
+        launcher_mod,
+        "trim_runner_wrapper_memory",
+        lambda pid: (trimmed.append(pid), 1)[1],
+    )
+    b = BrowserLauncher()
+    try:
+        assert b.start_thread(Profile(name="p1"), lambda _m: None) is True
+        ok, _ = b.wait_for_launch("p1", timeout=2.0)
+        assert ok is True
+        assert b.stop_profile("p1") is True
+        time.sleep(0.05)
+        assert trimmed == []
+
+        # Case 2: launch fails before BROWSER_STARTED
+        proc_fail = _FakeStdoutProc(22346, ["LAUNCH_FAILED: bad proxy"])
+        monkeypatch.setattr(launcher_mod, "spawn_browser", lambda _profile: proc_fail)
+        monkeypatch.setattr(launcher_mod, "_WRAPPER_TRIM_DELAY_SECONDS", 0.01)
+        assert b.start_thread(Profile(name="p2"), lambda _m: None) is True
+        ok_fail, err_fail = b.wait_for_launch("p2", timeout=2.0)
+        assert ok_fail is False
+        assert "bad proxy" in (err_fail or "")
+        time.sleep(0.05)
+        assert trimmed == []
+    finally:
+        b._active_sessions.clear()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 working set trimming")
+def test_trim_runner_wrapper_memory_win32_safety():
+    from src.services.browser.window_title import trim_runner_wrapper_memory
+
+    assert trim_runner_wrapper_memory(0) == 0
+    assert trim_runner_wrapper_memory(-1) == 0
+    assert trim_runner_wrapper_memory(True) == 0  # type: ignore[arg-type]
+    assert trim_runner_wrapper_memory(os.getpid()) == 0
+    assert trim_runner_wrapper_memory(999_999_999) == 0
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; buf = bytearray(20 * 1024 * 1024); print('READY', flush=True); sys.stdin.read()",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "READY"
+        assert child.poll() is None
+        trimmed = trim_runner_wrapper_memory(child.pid)
+        assert 1 <= trimmed <= 2
+    finally:
+        if child.stdin is not None:
+            child.stdin.close()
+        if child.stdout is not None:
+            child.stdout.close()
+        child.wait(timeout=5)
