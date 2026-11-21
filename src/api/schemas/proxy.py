@@ -32,6 +32,26 @@ class ProxyPoolAssignRequest(BaseModel):
         None,
         description="Or replace an existing proxy / port (e.g. ':44200') across all stopped profiles",
     )
+    force: bool = Field(
+        False,
+        description="Bypass 72h freeze, ASN firewall, or active-session port lock",
+    )
+
+
+class ProxyQuarantineSwapRequest(BaseModel):
+    old_target: str = Field(
+        ...,
+        description="Proxy string, host:port endpoint, or :port to quarantine and replace",
+    )
+    new_proxy: str | None = Field(
+        None,
+        description="Optional replacement proxy; auto-selects cleanest unburned pool spare if omitted",
+    )
+    reason: str = Field("burned", description="Quarantine reason tag")
+    force: bool = Field(
+        False,
+        description="Bypass 72h freeze or active-session check if explicitly intended",
+    )
 
 
 class GeoCheckRequest(BaseModel):

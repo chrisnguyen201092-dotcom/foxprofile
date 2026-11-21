@@ -27,6 +27,7 @@ from ...services.monitor import (
     extract_proxy_endpoint,
     extract_proxy_port,
     is_gateway_ipv6_cluster,
+    is_high_risk_embryo_profile,
 )
 from ...services.proxy.geo_check import (
     derive_ip_metadata,
@@ -524,8 +525,14 @@ def open_proxy_pool_dialog(
     on_remove_from_pool: Callable[[str], bool] | None = None,
     on_assign_to_profile: Callable[[str, str], bool] | None = None,
     get_exit_ips: Callable[[], dict[str, str]] | None = None,
+    frozen_endpoints: dict[str, tuple[float, str]] | None = None,
+    get_clean_spares: Callable[[str], list[str]] | None = None,
+    on_quarantine_swap: Callable[[str, str | None], tuple[bool, str]] | None = None,
+    get_quarantined: Callable[[], dict[str, dict[str, str]]] | None = None,
+    on_unquarantine: Callable[[str], bool] | None = None,
 ) -> None:
     """Central Proxy Manager dialog: view all unique proxies, spare unassigned proxies, test, assign, or replace."""
+    frozen_eps = dict(frozen_endpoints or {})
     notice_text = ft.Text("", size=12.5, color=COLORS["error"], visible=False)
     stats_text = ft.Text("", size=12.5, font_family=FONT_SEMIBOLD, color=COLORS["text_sub"])
     list_col = ft.Column(spacing=6, expand=True, scroll=ft.ScrollMode.AUTO)
@@ -538,6 +545,29 @@ def open_proxy_pool_dialog(
     assigning_target: list[str | None] = [None]
     adding_open: list[bool] = [False]
     local_px_status: dict[str, tuple[str, str]] = {}
+
+    def _build_frozen_badge(px_val: str) -> ft.Container | None:
+        ep_f = extract_proxy_endpoint(px_val)
+        frz = frozen_eps.get(ep_f) if ep_f else None
+        if not frz:
+            return None
+        hrs_left, by_name = frz
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            border_radius=4,
+            bgcolor=ft.Colors.with_opacity(0.12, COLORS["error"]),
+            border=ft.Border.all(1, COLORS["error"]),
+            content=ft.Text(
+                get_string(
+                    "proxy_pool_frozen_badge",
+                    hours=f"{hrs_left:.0f}",
+                    by=by_name,
+                ),
+                size=10,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["error"],
+            ),
+        )
 
     def _check_single_proxy(px_target: str, first_prof: str | None = None) -> None:
         local_px_status[px_target] = ("checking", f"⏳ {get_string('proxy_checking')}")
@@ -870,6 +900,9 @@ def open_proxy_pool_dialog(
             f_sub_badge = _build_subnet_badge(free_px)
             if f_sub_badge is not None:
                 free_top_badges.append(f_sub_badge)
+            f_frz_badge = _build_frozen_badge(free_px)
+            if f_frz_badge is not None:
+                free_top_badges.append(f_frz_badge)
             if free_st is not None:
                 f_kind, f_msg = free_st
                 f_col = (
@@ -890,6 +923,9 @@ def open_proxy_pool_dialog(
                         ),
                     ]
                 )
+
+            free_cl = extract_proxy_cluster(free_px)
+            is_clean_usa = bool(free_cl.startswith("usa") and free_cl[3:].isdigit())
 
             def _toggle_assign(target_px: str = free_px) -> Callable[[ft.ControlEvent], None]:
                 def _cb(_: ft.ControlEvent) -> None:
@@ -912,8 +948,34 @@ def open_proxy_pool_dialog(
                 prof_name: str,
                 target_px: str = free_px,
                 port_lbl: str = free_port,
+                clean_usa: bool = is_clean_usa,
+                cl_lbl: str = free_cl,
             ) -> Callable[[ft.ControlEvent], None]:
                 def _cb(_: ft.ControlEvent) -> None:
+                    ep_chk = extract_proxy_endpoint(target_px)
+                    if ep_chk and ep_chk in frozen_eps:
+                        hrs_l, by_p = frozen_eps[ep_chk]
+                        notice_text.value = get_string(
+                            "guard_dead_port_freeze",
+                            port=port_lbl,
+                            other=by_p,
+                            hours=f"{hrs_l:.0f}",
+                        )
+                        notice_text.color = COLORS["error"]
+                        notice_text.visible = True
+                        page.update()
+                        return
+                    cand_p = prof_by_name.get(prof_name)
+                    if clean_usa and is_high_risk_embryo_profile(cand_p):
+                        notice_text.value = get_string(
+                            "proxy_pool_asn_blocked_msg",
+                            name=prof_name,
+                            cluster=cl_lbl,
+                        )
+                        notice_text.color = COLORS["error"]
+                        notice_text.visible = True
+                        page.update()
+                        return
                     if on_assign_to_profile is not None and on_assign_to_profile(
                         prof_name, target_px
                     ):
@@ -1026,9 +1088,15 @@ def open_proxy_pool_dialog(
             ]
 
             if is_assigning and profiles:
-                # Prioritize profiles without proxy, then other non-running profiles
+                # Prioritize non-disconnected profiles without proxy; exclude high-risk from clean usa* subnets
                 candidates = sorted(
-                    [p for p in profiles if p.name not in running],
+                    [
+                        p
+                        for p in profiles
+                        if p.name not in running
+                        and not _is_prof_disconnected(p)
+                        and not (is_clean_usa and is_high_risk_embryo_profile(p))
+                    ],
                     key=lambda p: (bool(p.proxy), natural_name_key(p.name)),
                 )
                 free_children.append(
@@ -1117,6 +1185,9 @@ def open_proxy_pool_dialog(
             sub_badge = _build_subnet_badge(px_str, is_retired=is_retired_px)
             if sub_badge is not None:
                 top_badges.append(sub_badge)
+            frz_badge = _build_frozen_badge(px_str)
+            if frz_badge is not None:
+                top_badges.append(frz_badge)
 
             bottom_controls: list[ft.Control] = []
             if live_members:
@@ -1222,6 +1293,39 @@ def open_proxy_pool_dialog(
 
                 return _cb
 
+            def _apply_quarantine_swap(
+                target_px: str = px_str,
+                tf: ft.TextField = replace_input,
+                live_list: list[str] = live_members,
+            ) -> Callable[[ft.ControlEvent], None]:
+                def _cb(_: ft.ControlEvent) -> None:
+                    if live_list:
+                        notice_text.value = get_string(
+                            "proxy_pool_stop_before_replace",
+                            names=", ".join(live_list),
+                        )
+                        notice_text.color = COLORS["error"]
+                        notice_text.visible = True
+                        page.update()
+                        return
+                    manual_px = (tf.value or "").strip()
+                    if manual_px and not validate_proxy_format(manual_px)[0]:
+                        tf.error = get_string("validation_invalid_proxy")
+                        page.update()
+                        return
+                    if on_quarantine_swap is None:
+                        return
+                    ok, msg = on_quarantine_swap(target_px, manual_px or None)
+                    notice_text.value = msg
+                    notice_text.color = COLORS["success"] if ok else COLORS["error"]
+                    notice_text.visible = bool(msg)
+                    if ok:
+                        editing_target[0] = None
+                    _rebuild()
+                    page.update()
+
+                return _cb
+
             def _check_this(
                 target_px: str = px_str,
                 first_prof: str = first_member,
@@ -1302,23 +1406,43 @@ def open_proxy_pool_dialog(
             ]
             if is_editing:
                 replace_input.on_submit = _apply_replace()
+                replace_controls: list[ft.Control] = [
+                    replace_input,
+                    ft.Button(
+                        get_string("proxy_pool_replace_apply"),
+                        icon=ft.Icons.CHECK,
+                        height=38,
+                        style=ACCENT_STYLE,
+                        on_click=_apply_replace(),
+                    ),
+                ]
+                if on_quarantine_swap is not None and not is_retired_px:
+                    replace_controls.append(
+                        ft.OutlinedButton(
+                            get_string("proxy_pool_quarantine_swap_btn"),
+                            icon=ft.Icons.SHIELD_OUTLINED,
+                            height=38,
+                            style=OUTLINE_STYLE,
+                            on_click=_apply_quarantine_swap(),
+                        )
+                    )
                 card_children.append(
                     ft.Row(
                         spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            replace_input,
-                            ft.Button(
-                                get_string("proxy_pool_replace_apply"),
-                                icon=ft.Icons.CHECK,
-                                height=38,
-                                style=ACCENT_STYLE,
-                                on_click=_apply_replace(),
-                            ),
-                        ],
+                        controls=replace_controls,
                     )
                 )
-                if unassigned_list:
+                spare_choices = (
+                    get_clean_spares(px_str)
+                    if get_clean_spares is not None
+                    else [
+                        sp
+                        for sp in unassigned_list
+                        if extract_proxy_endpoint(sp) not in frozen_eps
+                    ]
+                )
+                if spare_choices:
                     card_children.append(
                         ft.Column(
                             spacing=4,
@@ -1349,7 +1473,7 @@ def open_proxy_pool_dialog(
                                                 color=COLORS["accent"],
                                             ),
                                         )
-                                        for sp in unassigned_list[:12]
+                                        for sp in spare_choices[:12]
                                     ],
                                 ),
                             ],
@@ -1368,6 +1492,66 @@ def open_proxy_pool_dialog(
                     content=ft.Column(spacing=8, tight=True, controls=card_children),
                 )
             )
+
+        if get_quarantined is not None:
+            q_map = get_quarantined()
+            if q_map:
+                q_rows: list[ft.Control] = [
+                    ft.Text(
+                        get_string("proxy_pool_quarantined_title", count=len(q_map)),
+                        size=12,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["error"],
+                    )
+                ]
+                for q_ep, q_meta in sorted(q_map.items()):
+                    q_reason = str(q_meta.get("reason") or "burned")
+                    q_at = str(q_meta.get("quarantined_at") or "-")
+
+                    def _do_unq(target_ep: str = q_ep) -> Callable[[ft.ControlEvent], None]:
+                        def _cb(_: ft.ControlEvent) -> None:
+                            if on_unquarantine is not None and on_unquarantine(target_ep):
+                                _rebuild()
+                                page.update()
+
+                        return _cb
+
+                    q_rows.append(
+                        ft.Row(
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Text(
+                                    f"{q_ep} · {q_reason} ({q_at})",
+                                    size=11.5,
+                                    font_family=FONT_DATA,
+                                    color=COLORS["text_sub"],
+                                    expand=True,
+                                ),
+                                *(
+                                    [
+                                        ft.OutlinedButton(
+                                            get_string("proxy_pool_unquarantine_btn"),
+                                            height=28,
+                                            style=OUTLINE_STYLE,
+                                            on_click=_do_unq(),
+                                        )
+                                    ]
+                                    if on_unquarantine is not None
+                                    else []
+                                ),
+                            ],
+                        )
+                    )
+                list_col.controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                        border_radius=8,
+                        bgcolor=ft.Colors.with_opacity(0.06, COLORS["error"]),
+                        border=ft.Border.all(1, COLORS["error"]),
+                        content=ft.Column(spacing=6, tight=True, controls=q_rows),
+                    )
+                )
 
     _rebuild()
 
@@ -3834,6 +4018,7 @@ def open_trust_monitor_dialog(
     on_log: Callable[[str], None] | None = None,
     on_refresh_main: Callable[[], None] | None = None,
     initial_tab: str = "scores",
+    on_quarantine_swap_finding: Callable[[list[str]], tuple[bool, str]] | None = None,
 ) -> None:
     """Modal dashboard for IP Fraud Score, Account Warmup Trust Score, and Cross-Profile Audit."""
     active_tab: list[str] = ["audit" if initial_tab == "audit" else "scores"]
@@ -4171,6 +4356,55 @@ def open_trust_monitor_dialog(
                         if is_crit
                         else ft.Icons.WARNING_AMBER_ROUNDED
                     )
+                    row_ctrls: list[ft.Control] = [
+                        ft.Icon(icon, size=19, color=col),
+                        ft.Column(
+                            spacing=2,
+                            tight=True,
+                            expand=True,
+                            controls=[
+                                ft.Text(
+                                    f.title,
+                                    size=13,
+                                    font_family=FONT_SEMIBOLD,
+                                    color=COLORS["text_main"],
+                                ),
+                                ft.Text(
+                                    f.detail,
+                                    size=12,
+                                    color=COLORS["text_sub"],
+                                ),
+                            ],
+                        ),
+                    ]
+                    if (
+                        on_quarantine_swap_finding is not None
+                        and f.code == "burned_proxy"
+                        and f.profiles
+                    ):
+
+                        def _do_swap_finding(
+                            prof_names: tuple[str, ...] = tuple(f.profiles),
+                        ) -> Callable[[ft.ControlEvent], None]:
+                            def _cb(_: ft.ControlEvent) -> None:
+                                ok, msg = on_quarantine_swap_finding(list(prof_names))
+                                status_banner.value = msg
+                                status_banner.color = COLORS["success"] if ok else COLORS["error"]
+                                status_banner.visible = True
+                                _rebuild()
+                                page.update()
+
+                            return _cb
+
+                        row_ctrls.append(
+                            ft.OutlinedButton(
+                                get_string("audit_quarantine_swap_btn"),
+                                icon=ft.Icons.SWAP_HORIZ,
+                                height=32,
+                                style=OUTLINE_STYLE,
+                                on_click=_do_swap_finding(),
+                            )
+                        )
                     audit_rows.append(
                         ft.Container(
                             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
@@ -4180,27 +4414,7 @@ def open_trust_monitor_dialog(
                             content=ft.Row(
                                 spacing=10,
                                 vertical_alignment=ft.CrossAxisAlignment.START,
-                                controls=[
-                                    ft.Icon(icon, size=19, color=col),
-                                    ft.Column(
-                                        spacing=2,
-                                        tight=True,
-                                        expand=True,
-                                        controls=[
-                                            ft.Text(
-                                                f.title,
-                                                size=13,
-                                                font_family=FONT_SEMIBOLD,
-                                                color=COLORS["text_main"],
-                                            ),
-                                            ft.Text(
-                                                f.detail,
-                                                size=12,
-                                                color=COLORS["text_sub"],
-                                            ),
-                                        ],
-                                    ),
-                                ],
+                                controls=row_ctrls,
                             ),
                         )
                     )

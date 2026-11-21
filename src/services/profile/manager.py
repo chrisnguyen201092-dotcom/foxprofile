@@ -98,9 +98,13 @@ class ProfileManager:
         self.custom_pages: list[str] = []
         self.all_page_index: int = 0
         self.proxy_pool: list[str] = []
+        self.quarantined_proxies: dict[str, dict[str, str]] = {}
         self.mail_pool: list[str] = []
         self.status_tags: list[dict[str, str]] = default_status_tags()
         self._disk_mtime: float = 0.0
+        self._dirty_fields: dict[str, set[str]] = {}
+        self._dirty_deleted: set[str] = set()
+        self._dirty_order: bool = False
         self._trash_mtime: float = -1.0
         self._trash_cache: dict[str, dict] = {}
         self._purge_seq: int = 0
@@ -144,6 +148,10 @@ class ProfileManager:
         return pathlib.Path(PROFILES_FILE).with_name("proxy_pool.json")
 
     @staticmethod
+    def _quarantined_proxies_file() -> pathlib.Path:
+        return pathlib.Path(PROFILES_FILE).with_name("quarantined_proxies.json")
+
+    @staticmethod
     def _mail_pool_file() -> pathlib.Path:
         return pathlib.Path(PROFILES_FILE).with_name("mail_pool.json")
 
@@ -171,6 +179,20 @@ class ProfileManager:
             _replace(tmp, pool_path)
         except Exception as e:
             logger.exception("Error saving proxy pool: %s", e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+
+    def _save_quarantined_proxies(self) -> None:
+        qp_path = self._quarantined_proxies_file()
+        tmp = qp_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(self.quarantined_proxies, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _replace(tmp, qp_path)
+        except Exception as e:
+            logger.exception("Error saving quarantined proxies: %s", e)
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 
@@ -403,6 +425,22 @@ class ProfileManager:
                                 clean_pool.append(norm)
                     self.proxy_pool = clean_pool
 
+        qp_path = self._quarantined_proxies_file()
+        if qp_path.exists():
+            with contextlib.suppress(Exception):
+                raw_qp = json.loads(qp_path.read_text(encoding="utf-8"))
+                if isinstance(raw_qp, dict):
+                    clean_qp: dict[str, dict[str, str]] = {}
+                    for k, v in raw_qp.items():
+                        clean_k = str(k or "").strip().lower()
+                        if clean_k and isinstance(v, dict):
+                            clean_qp[clean_k] = {
+                                "endpoint": str(v.get("endpoint") or clean_k),
+                                "reason": str(v.get("reason") or "burned"),
+                                "quarantined_at": str(v.get("quarantined_at") or ""),
+                            }
+                    self.quarantined_proxies = clean_qp
+
         mp_path = self._mail_pool_file()
         if mp_path.exists():
             with contextlib.suppress(Exception):
@@ -545,6 +583,9 @@ class ProfileManager:
             except Exception as e:
                 logger.exception("Error loading profiles: %s", e)
 
+    def _mark_dirty(self, name: str, *fields: str) -> None:
+        self._dirty_fields.setdefault(name, set()).update(fields)
+
     def sync_credentials_from_disk(self) -> int:
         """Merge externally-updated mail/2FA credentials from PROFILES_FILE on disk into memory."""
         path = pathlib.Path(PROFILES_FILE)
@@ -570,7 +611,8 @@ class ProfileManager:
                 prof = self.profiles.get(name)
                 if prof is None:
                     if (
-                        validate_profile_name(name)[0]
+                        name not in self._dirty_deleted
+                        and validate_profile_name(name)[0]
                         and p_data.get("name") == name
                         and self._find_by_casefold(name) is None
                     ):
@@ -633,80 +675,87 @@ class ProfileManager:
                 d_color = valid_or_none(p_data.get("color"), validate_color)
                 d_group = valid_or_none(p_data.get("group"), validate_group)
                 changed = False
-                if d_created and prof.created_at != d_created:
+                dirty = self._dirty_fields.get(name, set())
+                all_dirty = "*" in dirty
+                if not all_dirty and "created_at" not in dirty and d_created and prof.created_at != d_created:
                     prof.created_at = d_created
                     changed = True
-                if d_notes and prof.notes != d_notes:
+                if not all_dirty and "notes" not in dirty and d_notes and prof.notes != d_notes:
                     prof.notes = d_notes
                     changed = True
-                if d_color and prof.color != d_color:
+                if not all_dirty and "color" not in dirty and d_color and prof.color != d_color:
                     prof.color = d_color
                     changed = True
-                if d_group and prof.group != d_group:
+                if not all_dirty and "group" not in dirty and d_group and prof.group != d_group:
                     prof.group = d_group
                     changed = True
-                if d_email and prof.email != d_email:
+                if not all_dirty and "email" not in dirty and d_email and prof.email != d_email:
                     prof.email = d_email
                     changed = True
-                if d_pass and prof.password != d_pass:
+                if not all_dirty and "password" not in dirty and d_pass and prof.password != d_pass:
                     prof.password = d_pass
                     changed = True
-                if d_2fa and prof.two_fa != d_2fa:
+                if not all_dirty and "two_fa" not in dirty and d_2fa and prof.two_fa != d_2fa:
                     prof.two_fa = d_2fa
                     changed = True
-                if d_rec and prof.recovery_email != d_rec:
+                if not all_dirty and "recovery_email" not in dirty and d_rec and prof.recovery_email != d_rec:
                     prof.recovery_email = d_rec
                     changed = True
-                if d_tok and prof.mail_token != d_tok:
+                if not all_dirty and "mail_token" not in dirty and d_tok and prof.mail_token != d_tok:
                     prof.mail_token = d_tok
                     changed = True
                 if changed:
                     merged += 1
-            disk_order = [k for k in data if k in self.profiles]
-            if len(disk_order) == len(self.profiles) and disk_order != list(self.profiles.keys()):
-                self.profiles = {k: self.profiles[k] for k in disk_order}
-                merged += 1
+            if not self._dirty_order:
+                disk_order = [k for k in data if k in self.profiles]
+                if len(disk_order) == len(self.profiles) and disk_order != list(self.profiles.keys()):
+                    self.profiles = {k: self.profiles[k] for k in disk_order}
+                    merged += 1
             self._disk_mtime = disk_mtime
         return merged
 
     def save_profiles(self) -> None:
         """Atomic write: write to a temp file then os.replace."""
         path = pathlib.Path(PROFILES_FILE)
-        with contextlib.suppress(Exception):
-            self.sync_credentials_from_disk()
-        tmp = path.with_suffix(".json.tmp")
-        try:
-            serialized = json.dumps(
-                {name: p.to_dict() for name, p in self.profiles.items()},
-                indent=4,
-            )
-            tmp.write_text(
-                serialized,
-                encoding="utf-8",
-            )
-            _replace(tmp, path)
-            with contextlib.suppress(OSError):
-                self._disk_mtime = path.stat().st_mtime
-            pages_path = self._pages_file()
-            if self.custom_pages or self.all_page_index > 0 or pages_path.exists():
-                idx = max(0, min(self.all_page_index, len(self.custom_pages)))
-                serialized_pages = (
-                    [*self.custom_pages[:idx], "__all__", *self.custom_pages[idx:]]
-                    if idx > 0
-                    else list(self.custom_pages)
+        with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
+            tmp = path.with_suffix(".json.tmp")
+            try:
+                serialized = json.dumps(
+                    {name: p.to_dict() for name, p in self.profiles.items()},
+                    indent=4,
                 )
-                pages_tmp = pages_path.with_suffix(".json.tmp")
-                pages_tmp.write_text(
-                    json.dumps(serialized_pages, indent=2),
+                tmp.write_text(
+                    serialized,
                     encoding="utf-8",
                 )
-                _replace(pages_tmp, pages_path)
-            logger.debug("Profiles saved")
-            self._write_config_backup(serialized)
-        except Exception as e:
-            logger.exception("Error saving profiles: %s", e)
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
+                _replace(tmp, path)
+                self._dirty_fields.clear()
+                self._dirty_deleted.clear()
+                self._dirty_order = False
+                with contextlib.suppress(OSError):
+                    self._disk_mtime = path.stat().st_mtime
+                pages_path = self._pages_file()
+                if self.custom_pages or self.all_page_index > 0 or pages_path.exists():
+                    idx = max(0, min(self.all_page_index, len(self.custom_pages)))
+                    serialized_pages = (
+                        [*self.custom_pages[:idx], "__all__", *self.custom_pages[idx:]]
+                        if idx > 0
+                        else list(self.custom_pages)
+                    )
+                    pages_tmp = pages_path.with_suffix(".json.tmp")
+                    pages_tmp.write_text(
+                        json.dumps(serialized_pages, indent=2),
+                        encoding="utf-8",
+                    )
+                    _replace(pages_tmp, pages_path)
+                logger.debug("Profiles saved")
+                self._write_config_backup(serialized)
+            except Exception as e:
+                logger.exception("Error saving profiles: %s", e)
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
 
     def _register_pages(self, pages: list[str] | None) -> list[str]:
         cleaned = _clean_pages(pages or [])
@@ -816,6 +865,8 @@ class ProfileManager:
                 return False
 
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             if original_name not in self.profiles:
                 return False
 
@@ -911,10 +962,13 @@ class ProfileManager:
                     (new_name if k == original_name else k): (profile if k == original_name else v)
                     for k, v in self.profiles.items()
                 }
+                self._dirty_deleted.add(original_name)
+                self._dirty_order = True
                 with contextlib.suppress(Exception):
                     avatars_dir = str(pathlib.Path(PROFILES_FILE).parent / "avatars")
                     rename_avatar(original_name, new_name, avatars_dir=avatars_dir)
 
+            self._mark_dirty(new_name, "*")
             self.save_profiles()
             logger.info("Updated profile: %s -> %s", original_name, new_name)
             return True
@@ -1053,6 +1107,7 @@ class ProfileManager:
                 return False
             keys[idx], keys[new_idx] = keys[new_idx], keys[idx]
             self.profiles = {k: self.profiles[k] for k in keys}
+            self._dirty_order = True
             self.save_profiles()
             return True
 
@@ -1069,6 +1124,7 @@ class ProfileManager:
                 if k not in seen:
                     ordered.append(k)
             self.profiles = {k: self.profiles[k] for k in ordered}
+            self._dirty_order = True
             self.save_profiles()
             return True
 
@@ -1079,6 +1135,8 @@ class ProfileManager:
             if name not in self.profiles:
                 return False
             del self.profiles[name]
+            self._dirty_deleted.add(name)
+            self._dirty_fields.pop(name, None)
             self.save_profiles()
             # Inside the lock: a profile re-created under the same (or, on a
             # case-insensitive file system, a case-variant) name must not have
@@ -1138,6 +1196,8 @@ class ProfileManager:
             now_ts = int(time.time())
             for name in target_names:
                 profile = self.profiles.pop(name)
+                self._dirty_deleted.add(name)
+                self._dirty_fields.pop(name, None)
                 entry = profile.to_dict()
                 entry["deleted_at"] = now_ts
                 trash_data[name] = entry
@@ -1298,10 +1358,13 @@ class ProfileManager:
             return 0
         count = 0
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             for name in names:
                 p = self.profiles.get(name)
                 if p is not None:
                     p.group = clean_group
+                    self._mark_dirty(name, "group")
                     count += 1
             if count:
                 self.save_profiles()
@@ -1311,10 +1374,13 @@ class ProfileManager:
         clean_color = valid_or_none(color, validate_color)
         count = 0
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             for name in names:
                 p = self.profiles.get(name)
                 if p is not None:
                     p.color = clean_color
+                    self._mark_dirty(name, "color")
                     count += 1
             if count:
                 self.save_profiles()
@@ -1332,6 +1398,7 @@ class ProfileManager:
                     was_banned = self._is_profile_banned(p)
                     p.status = clean_status
                     self._sync_ban_state(p, was_banned=was_banned)
+                    self._mark_dirty(name, "status", "banned_at")
                     count += 1
             if count:
                 self.save_profiles()
@@ -1353,6 +1420,7 @@ class ProfileManager:
                 was_banned = self._is_profile_banned(p)
                 p.status = clean_tag
                 self._sync_ban_state(p, was_banned=was_banned)
+                self._mark_dirty(name, "status", "banned_at")
                 count += 1
             if count:
                 self.save_profiles()
@@ -1365,6 +1433,7 @@ class ProfileManager:
             for p in self.profiles.values():
                 if parse_schedule_tag(p.status) is not None:
                     p.status = None
+                    self._mark_dirty(p.name, "status")
                     count += 1
             if count:
                 self.save_profiles()
@@ -1385,11 +1454,14 @@ class ProfileManager:
         if raw_banned and parsed_banned is None:
             return False
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             p = self.profiles.get(name)
             if p is None:
                 return False
             p.created_at = parsed_created or p.created_at or self._infer_created_at(name)
             p.banned_at = parsed_banned
+            self._mark_dirty(name, "created_at")
             self.save_profiles()
             return True
 
@@ -1398,10 +1470,13 @@ class ProfileManager:
         if clean_email is not None and not validate_email(clean_email)[0]:
             return False
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             p = self.profiles.get(name)
             if p is None:
                 return False
             p.email = clean_email
+            self._mark_dirty(name, "email")
             self.save_profiles()
             return True
 
@@ -1462,21 +1537,29 @@ class ProfileManager:
             if clean_notes is not None and not validate_notes(clean_notes)[0]:
                 return False
         with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
             p = self.profiles.get(name)
             if p is None:
                 return False
             if email is not _UNSET:
                 p.email = clean_email
+                self._mark_dirty(name, "email")
             if password is not _UNSET:
                 p.password = clean_pass
+                self._mark_dirty(name, "password")
             if two_fa is not _UNSET:
                 p.two_fa = clean_2fa
+                self._mark_dirty(name, "two_fa")
             if recovery_email is not _UNSET:
                 p.recovery_email = clean_rec
+                self._mark_dirty(name, "recovery_email")
             if mail_token is not _UNSET:
                 p.mail_token = clean_tok
+                self._mark_dirty(name, "mail_token")
             if notes is not _UNSET:
                 p.notes = clean_notes
+                self._mark_dirty(name, "notes")
             self.save_profiles()
             return True
 
@@ -1672,14 +1755,59 @@ class ProfileManager:
             self._save_status_tags()
             return [dict(t) for t in self.status_tags]
 
+    def list_quarantined_proxies(self) -> dict[str, dict[str, str]]:
+        with self._lock:
+            return {k: dict(v) for k, v in self.quarantined_proxies.items()}
+
+    def quarantine_proxy(self, proxy_or_endpoint: str, reason: str = "burned") -> bool:
+        """Record a burned/dead proxy endpoint in quarantine and strip it from the spare pool."""
+        raw = (proxy_or_endpoint or "").strip()
+        if not raw:
+            return False
+        ep = extract_proxy_endpoint(raw) or raw.lower()
+        with self._lock:
+            self.quarantined_proxies[ep] = {
+                "endpoint": ep,
+                "reason": (reason or "burned").strip() or "burned",
+                "quarantined_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._save_quarantined_proxies()
+            before = len(self.proxy_pool)
+            self.proxy_pool = [
+                px
+                for px in self.proxy_pool
+                if px != raw and (not ep or extract_proxy_endpoint(px) != ep)
+            ]
+            if len(self.proxy_pool) != before:
+                self._save_proxy_pool()
+            return True
+
+    def unquarantine_proxy(self, proxy_or_endpoint: str) -> bool:
+        """Remove an endpoint from the quarantine blocklist."""
+        raw = (proxy_or_endpoint or "").strip()
+        if not raw:
+            return False
+        ep = extract_proxy_endpoint(raw) or raw.lower()
+        with self._lock:
+            removed = False
+            for key in (ep, raw, raw.lower()):
+                if key and self.quarantined_proxies.pop(key, None) is not None:
+                    removed = True
+            if removed:
+                self._save_quarantined_proxies()
+            return removed
+
     def replace_proxy_across_profiles(
         self,
         old_proxy_or_port: str,
         new_proxy: str | None,
         *,
         skip_names: set[str] | None = None,
+        preserve_archived: bool = True,
+        quarantine_old: bool = False,
+        quarantine_reason: str = "replaced",
     ) -> list[str]:
-        """Replace a proxy (matched by exact string, canonical endpoint, or bare `:port`) across all attached profiles."""
+        """Replace a proxy across stopped active profiles while preserving archived forensic records."""
         target = (old_proxy_or_port or "").strip()
         if not target:
             return []
@@ -1694,22 +1822,29 @@ class ProfileManager:
         target_ep = "" if is_bare_port else extract_proxy_endpoint(target)
         skipped = set(skip_names or ())
         updated: list[str] = []
+        matched_eps: set[str] = set()
         with self._lock:
             for name, p in self.profiles.items():
                 if name in skipped:
                     continue
+                if preserve_archived and self._is_profile_banned(p):
+                    continue
                 cur = (p.proxy or "").strip()
                 if not cur:
                     continue
-                matched = (
-                    cur == target
-                    or (target_ep and extract_proxy_endpoint(cur) == target_ep)
-                    or (target_port and extract_proxy_port(cur) == target_port)
-                )
+                if is_bare_port:
+                    matched = bool(target_port and extract_proxy_port(cur) == target_port)
+                else:
+                    matched = bool(
+                        cur == target or (target_ep and extract_proxy_endpoint(cur) == target_ep)
+                    )
                 if matched:
+                    cur_ep = extract_proxy_endpoint(cur)
+                    if cur_ep:
+                        matched_eps.add(cur_ep)
                     p.proxy = clean_new or None
                     updated.append(name)
-            if updated:
+            if updated or quarantine_old:
                 self.proxy_pool = [
                     px
                     for px in self.proxy_pool
@@ -1720,6 +1855,17 @@ class ProfileManager:
                 pool_path = self._proxy_pool_file()
                 if self.proxy_pool or pool_path.exists():
                     self._save_proxy_pool()
+            if quarantine_old:
+                to_quarantine = matched_eps or ({target_ep} if target_ep else {target.lower()})
+                for q_ep in to_quarantine:
+                    if q_ep:
+                        self.quarantined_proxies[q_ep] = {
+                            "endpoint": q_ep,
+                            "reason": (quarantine_reason or "replaced").strip() or "replaced",
+                            "quarantined_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                self._save_quarantined_proxies()
+            if updated:
                 self.save_profiles()
         return updated
 
@@ -1771,7 +1917,12 @@ class ProfileManager:
                     continue
                 norm = normalize_proxy(s)
                 ep = extract_proxy_endpoint(norm)
-                if norm in existing or (ep and ep in existing_endpoints):
+                if (
+                    norm in existing
+                    or (ep and ep in existing_endpoints)
+                    or (ep and ep in self.quarantined_proxies)
+                    or norm.lower() in self.quarantined_proxies
+                ):
                     skipped += 1
                     continue
                 existing.add(norm)
@@ -2174,6 +2325,35 @@ class ProfileManager:
                 self.save_profiles()
             return changed
 
+    def refresh_profile_geo(
+        self,
+        name: str,
+        timezone: str | None,
+        locale: str | None,
+    ) -> bool:
+        """Update pinned timezone/locale on a profile after a proxy swap."""
+        clean_tz = valid_or_none(timezone, validate_timezone)
+        clean_loc = valid_or_none(locale, validate_locale)
+        if not clean_tz and not clean_loc:
+            return False
+        with self._lock:
+            with contextlib.suppress(Exception):
+                self.sync_credentials_from_disk()
+            p = self.profiles.get(name)
+            if p is None:
+                return False
+            changed = False
+            if clean_tz and p.timezone != clean_tz:
+                p.timezone = clean_tz
+                changed = True
+            if clean_loc and p.locale != clean_loc:
+                p.locale = clean_loc
+                changed = True
+            if changed:
+                self._mark_dirty(name, "*")
+                self.save_profiles()
+            return changed
+
     def batch_create_profiles(
         self,
         entries: list[tuple[str, str | None]],
@@ -2367,7 +2547,13 @@ class ProfileManager:
                     if cur_name.casefold() not in seen_lower:
                         restored_map[cur_name] = cur_prof
 
+            old_keys = set(self.profiles.keys())
             self.profiles = restored_map
+            for removed_nm in old_keys - set(restored_map.keys()):
+                self._dirty_deleted.add(removed_nm)
+            for kept_nm in restored_map:
+                self._mark_dirty(kept_nm, "*")
+            self._dirty_order = True
             self.save_profiles()
             return True, updated_count
 

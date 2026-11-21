@@ -15,10 +15,11 @@ import os
 import random
 import re
 import secrets
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
-from aiohttp import web
+if TYPE_CHECKING:
+    from aiohttp import web
 
 ALLOWED_SCHEMES = ("http", "https", "about")
 MAX_FULL_PAGE_HEIGHT = 16_384
@@ -418,6 +419,8 @@ class PageController:
 
 
 def build_app(controller: PageController, token: str) -> web.Application:
+    from aiohttp import web
+
     async def handle(request: web.Request) -> web.Response:
         if not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), token):
             return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
@@ -443,6 +446,8 @@ def build_app(controller: PageController, token: str) -> web.Application:
 
 async def serve(context: Any) -> tuple[web.AppRunner, int, str]:
     """Start the control server for a context. Returns (runner, port, token)."""
+    from aiohttp import web
+
     token = secrets.token_urlsafe(24)
     runner = web.AppRunner(build_app(PageController(context), token), access_log=None)
     await runner.setup()

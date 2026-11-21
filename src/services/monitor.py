@@ -22,6 +22,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -29,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.config import DATA_DIR, LOG_DIR
+from ..core.logging import get_logger
 from ..core.strings import get_string
 from ..models.profile import (
     Profile,
@@ -36,6 +38,7 @@ from ..models.profile import (
     has_ban_page,
     is_ban_page,
     is_ban_status,
+    parse_flexible_date,
 )
 from ..utils.totp import (
     is_gmail_address,
@@ -46,9 +49,106 @@ from ..utils.totp import (
 from .proxy.geo_check import classify_isp_type, compute_meta_ip_fraud_score
 
 PORT_COOLDOWN_MINUTES = 15
+DEAD_PORT_FREEZE_HOURS = 72.0
 TOKEN_BURST_THRESHOLD = 12
 VN_TZ = dt.timezone(dt.timedelta(hours=7))
 MAIL_AUTO_SCAN_MIN_HOUR_VN = 9
+
+logger = get_logger("monitor")
+
+
+def _replace_file(src: pathlib.Path, dst: pathlib.Path, attempts: int = 10) -> None:
+    """Atomic os.replace with Windows PermissionError retry + temp cleanup."""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                with contextlib.suppress(OSError):
+                    src.unlink(missing_ok=True)
+                raise
+            time.sleep(0.02 * (i + 1))
+        except Exception:
+            with contextlib.suppress(OSError):
+                src.unlink(missing_ok=True)
+            raise
+
+
+def is_high_risk_embryo_profile(profile: Profile | None) -> bool:
+    """Return True if profile belongs to high-risk Watch groups (3/4/5) or @tuan89 / +19376123124."""
+    if profile is None:
+        return False
+    group_low = (getattr(profile, "group", None) or "").strip().lower()
+    email_low = (getattr(profile, "email", None) or "").strip().lower()
+    notes_low = (getattr(profile, "notes", None) or "").strip().lower()
+    return bool(
+        group_low.startswith(("3.", "4.", "5."))
+        or email_low.endswith("@tuan89.site")
+        or "@tuan89.site" in notes_low
+        or "+19376123124" in notes_low
+    )
+
+
+def _is_pid_alive_since(pid: int, max_start_ts: float) -> bool:
+    """Return True if Windows process `pid` is active and started before `max_start_ts + 60s`."""
+    if sys.platform != "win32" or pid <= 0:
+        return False
+    handle = None
+    kernel32 = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetProcessTimes.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+        if not handle:
+            return False
+        exit_code = wintypes.DWORD(0)
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        if int(exit_code.value) != still_active:
+            return False
+        if max_start_ts > 0.0:
+            ct = wintypes.FILETIME()
+            et = wintypes.FILETIME()
+            kt = wintypes.FILETIME()
+            ut = wintypes.FILETIME()
+            if kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(ct),
+                ctypes.byref(et),
+                ctypes.byref(kt),
+                ctypes.byref(ut),
+            ):
+                ticks = (int(ct.dwHighDateTime) << 32) | int(ct.dwLowDateTime)
+                proc_start_ts = (ticks / 10_000_000.0) - 11_644_473_600.0
+                if proc_start_ts > float(max_start_ts) + 60.0:
+                    return False
+        return True
+    except Exception:
+        return False
+    finally:
+        if handle and kernel32 is not None:
+            with contextlib.suppress(Exception):
+                kernel32.CloseHandle(handle)
 
 _RE_PORT = re.compile(r":(\d{2,5})(?=:|$|\s|/)")
 _RE_LEGACY_PORT = re.compile(r":(\d{2,5})(?:@|$|\s|/)")
@@ -371,6 +471,18 @@ class ProfileMonitorInfo:
     has_recovery_armor: bool = False
     has_accountscenter: bool = False
     shared_port_count: int = 1
+    muse_bridge_model: str = ""
+    muse_bridge_bot: str = ""
+    muse_bridge_running: bool = False
+    muse_bridge_daily_mins: int = 0
+    muse_bridge_tripped: bool = False
+    muse_bridge_trip_reason: str = ""
+    dead_port_freeze_hours: float = 0.0
+    dead_port_freeze_by: str = ""
+    oidc_ready: bool = False
+    requires_meta_oidc: bool = False
+    oidc_subnet_drifted: bool = False
+    last_clean_mail_ts: float = 0.0
 
     def __post_init__(self) -> None:
         if self.sess_exp_days is None and self.sess_exp and self.sess_exp != "-":
@@ -393,6 +505,11 @@ class ProfileMonitorInfo:
             or self.burst_10m >= TOKEN_BURST_THRESHOLD
             or self.proxy_port_changed
             or self.ip_country_changed
+            or self.dead_port_freeze_hours > 0.0
+            or self.muse_bridge_tripped
+            or self.has_meta_checkpoint
+            or self.is_banned
+            or self.oidc_subnet_drifted
         )
 
 
@@ -1217,6 +1334,10 @@ class MonitorSnapshot:
     trusted_count: int = 0
     clean_ip_count: int = 0
     scored_ip_count: int = 0
+    muse_bridge_bound_count: int = 0
+    muse_bridge_running_names: set[str] = field(default_factory=set)
+    muse_bridge_running_gw_clusters: dict[str, int] = field(default_factory=dict)
+    frozen_endpoints: dict[str, tuple[float, str]] = field(default_factory=dict)
 
     @property
     def disk_low(self) -> bool:
@@ -1226,7 +1347,13 @@ class MonitorSnapshot:
 class MonitorService:
     """Fast mtime-cached read-only monitor for the main FoxProfile UI."""
 
-    def __init__(self, data_dir: str = DATA_DIR, log_dir: str = LOG_DIR) -> None:
+    def __init__(
+        self,
+        data_dir: str = DATA_DIR,
+        log_dir: str = LOG_DIR,
+        *,
+        muse_bridge_dir: str | pathlib.Path | None = None,
+    ) -> None:
         self._data_dir = pathlib.Path(data_dir)
         self._log_dir = pathlib.Path(log_dir)
         self._log_cache_key: tuple[tuple[str, float, int], ...] = ()
@@ -1240,7 +1367,11 @@ class MonitorService:
         self._disk_cache: dict[str, dict[str, Any]] = {}
         self._verified_closed_ts: dict[str, float] = {}
         self._disk_cache_dirty: bool = False
+        self._state_lock = threading.RLock()
+        self._log_cache_lock = threading.Lock()
         self._save_lock = threading.Lock()
+        self._save_seq: int = 0
+        self._written_seq: int = 0
         self._last_free_gb_ts: float = 0.0
         self._free_gb: float = 0.0
         self._cooldown_minutes: int = PORT_COOLDOWN_MINUTES
@@ -1252,13 +1383,35 @@ class MonitorService:
         self._last_pairings: list[list[str]] = []
         self._last_shifts: dict[str, str] = {}
         self._schedule_cycle_days: int = 5
+        self._schedule_mode: str = "keepalive"
         self._fixed_work_squads: dict[str, list[str]] = {}
         self._sort_by: str = "custom"
         self._last_mail_scan_ts: float = 0.0
         self._last_aborted_mail_scan_ts: float = 0.0
         self._mail_checkpoint_hits: dict[str, dict[str, str]] = {}
         self._mail_dead_tokens: set[str] = set()
+        self._mail_clean_checked_ts: dict[str, float] = {}
+        self._muse_bridge_dir: pathlib.Path | None = self._resolve_muse_bridge_dir(
+            muse_bridge_dir
+        )
+        self._muse_bridge_cache: dict[str, Any] = {}
         self._load_settings()
+
+    def _resolve_muse_bridge_dir(
+        self,
+        explicit_dir: str | pathlib.Path | None,
+    ) -> pathlib.Path | None:
+        if explicit_dir is not None:
+            return pathlib.Path(explicit_dir)
+        env_dir = (os.environ.get("FOXPROFILE_MUSE_BRIDGE_DIR") or "").strip()
+        if env_dir:
+            return pathlib.Path(env_dir)
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return None
+        with contextlib.suppress(Exception):
+            if self._data_dir.resolve() == pathlib.Path(DATA_DIR).resolve():
+                return pathlib.Path.home() / ".openmausbot" / "muse-bridge"
+        return None
 
     def _settings_file(self) -> pathlib.Path:
         return self._data_dir.parent / "monitor_settings.json"
@@ -1405,8 +1558,16 @@ class MonitorService:
                         if isinstance(k, str) and v in ("morning", "evening")
                     }
                 raw_cyc = raw.get("schedule_cycle_days")
-                if isinstance(raw_cyc, int) and 2 <= raw_cyc <= 7:
+                if isinstance(raw_cyc, int) and 2 <= raw_cyc <= 14:
                     self._schedule_cycle_days = raw_cyc
+                raw_mode = raw.get("schedule_mode")
+                if isinstance(raw_mode, str) and raw_mode.strip() in (
+                    "keepalive",
+                    "work",
+                    "pair",
+                    "incubation",
+                ):
+                    self._schedule_mode = raw_mode.strip()
                 raw_sort = raw.get("sort_by")
                 if isinstance(raw_sort, str) and raw_sort.strip():
                     self._sort_by = raw_sort.strip()
@@ -1426,7 +1587,7 @@ class MonitorService:
                         if (
                             isinstance(pname, str)
                             and isinstance(dval, dict)
-                            and dval.get("_cache_ver") == 6
+                            and dval.get("_cache_ver") == 9
                         ):
                             clean_disk[pname] = dict(dval)
                     self._disk_cache = clean_disk
@@ -1447,36 +1608,54 @@ class MonitorService:
                     self._mail_dead_tokens = {
                         str(em).strip().lower() for em in raw_dead if str(em).strip()
                     }
+                raw_clean_ts = raw.get("mail_clean_checked_ts")
+                if isinstance(raw_clean_ts, dict):
+                    self._mail_clean_checked_ts = {
+                        str(k): float(v)
+                        for k, v in raw_clean_ts.items()
+                        if isinstance(k, str) and isinstance(v, (int, float))
+                    }
 
     def _save_settings(self, *, async_write: bool = False) -> None:
         path = self._settings_file()
-        with contextlib.suppress(Exception):
+        with self._state_lock:
+            self._save_seq += 1
+            seq = self._save_seq
             payload = {
                 "cooldown_minutes": self._cooldown_minutes,
                 "last_used_ports": dict(self._last_used_ports),
                 "last_used_endpoints": dict(self._last_used_endpoints),
-                "ip_history": dict(self._ip_history),
-                "ip_scores": dict(self._ip_scores),
+                "ip_history": {k: [dict(ent) for ent in v] for k, v in self._ip_history.items()},
+                "ip_scores": {k: dict(v) for k, v in self._ip_scores.items()},
                 "session_history": {
-                    k: v[-50:] for k, v in self._live_sessions.items() if v
+                    k: [dict(item) for item in v[-50:]]
+                    for k, v in self._live_sessions.items()
+                    if v
                 },
-                "last_pairings": list(self._last_pairings),
+                "last_pairings": [list(pr) for pr in self._last_pairings],
                 "last_shifts": dict(self._last_shifts),
                 "schedule_cycle_days": self._schedule_cycle_days,
+                "schedule_mode": self._schedule_mode,
                 "sort_by": self._sort_by,
-                "fixed_work_squads": dict(self._fixed_work_squads),
+                "fixed_work_squads": {k: list(v) for k, v in self._fixed_work_squads.items()},
                 "last_mail_scan_ts": self._last_mail_scan_ts,
-                "mail_checkpoint_hits": dict(self._mail_checkpoint_hits),
+                "mail_checkpoint_hits": {
+                    k: dict(v) for k, v in self._mail_checkpoint_hits.items()
+                },
                 "mail_dead_tokens": sorted(self._mail_dead_tokens),
+                "mail_clean_checked_ts": dict(self._mail_clean_checked_ts),
                 "disk_cache": {
-                    k: v
+                    k: dict(v)
                     for k, v in self._disk_cache.items()
                     if isinstance(v, dict) and not v.get("_is_running")
                 },
             }
 
-            def _write_to_disk() -> None:
-                with self._save_lock, contextlib.suppress(Exception):
+        def _write_to_disk() -> None:
+            with self._save_lock:
+                if seq < self._written_seq:
+                    return
+                try:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     if payload["last_mail_scan_ts"] <= 0.0 and path.exists():
                         with contextlib.suppress(Exception):
@@ -1487,16 +1666,20 @@ class MonitorService:
                                     isinstance(disk_ts, (int, float))
                                     and disk_ts > payload["last_mail_scan_ts"]
                                 ):
-                                    self._last_mail_scan_ts = float(disk_ts)
+                                    with self._state_lock:
+                                        self._last_mail_scan_ts = float(disk_ts)
                                     payload["last_mail_scan_ts"] = float(disk_ts)
                     tmp = path.with_suffix(".json.tmp")
                     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-                    os.replace(tmp, path)
+                    _replace_file(tmp, path)
+                    self._written_seq = max(self._written_seq, seq)
+                except Exception as e:
+                    logger.warning("Failed to save monitor settings: %s", e)
 
-            if async_write and "PYTEST_CURRENT_TEST" not in os.environ:
-                threading.Thread(target=_write_to_disk, daemon=True).start()
-            else:
-                _write_to_disk()
+        if async_write and "PYTEST_CURRENT_TEST" not in os.environ:
+            threading.Thread(target=_write_to_disk, daemon=True).start()
+        else:
+            _write_to_disk()
 
     @property
     def last_mail_scan_ts(self) -> float:
@@ -1542,6 +1725,34 @@ class MonitorService:
             return last_vn < today_cutoff_vn
         return (cur - self._last_mail_scan_ts) >= (cooldown_hours * 3600.0)
 
+    def resolve_profile_mail_target(
+        self,
+        profile: Profile,
+        pool_token_map: dict[str, str] | None = None,
+    ) -> tuple[str, str] | None:
+        """Resolve `(email, mail_token)` for external Meta Checkpoint (CP=0) inbox probes."""
+        em = (getattr(profile, "email", None) or "").strip()
+        if not em:
+            return None
+        with self._state_lock:
+            dead_mails = set(self._mail_dead_tokens)
+        if em.lower() in dead_mails:
+            return None
+        tok_lookup = pool_token_map or {}
+        tok = (getattr(profile, "mail_token", None) or "").strip() or tok_lookup.get(
+            em.lower(), ""
+        )
+        if not tok and is_gmail_address(em):
+            tok = normalize_gmail_app_password(getattr(profile, "password", None))
+        if is_mailtemp_address(em):
+            if not tok:
+                tok = (getattr(profile, "password", None) or "").strip() or "webmail"
+            return (em, tok)
+        rt, _ = split_mail_token(tok)
+        if not rt:
+            return None
+        return (em, tok)
+
     def get_live_mail_scan_targets(
         self,
         profiles: list[Profile],
@@ -1566,23 +1777,9 @@ class MonitorService:
                 pg.casefold() in ("live", "theo dõi", "theo doi") for pg in (p.pages or [])
             ):
                 continue
-            em = (p.email or "").strip()
-            if not em or em.lower() in self._mail_dead_tokens:
-                continue
-            tok = (getattr(p, "mail_token", None) or "").strip() or tok_lookup.get(
-                em.lower(), ""
-            )
-            if not tok and is_gmail_address(em):
-                tok = normalize_gmail_app_password(getattr(p, "password", None))
-            if is_mailtemp_address(em):
-                if not tok:
-                    tok = (getattr(p, "password", None) or "").strip() or "webmail"
-                targets.append((p.name, em, tok))
-                continue
-            rt, _ = split_mail_token(tok)
-            if not rt:
-                continue
-            targets.append((p.name, em, tok))
+            resolved = self.resolve_profile_mail_target(p, tok_lookup)
+            if resolved is not None:
+                targets.append((p.name, resolved[0], resolved[1]))
         return targets
 
     def record_mail_checkpoint_hit(
@@ -1593,14 +1790,16 @@ class MonitorService:
         clean_name = (profile_name or "").strip()
         if not clean_name:
             return
-        if hit is None:
-            if self._mail_checkpoint_hits.pop(clean_name, None) is not None:
-                self._save_settings()
-            return
-        self._mail_checkpoint_hits[clean_name] = {
-            str(k): str(v) for k, v in hit.items() if v is not None
-        }
-        self._save_settings()
+        with self._state_lock:
+            if hit is None:
+                if self._mail_checkpoint_hits.pop(clean_name, None) is not None:
+                    self._save_settings()
+                return
+            self._mail_clean_checked_ts.pop(clean_name, None)
+            self._mail_checkpoint_hits[clean_name] = {
+                str(k): str(v) for k, v in hit.items() if v is not None
+            }
+            self._save_settings()
 
     def record_mail_scan(
         self,
@@ -1611,44 +1810,47 @@ class MonitorService:
         update_timestamp: bool = True,
         scan_ts: float | None = None,
     ) -> None:
-        if update_timestamp:
-            self._last_mail_scan_ts = time.time() if scan_ts is None else float(scan_ts)
-            self._last_aborted_mail_scan_ts = 0.0
-        else:
-            self._last_aborted_mail_scan_ts = (
-                time.time() if scan_ts is None else float(scan_ts)
-            )
-        if scanned_names:
-            for pname in scanned_names:
-                if pname not in hits:
-                    self._mail_checkpoint_hits.pop(pname, None)
-        for pname, hval in (hits or {}).items():
-            if pname and isinstance(hval, dict):
-                self._mail_checkpoint_hits[pname] = {
-                    str(k): str(v) for k, v in hval.items() if v is not None
-                }
-        if dead_tokens:
-            for em in dead_tokens:
-                clean_em = str(em).strip().lower()
-                if clean_em:
-                    self._mail_dead_tokens.add(clean_em)
-        self._save_settings()
+        now_clean_ts = time.time() if scan_ts is None else float(scan_ts)
+        with self._state_lock:
+            if update_timestamp:
+                self._last_mail_scan_ts = now_clean_ts
+                self._last_aborted_mail_scan_ts = 0.0
+            else:
+                self._last_aborted_mail_scan_ts = now_clean_ts
+            if scanned_names:
+                for pname in scanned_names:
+                    if pname not in hits:
+                        self._mail_checkpoint_hits.pop(pname, None)
+                        self._mail_clean_checked_ts[pname] = now_clean_ts
+            for pname, hval in (hits or {}).items():
+                if pname and isinstance(hval, dict):
+                    self._mail_clean_checked_ts.pop(pname, None)
+                    self._mail_checkpoint_hits[pname] = {
+                        str(k): str(v) for k, v in hval.items() if v is not None
+                    }
+            if dead_tokens:
+                for em in dead_tokens:
+                    clean_em = str(em).strip().lower()
+                    if clean_em:
+                        self._mail_dead_tokens.add(clean_em)
+            self._save_settings()
 
     def clear_mail_checkpoint_hits(
         self,
         names: list[str] | set[str] | None = None,
     ) -> None:
-        if names is None:
-            if self._mail_checkpoint_hits:
-                self._mail_checkpoint_hits.clear()
+        with self._state_lock:
+            if names is None:
+                if self._mail_checkpoint_hits:
+                    self._mail_checkpoint_hits.clear()
+                    self._save_settings()
+                return
+            changed = False
+            for n in names:
+                if self._mail_checkpoint_hits.pop(n, None) is not None:
+                    changed = True
+            if changed:
                 self._save_settings()
-            return
-        changed = False
-        for n in names:
-            if self._mail_checkpoint_hits.pop(n, None) is not None:
-                changed = True
-        if changed:
-            self._save_settings()
 
     @property
     def cooldown_minutes(self) -> int:
@@ -1681,6 +1883,10 @@ class MonitorService:
         return self._schedule_cycle_days
 
     @property
+    def schedule_mode(self) -> str:
+        return self._schedule_mode
+
+    @property
     def fixed_work_squads(self) -> dict[str, list[str]]:
         return {k: list(v) for k, v in self._fixed_work_squads.items()}
 
@@ -1703,6 +1909,8 @@ class MonitorService:
         pairings: list[list[str]],
         shifts: dict[str, str],
         cycle_days: int = 5,
+        *,
+        schedule_mode: str | None = None,
     ) -> None:
         """Persist the applied schedule's pairings and shifts for next-cycle anti-correlation."""
         self._last_pairings = [
@@ -1715,8 +1923,111 @@ class MonitorService:
             for k, v in (shifts or {}).items()
             if k and v in ("morning", "evening")
         }
-        self._schedule_cycle_days = max(2, min(7, int(cycle_days)))
+        self._schedule_cycle_days = max(2, min(14, int(cycle_days)))
+        if schedule_mode in ("keepalive", "work", "pair", "incubation"):
+            self._schedule_mode = schedule_mode
         self._save_settings()
+
+    def _read_json_cached(self, path: pathlib.Path) -> dict[str, Any]:
+        with contextlib.suppress(OSError, ValueError):
+            st = path.stat()
+            sig = (int(st.st_mtime_ns), int(st.st_size))
+            key = str(path)
+            cached = self._muse_bridge_cache.get(key)
+            if cached is not None and cached[0] == sig:
+                return cached[1]
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                self._muse_bridge_cache[key] = (sig, parsed)
+                return parsed
+        return {}
+
+    def _read_muse_bridge_states(self, now_ts: float) -> dict[str, dict[str, Any]]:
+        """Read MuseBridge config.json + state_<Profile>.json read-only with mtime cache."""
+        mb_dir = self._muse_bridge_dir
+        if mb_dir is None:
+            return {}
+        cfg_path = mb_dir / "config.json"
+        if not cfg_path.is_file():
+            return {}
+        cfg = self._read_json_cached(cfg_path)
+        raw_profiles = cfg.get("profiles")
+        if not isinstance(raw_profiles, dict):
+            return {}
+        midnight_ts = (
+            dt.datetime.fromtimestamp(now_ts)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for model_name, meta in raw_profiles.items():
+            if not isinstance(meta, dict):
+                continue
+            prof_name = str(meta.get("profile_name") or "").strip()
+            if not prof_name:
+                continue
+            state_path = mb_dir / f"state_{prof_name}.json"
+            st_data = self._read_json_cached(state_path) if state_path.is_file() else {}
+            runner_pid = int(st_data.get("runner_pid") or 0) if st_data else 0
+            last_launch_ts = float(st_data.get("last_launch_ts") or 0.0) if st_data else 0.0
+            running = bool(
+                runner_pid > 0 and _is_pid_alive_since(runner_pid, last_launch_ts)
+            )
+            cb = st_data.get("circuit_breaker") if st_data else None
+            tripped = bool(isinstance(cb, dict) and cb.get("tripped"))
+            trip_reason = (
+                str(cb.get("reason") or cb.get("url") or "")
+                if isinstance(cb, dict)
+                else ""
+            )
+            trip_ts = (
+                float(cb.get("ts") or 0.0)
+                if (tripped and isinstance(cb, dict))
+                else 0.0
+            )
+            today_secs = 0.0
+            last_closed_ts = 0.0
+            open_hist = st_data.get("open_history") if st_data else None
+            if isinstance(open_hist, list):
+                for item in open_hist:
+                    if not isinstance(item, (list, tuple)) or len(item) < 2:
+                        continue
+                    with contextlib.suppress(TypeError, ValueError):
+                        st_f = float(item[0] or 0.0)
+                        en_f = float(item[1] or 0.0)
+                        if en_f > last_closed_ts:
+                            last_closed_ts = en_f
+                        if en_f > midnight_ts and en_f > st_f:
+                            today_secs += max(0.0, min(en_f, now_ts) - max(st_f, midnight_ts))
+            if running and last_launch_ts > last_closed_ts:
+                today_secs += max(0.0, now_ts - max(last_launch_ts, midnight_ts))
+            bot_name = ""
+            threads = st_data.get("threads") if st_data else None
+            if isinstance(threads, dict):
+                best_upd = -1
+                for tinfo in threads.values():
+                    if not isinstance(tinfo, dict):
+                        continue
+                    bname = str(tinfo.get("bot_name") or "").strip()
+                    if not bname:
+                        continue
+                    with contextlib.suppress(TypeError, ValueError):
+                        upd = int(tinfo.get("updated_at") or 0)
+                        if upd >= best_upd:
+                            best_upd = upd
+                            bot_name = bname
+            out[prof_name] = {
+                "model": str(model_name),
+                "bot": bot_name,
+                "running": running,
+                "daily_mins": int(today_secs // 60),
+                "last_launch_ts": last_launch_ts,
+                "last_closed_ts": last_closed_ts,
+                "tripped": tripped,
+                "trip_reason": trip_reason,
+                "trip_ts": trip_ts,
+            }
+        return out
 
     def acknowledge_proxy_change(self, profile_name: str, proxy: str | None) -> None:
         port = extract_proxy_port(proxy)
@@ -1948,93 +2259,103 @@ class MonitorService:
         """Migrate monitor metadata when a profile is renamed."""
         if not old_name or not new_name or old_name == new_name:
             return
-        changed = False
-        merged_before = self._merged_completed_sessions(old_name)
-        if old_name in self._last_used_ports:
-            self._last_used_ports[new_name] = self._last_used_ports.pop(old_name)
-            changed = True
-        if old_name in self._last_used_endpoints:
-            self._last_used_endpoints[new_name] = self._last_used_endpoints.pop(old_name)
-            changed = True
-        if old_name in self._ip_history:
-            self._ip_history[new_name] = self._ip_history.pop(old_name)
-            changed = True
-        if old_name in self._live_started_at:
-            self._live_started_at[new_name] = self._live_started_at.pop(old_name)
-        if old_name in self._live_stopped_at:
-            self._live_stopped_at[new_name] = self._live_stopped_at.pop(old_name)
-        if old_name in self._live_sessions:
-            prev_sess = self._live_sessions.pop(old_name)
-            self._live_sessions.setdefault(new_name, []).extend(prev_sess)
-            changed = True
-        if merged_before and len(merged_before) > len(self._live_sessions.get(new_name, [])):
-            self._live_sessions[new_name] = list(reversed(merged_before[:50]))
-            changed = True
-        self._log_cache_key = ()
-        self._log_events_sig = ()
-        self._log_history.clear()
-        if old_name in self._disk_cache:
-            self._disk_cache[new_name] = self._disk_cache.pop(old_name)
-        self._verified_closed_ts.pop(old_name, None)
-        self._verified_closed_ts.pop(new_name, None)
-        if old_name in self._last_shifts:
-            self._last_shifts[new_name] = self._last_shifts.pop(old_name)
-            changed = True
-        for pr in self._last_pairings:
-            if len(pr) == 2:
-                if pr[0] == old_name:
-                    pr[0] = new_name
-                    changed = True
-                if pr[1] == old_name:
-                    pr[1] = new_name
-                    changed = True
-        for sq_list in self._fixed_work_squads.values():
-            for idx, m_name in enumerate(sq_list):
-                if m_name == old_name:
-                    sq_list[idx] = new_name
-                    changed = True
-        if changed:
-            self._save_settings()
-
-    def record_started(self, profile_name: str, proxy: str | None = None) -> None:
-        self._live_started_at[profile_name] = dt.datetime.now()
-        self._verified_closed_ts.pop(profile_name, None)
-        if proxy is not None:
-            port = extract_proxy_port(proxy)
-            ep = extract_proxy_endpoint(proxy)
+        with self._state_lock:
             changed = False
-            if port and self._last_used_ports.get(profile_name) != port:
-                self._last_used_ports[profile_name] = port
+            merged_before = self._merged_completed_sessions(old_name)
+            if old_name in self._last_used_ports:
+                self._last_used_ports[new_name] = self._last_used_ports.pop(old_name)
                 changed = True
-            if ep and self._last_used_endpoints.get(profile_name) != ep:
-                self._last_used_endpoints[profile_name] = ep
+            if old_name in self._last_used_endpoints:
+                self._last_used_endpoints[new_name] = self._last_used_endpoints.pop(old_name)
                 changed = True
+            if old_name in self._ip_history:
+                self._ip_history[new_name] = self._ip_history.pop(old_name)
+                changed = True
+            if old_name in self._mail_checkpoint_hits:
+                self._mail_checkpoint_hits[new_name] = self._mail_checkpoint_hits.pop(old_name)
+                changed = True
+            if old_name in self._mail_clean_checked_ts:
+                self._mail_clean_checked_ts[new_name] = self._mail_clean_checked_ts.pop(old_name)
+                changed = True
+            if old_name in self._live_started_at:
+                self._live_started_at[new_name] = self._live_started_at.pop(old_name)
+            if old_name in self._live_stopped_at:
+                self._live_stopped_at[new_name] = self._live_stopped_at.pop(old_name)
+            if old_name in self._live_sessions:
+                prev_sess = self._live_sessions.pop(old_name)
+                self._live_sessions.setdefault(new_name, []).extend(prev_sess)
+                changed = True
+            if merged_before and len(merged_before) > len(self._live_sessions.get(new_name, [])):
+                self._live_sessions[new_name] = list(reversed(merged_before[:50]))
+                changed = True
+            self._log_cache_key = ()
+            self._log_events_sig = ()
+            self._log_history.clear()
+            if old_name in self._disk_cache:
+                self._disk_cache[new_name] = self._disk_cache.pop(old_name)
+            self._verified_closed_ts.pop(old_name, None)
+            self._verified_closed_ts.pop(new_name, None)
+            if old_name in self._last_shifts:
+                self._last_shifts[new_name] = self._last_shifts.pop(old_name)
+                changed = True
+            for pr in self._last_pairings:
+                if len(pr) == 2:
+                    if pr[0] == old_name:
+                        pr[0] = new_name
+                        changed = True
+                    if pr[1] == old_name:
+                        pr[1] = new_name
+                        changed = True
+            for sq_list in self._fixed_work_squads.values():
+                for idx, m_name in enumerate(sq_list):
+                    if m_name == old_name:
+                        sq_list[idx] = new_name
+                        changed = True
             if changed:
                 self._save_settings()
 
+    def record_started(self, profile_name: str, proxy: str | None = None) -> None:
+        with self._state_lock:
+            self._live_started_at[profile_name] = dt.datetime.now()
+            self._verified_closed_ts.pop(profile_name, None)
+            if proxy is not None:
+                port = extract_proxy_port(proxy)
+                ep = extract_proxy_endpoint(proxy)
+                changed = False
+                if port and self._last_used_ports.get(profile_name) != port:
+                    self._last_used_ports[profile_name] = port
+                    changed = True
+                if ep and self._last_used_endpoints.get(profile_name) != ep:
+                    self._last_used_endpoints[profile_name] = ep
+                    changed = True
+                if changed:
+                    self._save_settings()
+
     def record_launch_failed(self, profile_name: str) -> None:
         """Discard any pending live start timestamp when a browser launch fails before opening."""
-        self._live_started_at.pop(profile_name, None)
+        with self._state_lock:
+            self._live_started_at.pop(profile_name, None)
 
     def record_stopped(self, profile_name: str) -> None:
-        now = dt.datetime.now()
-        self._live_stopped_at[profile_name] = now
-        self._verified_closed_ts.pop(profile_name, None)
-        start_dt = self._live_started_at.pop(profile_name, None)
-        if start_dt is not None:
-            dur = max(0.0, (now - start_dt).total_seconds())
-            sessions = self._live_sessions.setdefault(profile_name, [])
-            sessions.append(
-                {
-                    "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "end": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
-                    "port": self._last_used_ports.get(profile_name, ""),
-                    "is_live": False,
-                }
-            )
-            del sessions[:-50]
-            self._save_settings()
+        with self._state_lock:
+            now = dt.datetime.now()
+            self._live_stopped_at[profile_name] = now
+            self._verified_closed_ts.pop(profile_name, None)
+            start_dt = self._live_started_at.pop(profile_name, None)
+            if start_dt is not None:
+                dur = max(0.0, (now - start_dt).total_seconds())
+                sessions = self._live_sessions.setdefault(profile_name, [])
+                sessions.append(
+                    {
+                        "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_mins": max(1, round(dur / 60)) if dur >= 10 else 0,
+                        "port": self._last_used_ports.get(profile_name, ""),
+                        "is_live": False,
+                    }
+                )
+                del sessions[:-50]
+                self._save_settings()
 
     def _merged_completed_sessions(
         self,
@@ -2182,18 +2503,19 @@ class MonitorService:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return
         path = self._log_events_cache_file()
-        payload = {
-            fname: [mtime, fsize, lines]
-            for fname, (mtime, fsize, lines) in self._log_file_events_cache.items()
-            if fname in active_names
-        }
+        with self._state_lock:
+            payload = {
+                fname: [mtime, fsize, list(lines)]
+                for fname, (mtime, fsize, lines) in self._log_file_events_cache.items()
+                if fname in active_names
+            }
 
         def _bg_write() -> None:
-            with contextlib.suppress(Exception):
+            with self._log_cache_lock, contextlib.suppress(Exception):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_suffix(".json.tmp")
                 tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-                os.replace(tmp, path)
+                _replace_file(tmp, path)
 
         threading.Thread(target=_bg_write, daemon=True).start()
 
@@ -2528,7 +2850,7 @@ class MonitorService:
         if (
             not is_running
             and cached is not None
-            and cached.get("_cache_ver") == 6
+            and cached.get("_cache_ver") == 9
             and not cached.get("_is_running")
             and (
                 fast_init
@@ -2694,7 +3016,7 @@ class MonitorService:
                     cached["sess_exp"] = f"Còn {int(rem_h // 24)}d"
             if not is_running:
                 if (
-                    cached.get("_cache_ver") == 6
+                    cached.get("_cache_ver") == 9
                     and cached.get("_tabs_mtime") == tabs_mtime
                     and cached.get("_cookies_mtime") == cookies_mtime
                     and cached.get("_places_mtime") == places_mtime
@@ -2715,7 +3037,7 @@ class MonitorService:
                 return cached
 
         result: dict[str, Any] = {
-            "_cache_ver": 6,
+            "_cache_ver": 9,
             "_ts": now_ts,
             "_is_running": is_running,
             "_tabs_mtime": tabs_mtime,
@@ -2724,6 +3046,10 @@ class MonitorService:
             "_fp_mtime": fp_mtime,
             "_datr_ctime_sec": cached.get("_datr_ctime_sec", 0.0) if cached else 0.0,
             "_latest_exp_sec": cached.get("_latest_exp_sec", 0.0) if cached else 0.0,
+            "exact_hatch_sess_exp": (
+                cached.get("exact_hatch_sess_exp", 0.0) if cached else 0.0
+            ),
+            "oidc_ready": cached.get("oidc_ready", False) if cached else False,
             "has_thread_url": False,
             "tab_count": 0,
             "hatch_gw": cached.get("hatch_gw", False) if cached else False,
@@ -2913,7 +3239,10 @@ class MonitorService:
                         has_ps_l = True
                     elif cname_s == "fs" and "meta.com" in host_l:
                         has_meta_fs = True
-                    if "checkpoint" in cname_l:
+                    if "checkpoint" in cname_l and any(
+                        host_l == d or host_l.endswith(f".{d}")
+                        for d in ("meta.com", "facebook.com", "instagram.com")
+                    ):
                         has_chk_cookie = True
                     if is_hatch_host and cname_s == "__Host-hatch_one_tap":
                         has_muse_onetap = True
@@ -3016,6 +3345,12 @@ class MonitorService:
                 result["hatch_sess"] = hatch_sess
                 result["has_muse_auth"] = bool(has_muse_onetap or has_muse_native_dev)
                 result["sess_exp"] = sess_exp
+                result["exact_hatch_sess_exp"] = exact_hatch_sess_exp
+                result["oidc_ready"] = bool(
+                    not has_chk_cookie
+                    and len(datr_hosts) >= 1
+                    and (has_meta_fs or has_ps_l)
+                )
                 result["has_grecaptcha"] = has_grecaptcha
                 result["has_meta"] = has_meta
                 result["has_microsoft"] = has_microsoft
@@ -3056,10 +3391,22 @@ class MonitorService:
                 for u, rh in pl_rows:
                     u_l = str(u or "").lower()
                     rh_s = str(rh or "")
+                    parsed_u = urllib.parse.urlsplit(u_l)
+                    u_host = (parsed_u.hostname or "").lower()
+                    u_path = parsed_u.path or ""
+                    u_query = parsed_u.query or ""
+                    is_meta_chk_host = any(
+                        u_host == d or u_host.endswith(f".{d}")
+                        for d in ("meta.com", "facebook.com")
+                    )
+                    is_muse_host = u_host == "muse.ai" or u_host.endswith(".muse.ai")
                     if (
-                        "auth.meta.com/checkpoint" in u_l
-                        or "oidc/start?checkpoint=1" in u_l
-                        or "auth.meta.com/recover" in u_l
+                        is_meta_chk_host
+                        and (u_path.startswith("/checkpoint") or u_path.startswith("/recover"))
+                    ) or (
+                        is_muse_host
+                        and "/oidc/start" in u_path
+                        and "checkpoint=1" in u_query
                     ):
                         has_chk_url = True
                     if (
@@ -3124,10 +3471,11 @@ class MonitorService:
                     pass
                 result["burst_10m"] = burst_10m
 
-        self._disk_cache[name] = result
-        if not is_running:
-            self._verified_closed_ts[name] = now_ts
-            self._disk_cache_dirty = True
+        with self._state_lock:
+            self._disk_cache[name] = result
+            if not is_running:
+                self._verified_closed_ts[name] = now_ts
+                self._disk_cache_dirty = True
         return result
 
     def snapshot(
@@ -3149,6 +3497,11 @@ class MonitorService:
             self._last_free_gb_ts = now_ts
 
         hist = self._refresh_log_history()
+        mb_map = self._read_muse_bridge_states(now_ts)
+        mb_running_set: set[str] = {
+            name for name, m in mb_map.items() if m.get("running")
+        }
+        eff_running_names: set[str] = set(running_names) | mb_running_set
 
         # Group profiles by proxy endpoint (host:port) and by /64 cluster so same-branch cooldowns are tracked
         banned_names: set[str] = {
@@ -3188,7 +3541,7 @@ class MonitorService:
         sess_stats_map: dict[str, tuple[int, int, int]] = {}
         ports_seeded = False
         for p in profiles:
-            is_run = p.name in running_names
+            is_run = p.name in eff_running_names
             disk = self._inspect_profile_disk(p.name, is_run, fast_init=fast_init)
             disk_map[p.name] = disk
 
@@ -3243,6 +3596,13 @@ class MonitorService:
                 disk_dt = min(now, dt.datetime.fromtimestamp(disk_ts))
                 if lc is None or disk_dt > lc:
                     lc = disk_dt
+            mb_entry = mb_map.get(p.name)
+            if mb_entry:
+                mb_lc_ts = float(mb_entry.get("last_closed_ts") or 0.0)
+                if mb_lc_ts > 0.0 and not mb_entry.get("running"):
+                    mb_lc_dt = min(now, dt.datetime.fromtimestamp(mb_lc_ts))
+                    if lc is None or mb_lc_dt > lc:
+                        lc = mb_lc_dt
             last_closed_map[p.name] = lc
 
             secs = 0.0
@@ -3275,7 +3635,18 @@ class MonitorService:
                     secs += max(0.0, (now - today_st).total_seconds())
                 else:
                     active_dates_set.add(today_str)
-            today_mins_map[p.name] = int(secs // 60)
+            elif p.name in mb_running_set:
+                sess_cnt += 1
+                active_dates_set.add(today_str)
+            day_mins = int(secs // 60)
+            if mb_entry:
+                mb_dmins = int(mb_entry.get("daily_mins") or 0)
+                if mb_dmins > 0:
+                    day_mins = max(day_mins, mb_dmins)
+                    active_dates_set.add(today_str)
+                    if p.name not in running_names:
+                        total_all_mins = max(total_all_mins, mb_dmins)
+            today_mins_map[p.name] = day_mins
             sess_stats_map[p.name] = (
                 sess_cnt,
                 min(len(active_dates_set), sess_cnt),
@@ -3286,14 +3657,46 @@ class MonitorService:
             self._disk_cache_dirty = False
             self._save_settings(async_write=True)
 
+        frozen_endpoints: dict[str, tuple[float, str]] = {}
+        for p_frz in profiles:
+            mb_f = mb_map.get(p_frz.name)
+            mb_tripped_f = bool(mb_f and mb_f.get("tripped"))
+            if p_frz.name not in banned_names and not mb_tripped_f:
+                continue
+            ep_f = extract_proxy_endpoint(p_frz.proxy)
+            if not ep_f:
+                continue
+            death_ts = 0.0
+            if mb_tripped_f and float(mb_f.get("trip_ts") or 0.0) > 0.0:
+                death_ts = max(death_ts, float(mb_f["trip_ts"]))
+            lc_f = last_closed_map.get(p_frz.name)
+            if lc_f is not None and lc_f.timestamp() > 0.0:
+                death_ts = max(death_ts, lc_f.timestamp())
+            if p_frz.banned_at:
+                b_ymd = parse_flexible_date(p_frz.banned_at, today=now.date())
+                if b_ymd:
+                    with contextlib.suppress(ValueError):
+                        bdt = dt.date.fromisoformat(b_ymd)
+                        b_ts = min(now_ts, dt.datetime.combine(bdt, dt.time(0, 0)).timestamp())
+                        death_ts = max(death_ts, b_ts)
+            if death_ts > 0.0:
+                elapsed_h = max(0.0, (now_ts - death_ts) / 3600.0)
+                if elapsed_h < DEAD_PORT_FREEZE_HOURS:
+                    hrs_left = round(DEAD_PORT_FREEZE_HOURS - elapsed_h, 1)
+                    if ep_f not in frozen_endpoints or hrs_left > frozen_endpoints[ep_f][0]:
+                        frozen_endpoints[ep_f] = (hrs_left, p_frz.name)
+
         snap = MonitorSnapshot(
             free_gb=self._free_gb,
             total_ports=len(port_to_profiles),
+            muse_bridge_bound_count=len(mb_map),
+            muse_bridge_running_names=set(mb_running_set),
+            frozen_endpoints=dict(frozen_endpoints),
         )
 
         active_ports_set: set[str] = set()
         for ep, members in port_to_profiles.items():
-            running_on_port = [m for m in members if m in running_names]
+            running_on_port = [m for m in members if m in eff_running_names]
             if running_on_port:
                 active_ports_set.add(ep)
             if len(running_on_port) > 1:
@@ -3305,11 +3708,15 @@ class MonitorService:
         running_by_v6_64: dict[str, list[str]] = {}
         running_by_exact_ip: dict[str, list[str]] = {}
         for p_run in profiles:
-            if p_run.name not in running_names:
+            if p_run.name not in eff_running_names:
                 continue
             r_cl = extract_proxy_cluster(p_run.proxy)
             if r_cl:
                 running_by_cluster.setdefault(r_cl, []).append(p_run.name)
+                if is_gateway_ipv6_cluster(r_cl) and p_run.name in mb_running_set:
+                    snap.muse_bridge_running_gw_clusters[r_cl] = (
+                        snap.muse_bridge_running_gw_clusters.get(r_cl, 0) + 1
+                    )
             r_entries = self._ip_history.get(p_run.name, [])
             r_ip = (r_entries[0].get("ip", "") if r_entries else "").strip().lower()
             if r_ip:
@@ -3320,12 +3727,12 @@ class MonitorService:
 
         cd_target = self._cooldown_minutes
         for p in profiles:
-            is_run = p.name in running_names
+            is_run = p.name in eff_running_names
             port = extract_proxy_port(p.proxy)
             ep = extract_proxy_endpoint(p.proxy)
             cluster = extract_proxy_cluster(p.proxy)
             siblings = port_to_profiles.get(ep, [p.name]) if ep else [p.name]
-            busy_by = [m for m in siblings if m != p.name and m in running_names]
+            busy_by = [m for m in siblings if m != p.name and m in eff_running_names]
 
             lc = last_closed_map.get(p.name)
             cooldown_mins = (
@@ -3335,14 +3742,18 @@ class MonitorService:
             )
             running_mins: int | None = None
             if is_run:
-                start_dt = self._live_started_at.get(p.name) or hist.get(p.name, {}).get(
-                    "_open_start"
-                )
-                running_mins = (
-                    max(0, int((now - start_dt).total_seconds() // 60))
-                    if start_dt is not None
-                    else 0
-                )
+                if p.name not in running_names and p.name in mb_running_set:
+                    lts = float((mb_map.get(p.name) or {}).get("last_launch_ts") or 0.0)
+                    running_mins = max(0, int((now_ts - lts) // 60)) if lts > 0.0 else 0
+                else:
+                    start_dt = self._live_started_at.get(p.name) or hist.get(p.name, {}).get(
+                        "_open_start"
+                    )
+                    running_mins = (
+                        max(0, int((now - start_dt).total_seconds() // 60))
+                        if start_dt is not None
+                        else 0
+                    )
 
             # Check if a sibling on the same proxy port, exact exit IP, or /64 branch closed < cooldown_minutes ago
             port_cooldown_by: tuple[str, int] | None = None
@@ -3366,7 +3777,7 @@ class MonitorService:
                 for sib in cd_candidates:
                     if (
                         sib == p.name
-                        or sib in running_names
+                        or sib in eff_running_names
                         or (p.name not in banned_names and sib in banned_names)
                     ):
                         continue
@@ -3531,7 +3942,7 @@ class MonitorService:
                 cluster_collision_label = f"{my_v6}::/64" if my_v6 else (cluster or "/64")
 
             can_open_parallel = bool(
-                running_names
+                eff_running_names
                 and not is_run
                 and not is_banned
                 and p.proxy
@@ -3544,10 +3955,42 @@ class MonitorService:
             )
 
             eff_siblings = (
-                [m for m in siblings if m not in banned_names or m in running_names]
+                [m for m in siblings if m not in banned_names or m in eff_running_names]
                 if p.name not in banned_names
                 else siblings
             )
+            mb_info = mb_map.get(p.name)
+            mb_tripped_self = bool(mb_info and mb_info.get("tripped"))
+            frz_info = frozen_endpoints.get(ep) if ep else None
+            dead_freeze_hours = 0.0
+            dead_freeze_by = ""
+            if frz_info and (frz_info[1] != p.name or mb_tripped_self):
+                dead_freeze_hours, dead_freeze_by = frz_info
+            sess_exp_str = str(disk["sess_exp"])
+            expired_sess = "Hết hạn" in sess_exp_str or "Expired" in sess_exp_str
+            oidc_ready_flag = bool(disk.get("oidc_ready"))
+            has_active_muse_sess = bool(
+                (disk["hatch_sess"] or disk["hatch_gw"]) and not expired_sess
+            )
+            requires_meta_oidc = not has_active_muse_sess
+            v6_orig = next(
+                (
+                    _ipv6_prefix_64(str(ent.get("ip") or ""))
+                    for ent in reversed(ip_entries)
+                    if _ipv6_prefix_64(str(ent.get("ip") or ""))
+                ),
+                "",
+            )
+            oidc_subnet_drifted = bool(
+                p.proxy
+                and requires_meta_oidc
+                and (has_meta or datr_domains > 0 or oidc_ready_flag)
+                and my_v6
+                and v6_orig
+                and my_v6 != v6_orig
+            )
+            with self._state_lock:
+                last_clean_mail_ts = float(self._mail_clean_checked_ts.get(p.name, 0.0))
             snap.profiles[p.name] = ProfileMonitorInfo(
                 name=p.name,
                 port=port,
@@ -3611,6 +4054,20 @@ class MonitorService:
                 has_recovery_armor=has_recovery_armor,
                 has_accountscenter=bool(disk.get("has_accountscenter")),
                 shared_port_count=max(1, len(eff_siblings)),
+                muse_bridge_model=str(mb_info.get("model") or "") if mb_info else "",
+                muse_bridge_bot=str(mb_info.get("bot") or "") if mb_info else "",
+                muse_bridge_running=bool(mb_info.get("running")) if mb_info else False,
+                muse_bridge_daily_mins=int(mb_info.get("daily_mins") or 0) if mb_info else 0,
+                muse_bridge_tripped=mb_tripped_self,
+                muse_bridge_trip_reason=(
+                    str(mb_info.get("trip_reason") or "") if mb_info else ""
+                ),
+                dead_port_freeze_hours=dead_freeze_hours,
+                dead_port_freeze_by=dead_freeze_by,
+                oidc_ready=oidc_ready_flag,
+                requires_meta_oidc=requires_meta_oidc,
+                oidc_subnet_drifted=oidc_subnet_drifted,
+                last_clean_mail_ts=last_clean_mail_ts,
             )
 
         self._populate_audit_findings(profiles, disk_map, snap)
@@ -4025,21 +4482,71 @@ class MonitorService:
                     )
                 )
 
-            # Layer 2d: Reopening a Disconnected/Banned profile whose port was reassigned to a live profile
-            ep_check = extract_proxy_endpoint(proxy_str)
-            if info and info.is_banned and ep_check:
-                live_owners = [
-                    p.name
-                    for p in all_profiles
-                    if p.name != profile.name
-                    and extract_proxy_endpoint(p.proxy) == ep_check
-                    and not (
-                        p.banned_at
-                        or is_ban_status(p.status)
-                        or has_ban_page(p.pages)
-                        or is_ban_page(p.group)
+            # Layer 2d: Dead-Port Freeze (72h quarantine after a banned / tripped profile used this endpoint)
+            if info and info.dead_port_freeze_hours > 0.0:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="dead_port_freeze",
+                        level="critical",
+                        message=get_string(
+                            "guard_dead_port_freeze",
+                            port=info.port or extract_proxy_endpoint(proxy_str),
+                            other=info.dead_port_freeze_by or "-",
+                            hours=f"{info.dead_port_freeze_hours:.0f}",
+                        ),
                     )
-                ]
+                )
+
+            # Layer 2e: ASN Firewall — block unestablished high-risk Group 3/4/5 or @tuan89 / +19376123124 on clean sp02-usa*
+            cluster_chk = extract_proxy_cluster(proxy_str)
+            has_saved_sess = bool(
+                info and (info.hatch_gw or info.hatch_sess) and not info.proxy_port_changed
+            )
+            if (
+                is_high_risk_embryo_profile(profile)
+                and cluster_chk.startswith("usa")
+                and cluster_chk[3:].isdigit()
+                and not has_saved_sess
+            ):
+                warnings.append(
+                    PreLaunchWarning(
+                        code="high_risk_clean_asn",
+                        level="critical",
+                        message=get_string(
+                            "guard_high_risk_clean_asn",
+                            group=(profile.group or "-"),
+                            cluster=cluster_chk,
+                        ),
+                    )
+                )
+
+            # Layer 2f: Block launching permanently banned / Meta Checkpointed profiles (and reassigned ports)
+            if info and info.has_meta_checkpoint:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="meta_checkpoint_banned",
+                        level="critical",
+                        message=get_string("guard_meta_checkpoint_banned"),
+                    )
+                )
+            ep_check = extract_proxy_endpoint(proxy_str)
+            if info and info.is_banned:
+                live_owners = (
+                    [
+                        p.name
+                        for p in all_profiles
+                        if p.name != profile.name
+                        and extract_proxy_endpoint(p.proxy) == ep_check
+                        and not (
+                            p.banned_at
+                            or is_ban_status(p.status)
+                            or has_ban_page(p.pages)
+                            or is_ban_page(p.group)
+                        )
+                    ]
+                    if ep_check
+                    else []
+                )
                 if live_owners:
                     warnings.append(
                         PreLaunchWarning(
@@ -4052,6 +4559,14 @@ class MonitorService:
                             ),
                         )
                     )
+                elif not info.has_meta_checkpoint:
+                    warnings.append(
+                        PreLaunchWarning(
+                            code="profile_banned",
+                            level="critical",
+                            message=get_string("guard_profile_banned"),
+                        )
+                    )
 
             # Layer 4: Proxy is set, but Timezone or Locale is missing (unpinned)
             if not (profile.timezone or "").strip() or not (profile.locale or "").strip():
@@ -4062,6 +4577,30 @@ class MonitorService:
                         message=get_string("guard_missing_geo"),
                     )
                 )
+
+        if info and info.muse_bridge_tripped:
+            warnings.append(
+                PreLaunchWarning(
+                    code="muse_bridge_tripped",
+                    level="critical",
+                    message=get_string(
+                        "guard_muse_bridge_tripped",
+                        model=info.muse_bridge_model or profile.name,
+                        reason=info.muse_bridge_trip_reason or "checkpoint",
+                    ),
+                )
+            )
+        elif info and info.muse_bridge_running and profile.name not in active_names:
+            warnings.append(
+                PreLaunchWarning(
+                    code="muse_bridge_running",
+                    level="critical",
+                    message=get_string(
+                        "guard_muse_bridge_running",
+                        model=info.muse_bridge_model or profile.name,
+                    ),
+                )
+            )
 
         # Layer 3: Profile has saved login cookies on a previous proxy port, and port changed
         if info and info.proxy_port_changed:
@@ -4092,6 +4631,47 @@ class MonitorService:
                     ),
                 )
             )
+
+        if (
+            proxy_str
+            and info
+            and not info.is_banned
+            and not info.has_meta_checkpoint
+            and info.requires_meta_oidc
+        ):
+            if info.oidc_subnet_drifted:
+                warnings.append(
+                    PreLaunchWarning(
+                        code="oidc_subnet_drifted",
+                        level="warning",
+                        message=get_string("guard_oidc_subnet_drifted"),
+                    )
+                )
+            grp_low = (profile.group or "").strip().lower()
+            pgs_low = [pg.strip().lower() for pg in (profile.pages or [])]
+            is_watch_embryo = (
+                grp_low in ("theo dõi", "theo doi")
+                or grp_low.startswith(("1.", "2.", "3.", "4.", "5."))
+                or (("theo dõi" in pgs_low or "theo doi" in pgs_low) and "live" not in pgs_low)
+            )
+            expired_on_disk = bool(info.sess_exp_days is not None and info.sess_exp_days < 0)
+            mail_target = self.resolve_profile_mail_target(profile)
+            clean_mail_fresh = bool(
+                info.last_clean_mail_ts > 0.0
+                and (time.time() - info.last_clean_mail_ts) <= 12 * 3600.0
+            )
+            if not clean_mail_fresh and (
+                expired_on_disk
+                or info.oidc_ready
+                or (is_watch_embryo and mail_target is not None)
+            ):
+                warnings.append(
+                    PreLaunchWarning(
+                        code="oidc_preflight_unverified",
+                        level="warning",
+                        message=get_string("guard_oidc_preflight_unverified"),
+                    )
+                )
 
         return warnings
 
@@ -4211,3 +4791,67 @@ class MonitorService:
                 issues[name] = wlist
 
         return issues
+
+    def rank_clean_spare_proxies(
+        self,
+        unassigned_proxies: list[str],
+        all_profiles: list[Profile],
+        running_names: set[str] | None = None,
+        *,
+        quarantined_endpoints: set[str] | None = None,
+        for_high_risk: bool = False,
+        snap: MonitorSnapshot | None = None,
+    ) -> list[str]:
+        """Filter out quarantined, 72h-frozen, and ban-tainted spare proxies, ranking clean /64s first."""
+        if not unassigned_proxies:
+            return []
+        if snap is None:
+            snap = self.snapshot(all_profiles, set(running_names or ()), fast_init=True)
+        q_eps = {e.strip().lower() for e in (quarantined_endpoints or set()) if e and e.strip()}
+        frozen_eps = set(snap.frozen_endpoints.keys())
+
+        burned_eps: set[str] = set()
+        burned_clusters: set[str] = set()
+        active_cluster_counts: dict[str, int] = {}
+        with self._state_lock:
+            hist_copy = {k: list(v) for k, v in self._ip_history.items()}
+
+        for p in all_profiles:
+            info = snap.profiles.get(p.name)
+            is_bad = bool(
+                (info and (info.is_banned or info.has_meta_checkpoint))
+                or p.banned_at
+                or is_ban_status(p.status)
+                or has_ban_page(p.pages)
+                or is_ban_page(p.group)
+            )
+            ep_p = extract_proxy_endpoint(p.proxy)
+            cl_p = extract_proxy_cluster(p.proxy)
+            if is_bad:
+                if ep_p:
+                    burned_eps.add(ep_p)
+                if cl_p and not is_gateway_ipv6_cluster(cl_p):
+                    burned_clusters.add(cl_p)
+                for ent in hist_copy.get(p.name, []):
+                    ep_h = extract_proxy_endpoint(str(ent.get("endpoint") or ""))
+                    if ep_h:
+                        burned_eps.add(ep_h)
+            elif cl_p:
+                active_cluster_counts[cl_p] = active_cluster_counts.get(cl_p, 0) + 1
+
+        ranked: list[tuple[int, int, str, str]] = []
+        for px in unassigned_proxies:
+            ep = extract_proxy_endpoint(px)
+            cl = extract_proxy_cluster(px)
+            if ep and (ep in q_eps or ep in frozen_eps or ep in burned_eps):
+                continue
+            if px.strip().lower() in q_eps:
+                continue
+            if for_high_risk and cl.startswith("usa") and cl[3:].isdigit():
+                continue
+            in_burned_cluster = 1 if (cl and cl in burned_clusters) else 0
+            cl_load = active_cluster_counts.get(cl, 0)
+            ranked.append((in_burned_cluster, cl_load, ep or px, px))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in ranked]

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import os
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -28,6 +30,21 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/browser/{name}/page", tags=["page"])
 
 
+def _guard_zero_mutation_url(url: str | None) -> None:
+    """Block navigation to accountscenter.meta.com to enforce Zero-Mutation safety."""
+    if os.getenv("FOXPROFILE_ALLOW_ACCOUNTSCENTER") == "1":
+        return
+    host = (urlsplit((url or "").strip()).hostname or "").lower().rstrip(".")
+    if host == "accountscenter.meta.com" or host.endswith(".accountscenter.meta.com"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Zero-Mutation Safety Guard: navigation to accountscenter.meta.com "
+                "is blocked to protect account lineage."
+            ),
+        )
+
+
 def _run(
     name: str,
     pm: IProfileManager,
@@ -49,6 +66,7 @@ _BL = Depends(get_browser_launcher)
 @router.post("/navigate")
 def navigate(name: str, body: NavigateRequest, pm=_PM, bl=_BL) -> dict:
     """Open a URL (http, https or about:) in the active tab."""
+    _guard_zero_mutation_url(body.url)
     return _run(name, pm, bl, "navigate", body.model_dump())
 
 
@@ -139,6 +157,7 @@ def tabs(name: str, pm=_PM, bl=_BL) -> dict:
 
 @router.post("/tabs")
 def tab_new(name: str, body: TabNewRequest, pm=_PM, bl=_BL) -> dict:
+    _guard_zero_mutation_url(body.url)
     return _run(name, pm, bl, "tab_new", body.model_dump())
 
 

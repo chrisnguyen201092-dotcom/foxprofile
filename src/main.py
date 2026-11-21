@@ -4,7 +4,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.api.auth import check_bind_safety
+from src.api.bind_safety import check_bind_safety
 from src.api.server import APIServer
 from src.core.config import API_HOST, API_PORT, API_TOKEN
 from src.core.container import Container

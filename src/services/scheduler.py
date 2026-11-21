@@ -24,16 +24,21 @@ from dataclasses import dataclass, field
 
 from ..models.profile import (
     Profile,
+    is_quarantine_schedule_tag,
     natural_name_key,
+    parse_flexible_date,
     parse_schedule_shift,
     parse_schedule_tag,
+    parse_schedule_week,
 )
 from .monitor import (
+    DEAD_PORT_FREEZE_HOURS,
     MonitorSnapshot,
     ProfileMonitorInfo,
     _ipv6_prefix_64,
     extract_proxy_endpoint,
     extract_proxy_port,
+    is_high_risk_embryo_profile,
 )
 
 _RE_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
@@ -99,6 +104,13 @@ class ScheduledAccount:
     completed_today: bool = False
     v6_prefix: str = ""
     exit_ip: str = ""
+    sess_exp: str = "-"
+    sess_exp_days: int | None = None
+    safety_class: str = "clean"  # "diamond_clean" | "clean" | "orange_legacy" | "red_quarantine"
+    quarantine_reason: str = ""
+    muse_bridge_model: str = ""
+    muse_bridge_bot: str = ""
+    had_schedule_tag: bool = False
 
 
 def _accounts_collide(a: ScheduledAccount, b: ScheduledAccount) -> bool:
@@ -163,6 +175,7 @@ class ScheduledDay:
     weekday_name_en: str
     morning_pairs: list[ScheduledPair] = field(default_factory=list)
     evening_pairs: list[ScheduledPair] = field(default_factory=list)
+    quarantine_solos: list[ScheduledAccount] = field(default_factory=list)
 
     @property
     def all_pairs(self) -> list[ScheduledPair]:
@@ -175,6 +188,8 @@ class ScheduledDay:
             names.append(pr.first.name)
             if pr.second is not None:
                 names.append(pr.second.name)
+        for q in self.quarantine_solos:
+            names.append(q.name)
         return names
 
     @property
@@ -193,18 +208,32 @@ class SchedulePlan:
     collision_count: int = 0
     adjacent_overlap_count: int = 0
     repeated_pair_count: int = 0
+    schedule_mode: str = "pair"
+    quarantine_accounts: list[ScheduledAccount] = field(default_factory=list)
+    muse_bridge_accounts: list[ScheduledAccount] = field(default_factory=list)
+    muse_bridge_ping_needed: list[ScheduledAccount] = field(default_factory=list)
+    healthy_deferred: list[ScheduledAccount] = field(default_factory=list)
 
     def status_tag_map(self) -> dict[str, str]:
-        """Return `{profile_name: '<weekday>-C<pair>-<S|T>'}` for all scheduled accounts (clearing tags for accounts already opened today)."""
+        """Return `{profile_name: '[W2-]<weekday>-<C|Q><idx>-<S|T>'}` for scheduled accounts."""
         done_names = {a.name for a in self.completed_today}
         mapping: dict[str, str] = {}
+        for a_def in self.healthy_deferred:
+            mapping[a_def.name] = ""
+        for a_mb in self.muse_bridge_accounts:
+            if a_mb.had_schedule_tag:
+                mapping[a_mb.name] = ""
         for d in self.days:
+            wk_prefix = "W2-" if d.day_index >= 7 else ""
             for pr in d.all_pairs:
                 shift_code = "S" if pr.shift == "morning" else "T"
-                tag = f"{d.weekday_tag}-C{pr.pair_index}-{shift_code}"
+                tag = f"{wk_prefix}{d.weekday_tag}-C{pr.pair_index}-{shift_code}"
                 mapping[pr.first.name] = "" if pr.first.name in done_names else tag
                 if pr.second is not None:
                     mapping[pr.second.name] = "" if pr.second.name in done_names else tag
+            for q_idx, q_acc in enumerate(d.quarantine_solos, start=1):
+                q_tag = f"{wk_prefix}{d.weekday_tag}-Q{q_idx}-T"
+                mapping[q_acc.name] = "" if q_acc.name in done_names else q_tag
         return mapping
 
     def pairing_records(self) -> list[list[str]]:
@@ -224,6 +253,8 @@ class SchedulePlan:
                 out[pr.first.name] = pr.shift
                 if pr.second is not None:
                     out[pr.second.name] = pr.shift
+            for q_acc in d.quarantine_solos:
+                out[q_acc.name] = "evening"
         return out
 
 
@@ -249,6 +280,29 @@ def _compute_even_day_quotas(total: int, cycle_days: int) -> list[int]:
     if odd_remainder:
         quotas[-1] += 1
     return quotas
+
+
+_QUARANTINE_AUDIT_CODES = frozenset(
+    {"burned_batch", "burned_proxy", "burned_ip", "duplicate_fingerprint"}
+)
+
+
+def _classify_live_safety(
+    p: Profile,
+    info: ProfileMonitorInfo | None,
+) -> tuple[str, str]:
+    """Classify a Live account's operational taint risk without altering core storage."""
+    notes_low = (getattr(p, "notes", None) or "").lower()
+    email_low = (getattr(p, "email", None) or "").lower()
+    if info and any(c in _QUARANTINE_AUDIT_CODES for c in info.audit_codes):
+        return ("red_quarantine", "burned_taint")
+    if "+19376123124" in notes_low or "@tuan89.site" in notes_low or email_low.endswith("@tuan89.site"):
+        return ("red_quarantine", "burned_taint")
+    if info and info.trust_tier in ("diamond", "elite") and not info.has_accountscenter:
+        return ("diamond_clean", "")
+    if (info and info.has_accountscenter) or "2 tầng" in notes_low or "dual" in notes_low:
+        return ("orange_legacy", "dual_mail_legacy")
+    return ("clean", "")
 
 
 def _pair_day_accounts(
@@ -312,6 +366,9 @@ def _pair_day_accounts(
         gw_b = is_gateway_ipv6_cluster(b.cluster)
         if gw_a == gw_b:
             cost += 1_200.0 if not gw_a else 15.0
+        # Soft penalty against pairing ultra-clean diamond accounts with dual-mail legacy accounts
+        if {a.safety_class, b.safety_class} == {"diamond_clean", "orange_legacy"}:
+            cost += 160.0
         # Slight tie-breaker jitter so pairings vary naturally across cycles
         cost += _jitter_hash(f"{a.name}+{b.name}", seed_int) * 2.0
         return cost
@@ -566,8 +623,9 @@ def _split_and_order_day_shifts(
     last_shifts: dict[str, str],
     *,
     day_index: int,
+    balance_shifts: bool = False,
 ) -> tuple[list[ScheduledPair], list[ScheduledPair]]:
-    """Prioritize Morning (`Ca Sáng`) for all non-conflicting /64 pairs; push only duplicate /64 pairs to Evening (`Ca Tối`)."""
+    """Order pairs into Morning (`Ca Sáng`) and Evening (`Ca Tối`) with zero /64 overlap."""
     total_p = len(day_pairs)
     if total_p == 0:
         return [], []
@@ -580,9 +638,6 @@ def _split_and_order_day_shifts(
             if cl_k and not is_gateway_ipv6_cluster(cl_k):
                 non_gw_freq[cl_k] = non_gw_freq.get(cl_k, 0) + 1
 
-    # Order pairs so full pairs with non-gateway /64 clusters come first (prioritizing clusters that
-    # appear twice in the day so their 1st occurrence claims Morning and 2nd goes to Evening),
-    # followed by pure-gateway pairs, while Day-0 shared-endpoint or trailing solo pairs come last.
     ordered_candidates = sorted(
         day_pairs,
         key=lambda ab: (
@@ -602,7 +657,6 @@ def _split_and_order_day_shifts(
                 ),
                 default=0,
             ),
-            # Prefer pairs with only 1 non-gateway /64 cluster over pairs with 2 non-gateway clusters
             sum(
                 1
                 for c in ({ab[0].cluster} | ({ab[1].cluster} if ab[1] else set()))
@@ -614,6 +668,7 @@ def _split_and_order_day_shifts(
     m_raw: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
     e_raw: list[tuple[ScheduledAccount, ScheduledAccount | None]] = []
     morning_non_gw: set[str] = set()
+    morning_cap = (total_p + 1) // 2 if (balance_shifts and total_p >= 2) else total_p
 
     for a, b in ordered_candidates:
         non_gw = _pair_subnet_keys(a, b)
@@ -621,7 +676,12 @@ def _split_and_order_day_shifts(
             a.shared_endpoint or (b is not None and b.shared_endpoint)
         )
         is_solo = b is None
-        if (non_gw & morning_non_gw) or has_shared_d0 or (is_solo and len(m_raw) >= 1):
+        if (
+            (non_gw & morning_non_gw)
+            or has_shared_d0
+            or (is_solo and len(m_raw) >= 1)
+            or (balance_shifts and len(m_raw) >= morning_cap)
+        ):
             e_raw.append((a, b))
         else:
             m_raw.append((a, b))
@@ -644,19 +704,97 @@ def _split_and_order_day_shifts(
     return m_ordered, e_ordered
 
 
+def _assign_quarantine_solos(
+    days_list: list[ScheduledDay],
+    quarantine_accounts: list[ScheduledAccount],
+    cycle_days: int,
+    seed_int: int,
+) -> None:
+    """Place tainted accounts into isolated late-evening solo slots without pairing them."""
+    if not days_list or not quarantine_accounts:
+        return
+    ordered_q = sorted(
+        quarantine_accounts,
+        key=lambda a: (
+            -1 if a.completed_today else 0,
+            a.sess_exp_days if a.sess_exp_days is not None else 15,
+            -a.rest_hours,
+            _jitter_hash(a.name, seed_int + 101),
+        ),
+    )
+    for idx_q, q_acc in enumerate(ordered_q):
+        if q_acc.completed_today:
+            q_acc.quarantine_reason = q_acc.quarantine_reason or "burned_taint"
+            days_list[0].quarantine_solos.append(q_acc)
+            continue
+        max_d = (
+            min(cycle_days - 1, max(0, int(q_acc.sess_exp_days) - 2))
+            if (q_acc.sess_exp_days is not None and q_acc.sess_exp_days >= 0)
+            else (cycle_days - 1)
+        )
+        min_d = 0
+        if cycle_days >= 4 and q_acc.rest_hours < 41.0:
+            needed_days = max(1, int((63.0 - q_acc.rest_hours + 23.9) // 24.0))
+            min_d = min(max_d, cycle_days - 1, needed_days)
+
+        def _day_score(
+            d: ScheduledDay,
+            acc_q: ScheduledAccount = q_acc,
+            q_i: int = idx_q,
+        ) -> tuple[int, int, int, int]:
+            has_ep = any(
+                (acc_q.endpoint and m.endpoint == acc_q.endpoint)
+                or (acc_q.v6_prefix and m.v6_prefix == acc_q.v6_prefix)
+                for m in (
+                    [q for q in d.quarantine_solos]
+                    + [
+                        x
+                        for pr in d.all_pairs
+                        for x in (pr.first, pr.second)
+                        if x is not None
+                    ]
+                )
+            )
+            has_q_cl = any(
+                acc_q.cluster
+                and not is_gateway_ipv6_cluster(acc_q.cluster)
+                and q.cluster == acc_q.cluster
+                for q in d.quarantine_solos
+            )
+            # Spread across days using reverse distance bias so later / lighter days get picked cleanly
+            pref_order = abs((cycle_days - 1 - d.day_index) - (q_i % cycle_days))
+            return (
+                1 if has_ep else 0,
+                1 if has_q_cl else 0,
+                len(d.quarantine_solos),
+                d.total_accounts * 10 + pref_order,
+            )
+
+        candidates = (
+            [d for d in days_list if min_d <= d.day_index <= max_d]
+            or [d for d in days_list if d.day_index <= max_d]
+            or days_list
+        )
+        best_day = min(candidates, key=_day_score)
+        best_day.quarantine_solos.append(q_acc)
+
+
 def build_safe_schedule(
     profiles: list[Profile],
     snap: MonitorSnapshot,
     *,
     cycle_days: int = 5,
+    schedule_mode: str = "pair",
+    include_healthy_in_keepalive: bool = False,
     last_pairings: list[list[str]] | None = None,
     last_shifts: dict[str, str] | None = None,
     shuffle_seed: int | None = None,
     now: dt.datetime | None = None,
 ) -> SchedulePlan:
-    """Compute a conflict-free multi-day paired farming schedule for all Live profiles."""
+    """Compute a conflict-free multi-day schedule (`pair`, `keepalive` 10-14d, or `work` 5-7d)."""
     now_dt = now or dt.datetime.now()
-    cycle_days = max(2, min(7, int(cycle_days)))
+    cycle_days = max(2, min(14, int(cycle_days)))
+    mode = schedule_mode if schedule_mode in ("pair", "keepalive", "work") else "pair"
     seed_int = (
         shuffle_seed
         if shuffle_seed is not None
@@ -670,24 +808,98 @@ def build_safe_schedule(
             prev_pair_set.add((a_s, b_s) if a_s < b_s else (b_s, a_s))
     prev_shifts = dict(last_shifts or {})
 
-    # 1. Identify eligible Live profiles vs empty draft slots
+    # 1. Separate MuseBridge-bound profiles, eligible Live profiles, and empty draft slots
     live_Raw: list[Profile] = []
     skipped_drafts: list[str] = []
     endpoint_counts: dict[str, int] = {}
+    muse_bridge_accounts: list[ScheduledAccount] = []
+    muse_bridge_ping_needed: list[ScheduledAccount] = []
+
+    def _build_sched_acc(
+        p_obj: Profile,
+        info_obj: ProfileMonitorInfo | None,
+        *,
+        shared_ep: bool = False,
+    ) -> tuple[ScheduledAccount, bool]:
+        lc = info_obj.last_closed if info_obj else None
+        created_dt: dt.datetime | None = None
+        if p_obj.created_at:
+            with contextlib.suppress(ValueError):
+                created_dt = dt.datetime.strptime(
+                    p_obj.created_at.strip()[:10], "%Y-%m-%d"
+                ).replace(hour=12, minute=0, second=0)
+        if lc is None:
+            lc = created_dt or (now_dt - dt.timedelta(hours=120))
+
+        rest_h = max(0.0, (now_dt - lc).total_seconds() / 3600.0)
+        if created_dt is not None:
+            age_h = max(rest_h, (now_dt - created_dt).total_seconds() / 3600.0)
+            days_old = (now_dt.date() - created_dt.date()).days
+            if (
+                info_obj is not None
+                and info_obj.datr_age_days > 0.0
+                and abs(days_old - info_obj.datr_age_days) <= 3.0
+            ):
+                days_old = int(info_obj.datr_age_days)
+                age_h = max(rest_h, info_obj.datr_age_days * 24.0)
+        else:
+            age_h = max(rest_h, 120.0)
+            days_old = 5
+
+        is_probation = days_old <= 2 and rest_h < 60.0
+        is_run = bool(info_obj and info_obj.running_mins is not None)
+        ran_today = is_run or (
+            lc.date() == now_dt.date()
+            and lc.hour >= 6
+            and days_old > 1
+        )
+        ep_s = extract_proxy_endpoint(p_obj.proxy)
+        raw_exit_ip = (info_obj.last_exit_ip if info_obj else "") or ""
+        safety_cls, q_reason = _classify_live_safety(p_obj, info_obj)
+        s_acc = ScheduledAccount(
+            name=p_obj.name,
+            email=(p_obj.email or p_obj.name).strip(),
+            cluster=extract_proxy_cluster(p_obj.proxy),
+            port=extract_proxy_port(p_obj.proxy),
+            endpoint=ep_s,
+            timezone=(p_obj.timezone or "America/Detroit").strip(),
+            rest_hours=rest_h,
+            age_hours=age_h,
+            is_probation=is_probation,
+            shared_endpoint=shared_ep,
+            completed_today=ran_today,
+            v6_prefix=_ipv6_prefix_64(raw_exit_ip),
+            exit_ip=raw_exit_ip.strip().lower(),
+            sess_exp=info_obj.sess_exp if info_obj else "-",
+            sess_exp_days=info_obj.sess_exp_days if info_obj else None,
+            safety_class=safety_cls,
+            quarantine_reason=q_reason,
+            muse_bridge_model=info_obj.muse_bridge_model if info_obj else "",
+            muse_bridge_bot=info_obj.muse_bridge_bot if info_obj else "",
+            had_schedule_tag=(parse_schedule_tag(p_obj.status) is not None),
+        )
+        return s_acc, ran_today
 
     for p in profiles:
         grp = (p.group or "").strip().lower()
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
+        info = snap.profiles.get(p.name)
+        is_disc_page = grp == "disconnected" or "disconnected" in pgs_lower
+        if is_disc_page or (info and info.is_banned):
+            continue
+        if info and info.muse_bridge_model:
+            mb_acc, _ = _build_sched_acc(p, info)
+            muse_bridge_accounts.append(mb_acc)
+            if mb_acc.sess_exp_days is not None and mb_acc.sess_exp_days <= 10:
+                muse_bridge_ping_needed.append(mb_acc)
+            continue
         if (
-            grp in ("disconnected", "theo dõi", "theo doi")
-            or "disconnected" in pgs_lower
+            grp in ("theo dõi", "theo doi")
+            or grp.startswith(("1.", "2.", "3.", "4.", "5."))
             or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
         ):
             continue
         if not (p.proxy or "").strip():
-            continue
-        info = snap.profiles.get(p.name)
-        if info and info.is_banned:
             continue
         has_disk_activity = bool(
             info
@@ -712,101 +924,72 @@ def build_safe_schedule(
         if ep:
             endpoint_counts[ep] = endpoint_counts.get(ep, 0) + 1
 
-    # 2. Build ScheduledAccount objects with exact rest_hours and probation flags
+    # 2. Partition Live accounts into normal pool, Quarantine Solo, and Healthy Deferred (>21d in keepalive)
     sched_accounts: list[ScheduledAccount] = []
+    quarantine_accounts: list[ScheduledAccount] = []
+    healthy_deferred: list[ScheduledAccount] = []
     completed_today_list: list[ScheduledAccount] = []
 
     for p in live_Raw:
         info = snap.profiles.get(p.name)
-        lc = info.last_closed if info else None
-        created_dt: dt.datetime | None = None
-        if p.created_at:
-            with contextlib.suppress(ValueError):
-                created_dt = dt.datetime.strptime(p.created_at.strip()[:10], "%Y-%m-%d").replace(
-                    hour=12, minute=0, second=0
-                )
-        if lc is None:
-            lc = created_dt or (now_dt - dt.timedelta(hours=120))
-
-        rest_h = max(0.0, (now_dt - lc).total_seconds() / 3600.0)
-        if created_dt is not None:
-            age_h = max(rest_h, (now_dt - created_dt).total_seconds() / 3600.0)
-            days_old = (now_dt.date() - created_dt.date()).days
-            if (
-                info is not None
-                and info.datr_age_days > 0.0
-                and abs(days_old - info.datr_age_days) <= 3.0
-            ):
-                days_old = int(info.datr_age_days)
-                age_h = max(rest_h, info.datr_age_days * 24.0)
-        else:
-            age_h = max(rest_h, 120.0)
-            days_old = 5
-
-        # Probation Guard: Accounts created within the last 2 calendar days (< 60h rest)
-        # must be placed in Day >= 2 so they accumulate >= 72-96h rest before opening.
-        is_probation = days_old <= 2 and rest_h < 60.0
-        is_run = bool(info and info.running_mins is not None)
-        ran_today = is_run or (
-            lc.date() == now_dt.date()
-            and lc.hour >= 6
-            and days_old > 1
-        )
         ep = extract_proxy_endpoint(p.proxy)
-        raw_exit_ip = (info.last_exit_ip if info else "") or ""
-        acc = ScheduledAccount(
-            name=p.name,
-            email=(p.email or p.name).strip(),
-            cluster=extract_proxy_cluster(p.proxy),
-            port=extract_proxy_port(p.proxy),
-            endpoint=ep,
-            timezone=(p.timezone or "America/Detroit").strip(),
-            rest_hours=rest_h,
-            age_hours=age_h,
-            is_probation=is_probation,
-            shared_endpoint=(endpoint_counts.get(ep, 0) > 1),
-            completed_today=ran_today,
-            v6_prefix=_ipv6_prefix_64(raw_exit_ip),
-            exit_ip=raw_exit_ip.strip().lower(),
+        acc, ran_today = _build_sched_acc(
+            p,
+            info,
+            shared_ep=(endpoint_counts.get(ep, 0) > 1),
         )
-        sched_accounts.append(acc)
         if ran_today:
             completed_today_list.append(acc)
+        if mode in ("keepalive", "work") and acc.safety_class == "red_quarantine":
+            quarantine_accounts.append(acc)
+            continue
+        if (
+            mode == "keepalive"
+            and not include_healthy_in_keepalive
+            and not acc.completed_today
+            and acc.sess_exp_days is not None
+            and acc.sess_exp_days > 21
+        ):
+            healthy_deferred.append(acc)
+            continue
+        sched_accounts.append(acc)
 
-    # 3. Sort accounts strictly by rest_hours descending (longest rested first -> shortest rested last)
-    # while pinning accounts already opened today (`completed_today`) to Day 1 (Today) so mid-day runs
-    # never shift the remaining schedule or hide Today's port usage.
-    def _urgency_key(a: ScheduledAccount) -> tuple[int, int, float]:
+    # 3. Sort accounts by mode priority (sess_exp ascending in keepalive; rest_hours descending in work/pair)
+    def _urgency_key(a: ScheduledAccount) -> tuple[int, int, int, float]:
         ran_flag = -1 if a.completed_today else 0
         rest_band = -int(a.rest_hours // 3.0)
-        return (ran_flag, rest_band, _jitter_hash(a.name, seed_int))
+        if mode == "keepalive":
+            exp_rank = a.sess_exp_days if a.sess_exp_days is not None else 15
+            return (ran_flag, exp_rank, rest_band, _jitter_hash(a.name, seed_int))
+        return (ran_flag, 0, rest_band, _jitter_hash(a.name, seed_int))
 
     sched_accounts.sort(key=_urgency_key)
 
-    # 3b. If existing schedule tags (e.g. T2-C1..T6-C7) are already applied on profiles and the user
-    # has not requested a reshuffle (`shuffle_seed is None`), preserve the exact tagged day & pair
-    # assignments so the schedule dialog matches the profile list tags 100%, while placing any untagged
-    # accounts (such as accounts whose previous day's tag was cleared after completion) into the open day(s).
-    cycle_wd_tags = [
-        WEEKDAY_TAGS[(now_dt + dt.timedelta(days=d)).weekday()]
+    # 3b. Preserve existing applied tags when matching current mode & cycle window (1-week or 2-week W1/W2)
+    cycle_week_wd_tags: list[tuple[int, str]] = [
+        ((d // 7) + 1, WEEKDAY_TAGS[(now_dt + dt.timedelta(days=d)).weekday()])
         for d in range(cycle_days)
     ]
-    wd_to_day_idx = {wd: d for d, wd in enumerate(cycle_wd_tags)}
+    wk_wd_to_day_idx = {key: d for d, key in enumerate(cycle_week_wd_tags)}
     acc_by_name = {a.name: a for a in sched_accounts}
     shift_by_name: dict[str, str] = {}
     tagged_by_day_pair: dict[int, dict[int, list[ScheduledAccount]]] = {}
-    all_tag_wds: set[str] = set()
+    all_tag_keys: set[tuple[int, str]] = set()
     tagged_names: set[str] = set()
     for p in live_Raw:
+        if is_quarantine_schedule_tag(p.status):
+            continue
         parsed_tag = parse_schedule_tag(p.status)
         if parsed_tag is not None and p.name in acc_by_name:
             wd_tag, pair_num = parsed_tag
-            all_tag_wds.add(wd_tag)
+            wk_num = parse_schedule_week(p.status) or 1
+            t_key = (wk_num, wd_tag)
+            all_tag_keys.add(t_key)
             sh_tag = parse_schedule_shift(p.status)
             if sh_tag:
                 shift_by_name[p.name] = sh_tag
-            if wd_tag in wd_to_day_idx and pair_num > 0:
-                d_idx = wd_to_day_idx[wd_tag]
+            if t_key in wk_wd_to_day_idx and pair_num > 0:
+                d_idx = wk_wd_to_day_idx[t_key]
                 tagged_by_day_pair.setdefault(d_idx, {}).setdefault(pair_num, []).append(
                     acc_by_name[p.name]
                 )
@@ -818,6 +1001,13 @@ def build_safe_schedule(
     untagged_non_today = [a for a in untagged_accs if not a.completed_today]
     quotas_preview = _compute_even_day_quotas(len(sched_accounts), cycle_days)
     empty_day_capacity = sum(quotas_preview[d] for d in empty_days)
+    narrow_work_tags_in_keepalive = bool(
+        mode == "keepalive"
+        and cycle_days >= 10
+        and tagged_by_day_pair
+        and max(tagged_by_day_pair) < 7
+        and len(sched_accounts) >= 8
+    )
 
     has_imbalanced_saved_tags = False
     if len(sched_accounts) >= cycle_days * 4 and tagged_by_day_pair:
@@ -844,7 +1034,8 @@ def build_safe_schedule(
         shuffle_seed is None
         and tagged_names
         and not has_imbalanced_saved_tags
-        and all_tag_wds.issubset(set(wd_to_day_idx.keys()))
+        and not narrow_work_tags_in_keepalive
+        and all_tag_keys.issubset(set(wk_wd_to_day_idx.keys()))
         and (
             not untagged_non_today
             or (
@@ -941,8 +1132,13 @@ def build_safe_schedule(
                     has_shared_d0 = d_idx == 0 and (
                         a.shared_endpoint or (b is not None and b.shared_endpoint)
                     )
+                    explicit_sh = shift_by_name.get(a.name) or (
+                        shift_by_name.get(b.name) if b is not None else ""
+                    )
                     if (non_gw & morning_non_gw) or has_shared_d0 or (b is None and m_pairs):
                         shift = "evening"
+                    elif explicit_sh in ("morning", "evening"):
+                        shift = explicit_sh
                     else:
                         shift = "morning"
                     if shift == "morning":
@@ -975,6 +1171,7 @@ def build_safe_schedule(
                     raw_pairs,
                     prev_shifts,
                     day_index=d_idx,
+                    balance_shifts=(mode in ("work", "keepalive")),
                 )
 
             for pr in [*m_pairs, *e_pairs]:
@@ -1003,16 +1200,22 @@ def build_safe_schedule(
                 )
             )
 
+        _assign_quarantine_solos(days_preserved, quarantine_accounts, cycle_days, seed_int)
         return SchedulePlan(
             generated_at=now_dt.strftime("%Y-%m-%d %H:%M"),
             cycle_days=cycle_days,
-            total_live=len(sched_accounts),
+            total_live=len(sched_accounts) + len(quarantine_accounts),
             days=days_preserved,
             completed_today=completed_today_list,
             skipped_drafts=skipped_drafts,
             collision_count=collision_total,
             adjacent_overlap_count=adj_overlap_total,
             repeated_pair_count=repeated_pair_total,
+            schedule_mode=mode,
+            quarantine_accounts=quarantine_accounts,
+            muse_bridge_accounts=muse_bridge_accounts,
+            muse_bridge_ping_needed=muse_bridge_ping_needed,
+            healthy_deferred=healthy_deferred,
         )
 
     # 4. Partition into `cycle_days` daily buckets while enforcing:
@@ -1031,17 +1234,24 @@ def build_safe_schedule(
 
     max_pairs_per_day = [max(1, (q + 1) // 2) for q in quotas]
 
+    def _max_day_for_account(a: ScheduledAccount) -> int:
+        if a.completed_today:
+            return cycle_days - 1
+        if a.sess_exp_days is not None and a.sess_exp_days >= 0:
+            return min(cycle_days - 1, max(0, int(a.sess_exp_days) - 2))
+        return cycle_days - 1
+
     def _min_day_for_account(a: ScheduledAccount) -> int:
         if a.completed_today:
             return 0
+        max_d = _max_day_for_account(a)
         if cycle_days >= 4 and a.rest_hours < 41.0:
             # Ensure every account that rested < 41h accumulates at least ~63h total rest
-            # by its scheduled day (so 39-40h accounts can enter Day 2 at 63-64h rest,
-            # 28-33h accounts enter Day 3/4 at 76-105h rest, and 7-8h new accounts enter Day 4/5 at 79-104h rest).
+            # by its scheduled day (while never crossing its hatch_sess expiry deadline).
             needed_days = max(1, int((63.0 - a.rest_hours + 23.9) // 24.0))
-            return min(cycle_days - 1, needed_days)
+            return min(max_d, cycle_days - 1, needed_days)
         if a.is_probation and cycle_days >= 4:
-            return 1
+            return min(max_d, 1)
         return 0
 
     total_non_gw = sum(
@@ -1145,12 +1355,13 @@ def build_safe_schedule(
             continue
 
         min_d = _effective_min_day(acc)
+        max_d = max(min_d, _max_day_for_account(acc))
         if acc.cluster:
             rem_by_cluster[acc.cluster] = max(0, rem_by_cluster.get(acc.cluster, 1) - 1)
         is_non_gw_acc = bool(acc.cluster and not is_gateway_ipv6_cluster(acc.cluster))
         placed = False
         for relax in (0, 1):
-            for d_idx in range(min_d, cycle_days):
+            for d_idx in range(min_d, max_d + 1):
                 if len(day_buckets[d_idx]) >= quotas[d_idx]:
                     continue
                 if acc.shared_endpoint and acc.endpoint in endpoint_assigned_days:
@@ -1187,7 +1398,7 @@ def build_safe_schedule(
         return _cluster_cap_for_day(cluster, d, relax=relax)
 
     def _can_place_in_day(a: ScheduledAccount, d: int, *, strict: bool = True, relax: int = 0) -> bool:
-        if d < _min_day_for_account(a):
+        if d < _min_day_for_account(a) or d > _max_day_for_account(a):
             return False
         if (
             a.shared_endpoint
@@ -1211,13 +1422,14 @@ def build_safe_schedule(
 
     for acc in unassigned:
         min_d = _min_day_for_account(acc)
+        max_d = max(min_d, _max_day_for_account(acc))
 
-        # 1. If any day with an open slot directly satisfies all constraints for `acc`, place it there directly
+        # 1. If any day with an open slot within [min_d..max_d] satisfies constraints, place there
         direct_d = next(
             (
                 d
                 for rel in (0, 1)
-                for d in range(min_d, cycle_days)
+                for d in range(min_d, max_d + 1)
                 if len(day_buckets[d]) < quotas[d] and _can_place_in_day(acc, d, strict=True, relax=rel)
             ),
             None,
@@ -1231,18 +1443,18 @@ def build_safe_schedule(
                 endpoint_assigned_days.setdefault(acc.endpoint, []).append(direct_d)
             continue
 
-        # 2. Otherwise find the open-slot day `target_d` and swap `acc` with the closest-rest eligible candidate in `other_d >= min_d`
+        # 2. Otherwise find an open slot `target_d` and swap `acc` into `other_d <= max_d`
         target_d = next(
-            (d for d in range(min_d, cycle_days) if len(day_buckets[d]) < quotas[d]),
+            (d for d in range(min_d, max_d + 1) if len(day_buckets[d]) < quotas[d]),
             next(
                 (d for d in range(cycle_days - 1, -1, -1) if len(day_buckets[d]) < quotas[d]),
-                cycle_days - 1,
+                max_d,
             ),
         )
         swapped = False
         for strict_cap, rel in ((True, 0), (True, 1), (False, 1)):
-            # Search from latest day down to min_d so we never disturb Day 0 unless necessary
-            for other_d in range(cycle_days - 1, min_d - 1, -1):
+            # Search from max_d down to min_d so urgent expiry deadlines are never breached
+            for other_d in range(max_d, min_d - 1, -1):
                 if other_d == target_d:
                     continue
                 if (
@@ -1265,7 +1477,11 @@ def build_safe_schedule(
                 )
                 for idx_cand in cand_indices:
                     cand = day_buckets[other_d][idx_cand]
-                    if cand.shared_endpoint or cand.completed_today or _min_day_for_account(cand) > target_d:
+                    if (
+                        cand.shared_endpoint
+                        or cand.completed_today
+                        or not (_min_day_for_account(cand) <= target_d <= _max_day_for_account(cand))
+                    ):
                         continue
                     new_other_c = (
                         day_cluster_counts[other_d].get(acc.cluster, 0)
@@ -1296,12 +1512,13 @@ def build_safe_schedule(
             if swapped:
                 break
         if not swapped:
-            day_buckets[target_d].append(acc)
-            day_cluster_counts[target_d][acc.cluster] = (
-                day_cluster_counts[target_d].get(acc.cluster, 0) + 1
+            place_d = target_d if target_d <= max_d else max_d
+            day_buckets[place_d].append(acc)
+            day_cluster_counts[place_d][acc.cluster] = (
+                day_cluster_counts[place_d].get(acc.cluster, 0) + 1
             )
             if acc.shared_endpoint and acc.endpoint:
-                endpoint_assigned_days.setdefault(acc.endpoint, []).append(target_d)
+                endpoint_assigned_days.setdefault(acc.endpoint, []).append(place_d)
 
     # 4b. Rebalance any non-gateway /64 cluster that exceeded its ideal daily cap (`relax=0` first, then `relax=1`)
     # while respecting probation `_min_day_for_account` so clusters with `tot_c <= cycle_days` stay <= 1/day.
@@ -1322,7 +1539,10 @@ def build_safe_schedule(
                     for idx_a in over_indices:
                         acc_over = day_buckets[d_over][idx_a]
                         for d_under in range(cycle_days - 1, -1, -1):
-                            if d_under == d_over or d_under < _min_day_for_account(acc_over):
+                            if (
+                                d_under == d_over
+                                or not (_min_day_for_account(acc_over) <= d_under <= _max_day_for_account(acc_over))
+                            ):
                                 continue
                             if day_cluster_counts[d_under].get(c_over, 0) >= _cluster_cap_for_day(
                                 c_over, d_under, relax=rel_lvl
@@ -1334,7 +1554,7 @@ def build_safe_schedule(
                                 if b.cluster != c_over
                                 and not b.shared_endpoint
                                 and not b.completed_today
-                                and d_over >= _min_day_for_account(b)
+                                and (_min_day_for_account(b) <= d_over <= _max_day_for_account(b))
                                 and day_cluster_counts[d_over].get(b.cluster, 0)
                                 < _cluster_cap_for_day(b.cluster, d_over, relax=rel_lvl)
                             ]
@@ -1381,7 +1601,7 @@ def build_safe_schedule(
                         or is_gateway_ipv6_cluster(a_ng.cluster)
                         or a_ng.shared_endpoint
                         or a_ng.completed_today
-                        or d_under < _min_day_for_account(a_ng)
+                        or not (_min_day_for_account(a_ng) <= d_under <= _max_day_for_account(a_ng))
                     ):
                         continue
                     if day_cluster_counts[d_under].get(a_ng.cluster, 0) >= _cluster_cap_for_day(
@@ -1395,7 +1615,7 @@ def build_safe_schedule(
                             or a_gw.completed_today
                         ):
                             continue
-                        if d_over >= _min_day_for_account(a_gw):
+                        if _min_day_for_account(a_gw) <= d_over <= _max_day_for_account(a_gw):
                             day_buckets[d_over][i_ng] = a_gw
                             day_buckets[d_under][i_gw] = a_ng
                             day_cluster_counts[d_over][a_ng.cluster] -= 1
@@ -1410,7 +1630,8 @@ def build_safe_schedule(
                             break
                         # 2-hop relay via an intermediate day `d_mid` when `a_gw` is in probation
                         min_gw_d = _min_day_for_account(a_gw)
-                        for d_mid in range(min_gw_d, cycle_days):
+                        max_gw_d = max(min_gw_d, _max_day_for_account(a_gw))
+                        for d_mid in range(min_gw_d, max_gw_d + 1):
                             if d_mid in (d_over, d_under):
                                 continue
                             i_mid = next(
@@ -1420,7 +1641,7 @@ def build_safe_schedule(
                                     if is_gateway_ipv6_cluster(a_m.cluster)
                                     and not a_m.shared_endpoint
                                     and not a_m.completed_today
-                                    and d_over >= _min_day_for_account(a_m)
+                                    and (_min_day_for_account(a_m) <= d_over <= _max_day_for_account(a_m))
                                 ),
                                 None,
                             )
@@ -1464,13 +1685,28 @@ def build_safe_schedule(
                     positions.append((d_idx, s_idx))
                     c_accs.append(a)
         if len(c_accs) > 1:
-            c_accs.sort(key=lambda x: (-int(x.rest_hours // 3.0), -x.rest_hours))
+            for _ in range(len(c_accs)):
+                swapped_4c = False
+                for i in range(len(c_accs) - 1):
+                    for j in range(i + 1, len(c_accs)):
+                        d_i, d_j = positions[i][0], positions[j][0]
+                        a_i, a_j = c_accs[i], c_accs[j]
+                        k_i = (int(a_i.rest_hours // 3.0), a_i.rest_hours)
+                        k_j = (int(a_j.rest_hours // 3.0), a_j.rest_hours)
+                        if k_j > k_i and (
+                            _min_day_for_account(a_j) <= d_i <= _max_day_for_account(a_j)
+                            and _min_day_for_account(a_i) <= d_j <= _max_day_for_account(a_i)
+                        ):
+                            c_accs[i], c_accs[j] = a_j, a_i
+                            swapped_4c = True
+                if not swapped_4c:
+                    break
             for (d_idx, s_idx), a_sorted in zip(positions, c_accs, strict=False):
                 day_buckets[d_idx][s_idx] = a_sorted
 
     # 4d. Cross-cluster monotonic rest refinement (within the same tier so Gateway/Non-Gateway daily
     # balance is preserved): if an account in a later day has rested significantly longer than an
-    # account in an earlier day, swap them whenever strict cluster caps (`relax=0`) and `min_day` allow.
+    # account in an earlier day, swap them whenever strict cluster caps (`relax=0`), `min_day`, and `max_day` allow.
     for _pass in range(3):
         any_swapped = False
         for d_early in range(cycle_days - 1):
@@ -1487,7 +1723,10 @@ def build_safe_schedule(
                             continue
                         if a_l.rest_hours <= a_e.rest_hours + 4.0:
                             continue
-                        if d_early < _min_day_for_account(a_l) or d_late < _min_day_for_account(a_e):
+                        if not (
+                            _min_day_for_account(a_l) <= d_early <= _max_day_for_account(a_l)
+                            and _min_day_for_account(a_e) <= d_late <= _max_day_for_account(a_e)
+                        ):
                             continue
                         if a_e.cluster != a_l.cluster:
                             c_l_in_early = day_cluster_counts[d_early].get(a_l.cluster, 0) + 1
@@ -1539,6 +1778,7 @@ def build_safe_schedule(
             raw_pairs,
             prev_shifts,
             day_index=d_idx,
+            balance_shifts=(mode in ("work", "keepalive")),
         )
         for pr in [*m_pairs, *e_pairs]:
             if pr.has_cluster_collision:
@@ -1566,25 +1806,59 @@ def build_safe_schedule(
             )
         )
 
+    _assign_quarantine_solos(days_out, quarantine_accounts, cycle_days, seed_int)
+
     return SchedulePlan(
         generated_at=now_dt.strftime("%Y-%m-%d %H:%M"),
         cycle_days=cycle_days,
-        total_live=len(sched_accounts),
+        total_live=len(sched_accounts) + len(quarantine_accounts),
         days=days_out,
         completed_today=completed_today_list,
         skipped_drafts=skipped_drafts,
         collision_count=collision_total,
         adjacent_overlap_count=adj_overlap_total,
         repeated_pair_count=repeated_pair_total,
+        schedule_mode=mode,
+        quarantine_accounts=quarantine_accounts,
+        muse_bridge_accounts=muse_bridge_accounts,
+        muse_bridge_ping_needed=muse_bridge_ping_needed,
+        healthy_deferred=healthy_deferred,
     )
 
 
 def format_schedule_markdown(plan: SchedulePlan) -> str:
     """Format a `SchedulePlan` into a readable Markdown summary for clipboard copy."""
+    if plan.schedule_mode == "keepalive":
+        hdr = f"# 🛡️ LỊCH GIỮ PHIÊN ({plan.cycle_days} NGÀY — {plan.total_live} ACC CẦN MỞ)"
+    elif plan.schedule_mode == "work":
+        hdr = f"# 🚀 LỊCH LÀM VIỆC ({plan.cycle_days} NGÀY — {plan.total_live} ACC LIVE)"
+    else:
+        hdr = f"# 📅 LỊCH NUÔI AN TOÀN ({plan.cycle_days} NGÀY — {plan.total_live} ACC LIVE)"
     lines: list[str] = [
-        f"# 📅 LỊCH NUÔI AN TOÀN ({plan.cycle_days} NGÀY — {plan.total_live} ACC LIVE)",
+        hdr,
         f"- Tạo lúc: {plan.generated_at} · Trùng cụm cùng lúc: {plan.collision_count}",
     ]
+    if plan.healthy_deferred:
+        lines.append(
+            f"- 💤 Tạm hoãn {len(plan.healthy_deferred)} acc phiên còn >21d: "
+            + ", ".join(a.name for a in plan.healthy_deferred)
+        )
+    if plan.muse_bridge_accounts:
+        mb_desc = ", ".join(
+            f"{a.name} ({a.muse_bridge_model}, {a.sess_exp})"
+            for a in plan.muse_bridge_accounts
+        )
+        lines.append(f"- 🤖 MuseBridge tự quản lý (tách khỏi lịch tay): {mb_desc}")
+    if plan.muse_bridge_ping_needed:
+        lines.append(
+            "- ⚠️ CẦN BẮN 1 TIN NHẮN MAUSBOT ĐỂ GIA HẠN `hatch_sess` (<=10d): "
+            + ", ".join(f"{a.name} ({a.sess_exp})" for a in plan.muse_bridge_ping_needed)
+        )
+    if plan.quarantine_accounts:
+        lines.append(
+            f"- 🧪 Cách ly đi lẻ cuối ca ({len(plan.quarantine_accounts)} acc): "
+            + ", ".join(a.name for a in plan.quarantine_accounts)
+        )
     if plan.skipped_drafts:
         lines.append(f"- Bỏ qua ô trống chưa gắn acc: {', '.join(plan.skipped_drafts)}")
     lines.append("")
@@ -1592,13 +1866,15 @@ def format_schedule_markdown(plan: SchedulePlan) -> str:
     def _fmt_acc(a: ScheduledAccount, day_idx: int) -> str:
         eff = int(round(a.rest_hours + day_idx * 24))
         label = a.name if a.name == a.email else f"{a.name} ({a.email})"
+        exp_txt = f", hạn {a.sess_exp}" if a.sess_exp and a.sess_exp != "-" else ""
         if a.completed_today:
-            return f"**{label}** (`{a.cluster}{a.port}`, ✓ Đã mở hôm nay)"
-        return f"**{label}** (`{a.cluster}{a.port}`, mở ~{eff}h)"
+            return f"**{label}** (`{a.cluster}{a.port}`{exp_txt}, ✓ Đã mở hôm nay)"
+        return f"**{label}** (`{a.cluster}{a.port}`{exp_txt}, mở ~{eff}h)"
 
     for d in plan.days:
+        wk_tag = f"W2-{d.weekday_tag}" if d.day_index >= 7 else d.weekday_tag
         lines.append(
-            f"## Ngày {d.day_index + 1} — {d.weekday_name_vi} ({d.weekday_tag}) · {d.date_str} ({d.total_accounts} acc)"
+            f"## Ngày {d.day_index + 1} — {d.weekday_name_vi} ({wk_tag}) · {d.date_str} ({d.total_accounts} acc)"
         )
         if d.morning_pairs:
             lines.append("### ☀️ Ca Sáng (08:00 – 11:30 VN)")
@@ -1612,6 +1888,10 @@ def format_schedule_markdown(plan: SchedulePlan) -> str:
                 s1 = _fmt_acc(pr.first, d.day_index)
                 s2 = f" + {_fmt_acc(pr.second, d.day_index)}" if pr.second else " *(Đi lẻ 1 máy)*"
                 lines.append(f"- **Cặp {pr.pair_index}:** {s1}{s2}")
+        if d.quarantine_solos:
+            lines.append("### 🧪 Cách ly đi lẻ cuối ca (Quarantine Solo)")
+            for q_idx, q_acc in enumerate(d.quarantine_solos, start=1):
+                lines.append(f"- **Q{q_idx}:** {_fmt_acc(q_acc, d.day_index)}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -1714,18 +1994,21 @@ def _build_fixed_work_squad_plan(
     shuffle_seed: int,
     squad_index: int,
     pinned_squads: dict[str, list[str]] | None,
+    max_per_gateway: int = 3,
     now_dt: dt.datetime,
 ) -> WorkSquadPlan:
     """Partition eligible accounts into deterministic, time-invariant conflict-free /64 squads."""
     cand_by_name: dict[str, SquadCandidate] = {}
     rank_by_name: dict[str, tuple[int, int, float, tuple[int, int | str, str]]] = {}
     has_active_schedule = any(parse_schedule_tag(p.status) is not None for p in profiles)
+    mb_gw_running = getattr(snap, "muse_bridge_running_gw_clusters", {}) or {}
 
     for p in profiles:
         grp = (p.group or "").strip().lower()
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
         if (
             grp in ("disconnected", "theo dõi", "theo doi")
+            or grp.startswith(("1.", "2.", "3.", "4.", "5."))
             or "disconnected" in pgs_lower
             or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
         ):
@@ -1733,7 +2016,7 @@ def _build_fixed_work_squad_plan(
         if not (p.proxy or "").strip():
             continue
         info = snap.profiles.get(p.name)
-        if info is None or info.is_banned:
+        if info is None or info.is_banned or info.muse_bridge_model or info.dead_port_freeze_hours > 0.0:
             continue
         if any(
             c in info.audit_codes
@@ -1816,6 +2099,12 @@ def _build_fixed_work_squad_plan(
             natural_name_key(p.name),
         )
 
+    def _gw_cap_for(cluster_name: str) -> int:
+        if max_per_gateway <= 0:
+            return target_n
+        used_mb = int(mb_gw_running.get(cluster_name, 0) or 0)
+        return max(0, int(max_per_gateway) - used_mb)
+
     pinned_by_idx: dict[int, list[SquadCandidate]] = {}
     used_names: set[str] = set()
     prefix = f"{target_n}:"
@@ -1828,6 +2117,7 @@ def _build_fixed_work_squad_plan(
                 continue
             sq_cands: list[SquadCandidate] = []
             seen_cls: set[str] = set()
+            gw_seen_counts: dict[str, int] = {}
             seen_eps: set[str] = set()
             seen_v6: set[str] = set()
             seen_ips: set[str] = set()
@@ -1835,7 +2125,10 @@ def _build_fixed_work_squad_plan(
                 c = cand_by_name.get(m_name)
                 if c is None or m_name in used_names:
                     continue
-                if not is_gateway_ipv6_cluster(c.cluster) and c.cluster in seen_cls:
+                is_gw_c = is_gateway_ipv6_cluster(c.cluster)
+                if not is_gw_c and c.cluster in seen_cls:
+                    continue
+                if is_gw_c and gw_seen_counts.get(c.cluster, 0) >= _gw_cap_for(c.cluster):
                     continue
                 if c.endpoint and c.endpoint in seen_eps:
                     continue
@@ -1844,6 +2137,8 @@ def _build_fixed_work_squad_plan(
                 if c.exit_ip and c.exit_ip in seen_ips:
                     continue
                 seen_cls.add(c.cluster)
+                if is_gw_c:
+                    gw_seen_counts[c.cluster] = gw_seen_counts.get(c.cluster, 0) + 1
                 if c.endpoint:
                     seen_eps.add(c.endpoint)
                 if c.v6_prefix:
@@ -1891,6 +2186,8 @@ def _build_fixed_work_squad_plan(
         prop_gw = (rem_gw + est_squads - 1) // est_squads
         min_gw_needed = max(0, target_n - avail_usa_cls)
         max_gw = max(1, min(target_n, max(prop_gw, min_gw_needed)))
+        if max_per_gateway > 0:
+            max_gw = min(max_gw, max_per_gateway)
         need_second_gw = max_gw >= 2
         gw_counts: dict[str, int] = {}
         for c in sq:
@@ -1905,9 +2202,8 @@ def _build_fixed_work_squad_plan(
                 is_gw = is_gateway_ipv6_cluster(cl)
                 if not is_gw and cl in used_cls:
                     continue
-                if is_gw and gw_counts.get(cl, 0) >= max_gw:
+                if is_gw and gw_counts.get(cl, 0) >= min(max_gw, _gw_cap_for(cl)):
                     continue
-                # Find first candidate in pool whose endpoint, /64 prefix, and exact IP do not collide
                 valid_idx = next(
                     (
                         i
@@ -1919,7 +2215,6 @@ def _build_fixed_work_squad_plan(
                     -1,
                 )
                 if valid_idx >= 0:
-                    # Prefer distinct non-gateway clusters while filling proportional gateway share cleanly
                     gw_slot_pen = (
                         0
                         if (is_gw and gw_counts.get(cl, 0) < prop_gw and need_second_gw)
@@ -2020,11 +2315,14 @@ def select_parallel_work_squad(
     shuffle_seed: int = 0,
     squad_index: int = 0,
     pinned_squads: dict[str, list[str]] | None = None,
+    max_per_gateway: int = 3,
     now: dt.datetime | None = None,
 ) -> WorkSquadPlan:
-    """Select `count` conflict-free profiles across distinct IPv6 /64 clusters for parallel work."""
+    """Select `count` conflict-free profiles across distinct IPv6 /64 clusters with /48 gateway cap."""
     now_dt = now or dt.datetime.now()
-    active_set = set(running_names or ())
+    active_set = set(running_names or ()) | set(
+        getattr(snap, "muse_bridge_running_names", set()) or ()
+    )
     target_n = max(1, min(12, int(count)))
 
     busy_clusters: dict[str, list[str]] = {}
@@ -2045,6 +2343,7 @@ def select_parallel_work_squad(
             shuffle_seed=shuffle_seed,
             squad_index=squad_index,
             pinned_squads=pinned_squads,
+            max_per_gateway=max_per_gateway,
             now_dt=now_dt,
         )
 
@@ -2058,6 +2357,7 @@ def select_parallel_work_squad(
         pgs_lower = [pg.strip().lower() for pg in (p.pages or [])]
         if (
             grp in ("disconnected", "theo dõi", "theo doi")
+            or grp.startswith(("1.", "2.", "3.", "4.", "5."))
             or "disconnected" in pgs_lower
             or (("theo dõi" in pgs_lower or "theo doi" in pgs_lower) and "live" not in pgs_lower)
         ):
@@ -2065,7 +2365,7 @@ def select_parallel_work_squad(
         if not (p.proxy or "").strip():
             continue
         info = snap.profiles.get(p.name)
-        if info is None or info.is_banned:
+        if info is None or info.is_banned or info.muse_bridge_model:
             continue
         if any(
             c in info.audit_codes
@@ -2145,7 +2445,6 @@ def select_parallel_work_squad(
             else 0.0
         )
         if mode == "prime":
-            # Keep-Alive 30d mode: prioritize clean accounts whose .muse.ai hatch_sess cookie has the fewest days left
             sess_urgency_bonus = (
                 max(0.0, (35.0 - float(min(35, max(0, info.sess_exp_days)))) * 45.0)
                 if (info.sess_exp_days is not None and info.sess_exp_days >= 0)
@@ -2160,7 +2459,6 @@ def select_parallel_work_squad(
                 + jitter
             )
         else:
-            # Rotation mode: prioritize well-rested accounts and rising stars so strong accounts rest safely
             rising_bonus = 40.0 if (is_rising and rest_h >= 24.0) else 0.0
             today_load_pen = min(120.0, info.today_minutes * 1.2)
             rank_score = (
@@ -2174,20 +2472,29 @@ def select_parallel_work_squad(
             )
 
         if has_active_schedule:
-            # 0 = Today un-run, 1..6 = Next days un-run (T3..CN), 7 = untagged un-run, 99 = already ran today / fatigued
             bucket_tier = 99 if is_fatigued else sched_tier
         else:
             bucket_tier = 99 if is_fatigued else 0
 
         cands_by_cluster.setdefault(cl, []).append((bucket_tier, rank_score, cand))
 
-    # Pick top representative(s) per cluster: 1 for each usa10X /64 node, up to target_n independent /64 ports for /48 gateway
+    # Pick top representative(s) per cluster: 1 for each usa10X /64 node, up to max_per_gateway on /48 gateway
     picked_pool: list[tuple[int, float, SquadCandidate]] = []
     all_clusters = sorted(cands_by_cluster)
 
     for cl in all_clusters:
         is_gw = is_gateway_ipv6_cluster(cl)
-        cap = target_n if is_gw else 1
+        if is_gw:
+            active_gw = len(busy_clusters.get(cl, []))
+            cap = (
+                min(target_n, max(0, int(max_per_gateway) - active_gw))
+                if max_per_gateway > 0
+                else target_n
+            )
+        else:
+            cap = 1
+        if cap <= 0:
+            continue
         sorted_cands = sorted(
             cands_by_cluster.get(cl, []),
             key=lambda x: (x[0], -x[1], natural_name_key(x[2].name)),
@@ -2211,7 +2518,6 @@ def select_parallel_work_squad(
                 seen_v6.add(c_item.v6_prefix)
             if c_item.exit_ip:
                 seen_ips.add(c_item.exit_ip)
-            # Slightly defer extra gateway slots (2nd/3rd+ on 209.141.40.174) behind primary /64 nodes of the same schedule tier
             slot_pen = len(chosen_for_cl) * 80.0
             picked_pool.append((tier_priority, -(sc - slot_pen), c_item))
             chosen_for_cl.append((tier_priority, sc, c_item))
@@ -2224,6 +2530,208 @@ def select_parallel_work_squad(
         target_size=target_n,
         candidates=final_candidates,
         busy_clusters=busy_clusters,
+    )
+
+
+@dataclass
+class IncubationCandidate:
+    name: str
+    email: str
+    group: str
+    age_days: int
+    tier: str  # "clean_watch" | "bot_warm_standby" | "bot_cold_ready"
+    current_proxy: str = ""
+    suggested_proxy: str = ""
+    has_session: bool = False
+    sess_exp: str = "-"
+    hold_reason: str = ""
+
+
+@dataclass
+class IncubationPlan:
+    clean_ready: list[IncubationCandidate] = field(default_factory=list)
+    bot_standby_ready: list[IncubationCandidate] = field(default_factory=list)
+    immature_holding: list[IncubationCandidate] = field(default_factory=list)
+    blocked_warnings: list[str] = field(default_factory=list)
+    clean_pool_free: list[str] = field(default_factory=list)
+    gateway_pool_free: list[str] = field(default_factory=list)
+
+
+def build_incubation_recommendations(
+    profiles: list[Profile],
+    snap: MonitorSnapshot,
+    unassigned_proxies: list[str] | None = None,
+    *,
+    now: dt.datetime | None = None,
+) -> IncubationPlan:
+    """Split Watch embryos into Clean (1./2. -> usa*) and Bot Standby (3./4./5. -> 209.141*) queues."""
+    now_dt = now or dt.datetime.now()
+    frozen_eps = getattr(snap, "frozen_endpoints", {}) or {}
+    cp_hit_names = {name for name, _ in (getattr(snap, "mail_checkpoint_hits", []) or [])}
+
+    clean_pool_free: list[str] = []
+    gateway_pool_free: list[str] = []
+    blocked_warnings: list[str] = []
+    seen_free_ep: set[str] = set()
+
+    for px in unassigned_proxies or []:
+        px_s = (px or "").strip()
+        if not px_s:
+            continue
+        ep = extract_proxy_endpoint(px_s)
+        if ep in seen_free_ep:
+            continue
+        if ep:
+            seen_free_ep.add(ep)
+        if ep in frozen_eps:
+            hrs_left, by_prof = frozen_eps[ep]
+            blocked_warnings.append(
+                f"❄️ Port đóng băng {ep}: còn {hrs_left:.0f}h/{int(DEAD_PORT_FREEZE_HOURS)}h (acc chết {by_prof})"
+            )
+            continue
+        cl = extract_proxy_cluster(px_s)
+        if cl.startswith("usa") and cl[3:].isdigit():
+            clean_pool_free.append(px_s)
+        elif is_gateway_ipv6_cluster(cl):
+            gateway_pool_free.append(px_s)
+
+    banned_endpoints: set[str] = set()
+    for p in profiles:
+        info = snap.profiles.get(p.name)
+        if info and info.is_banned:
+            b_ep = extract_proxy_endpoint(p.proxy)
+            if b_ep:
+                banned_endpoints.add(b_ep)
+
+    clean_ready: list[IncubationCandidate] = []
+    bot_standby_ready: list[IncubationCandidate] = []
+    immature_holding: list[IncubationCandidate] = []
+
+    for p in profiles:
+        grp_raw = (p.group or "").strip()
+        grp_low = grp_raw.lower()
+        pgs_low = [pg.strip().lower() for pg in (p.pages or [])]
+        is_watch = (
+            grp_low in ("theo dõi", "theo doi")
+            or grp_low.startswith(("1.", "2.", "3.", "4.", "5."))
+            or (
+                ("theo dõi" in pgs_low or "theo doi" in pgs_low)
+                and "live" not in pgs_low
+            )
+        )
+        if not is_watch or grp_low == "disconnected" or "disconnected" in pgs_low:
+            continue
+
+        info = snap.profiles.get(p.name)
+        if info and (info.is_banned or info.has_meta_checkpoint or info.muse_bridge_model):
+            continue
+        if p.name in cp_hit_names:
+            continue
+
+        age_days = 0
+        if p.created_at:
+            ymd = parse_flexible_date(p.created_at, today=now_dt.date())
+            if ymd:
+                with contextlib.suppress(ValueError):
+                    age_days = max(0, (now_dt.date() - dt.date.fromisoformat(ymd)).days)
+        if info and info.datr_age_days > age_days:
+            age_days = max(age_days, int(info.datr_age_days))
+
+        cur_px = (p.proxy or "").strip()
+        ep = extract_proxy_endpoint(cur_px)
+        cl = extract_proxy_cluster(cur_px)
+        if ep and (ep in banned_endpoints or ep in frozen_eps):
+            blocked_warnings.append(
+                f"🚫 {p.name} ({grp_raw or '-'}): dùng chung / đóng băng port {ep} với acc chết — cần đổi port!"
+            )
+            continue
+
+        high_risk = is_high_risk_embryo_profile(p)
+        has_sess = bool(info and (info.hatch_gw or info.hatch_sess))
+        sess_exp = info.sess_exp if info else "-"
+
+        if high_risk and cl.startswith("usa") and cl[3:].isdigit() and not has_sess:
+            blocked_warnings.append(
+                f"🛡️ {p.name} ({grp_raw or '-'}): nhóm rủi ro cao đang gắn nhầm lên {cl} sạch!"
+            )
+            continue
+
+        if not high_risk:
+            min_age = 12
+            cand = IncubationCandidate(
+                name=p.name,
+                email=(p.email or p.name).strip(),
+                group=grp_raw,
+                age_days=age_days,
+                tier="clean_watch",
+                current_proxy=cur_px,
+                has_session=has_sess,
+                sess_exp=sess_exp,
+            )
+            if age_days >= min_age or has_sess:
+                clean_ready.append(cand)
+            else:
+                cand.hold_reason = f"{age_days}d / cần ≥{min_age}d"
+                immature_holding.append(cand)
+        else:
+            min_age = 7 if grp_low.startswith("5.") else 10
+            tier = "bot_warm_standby" if has_sess else "bot_cold_ready"
+            cand = IncubationCandidate(
+                name=p.name,
+                email=(p.email or p.name).strip(),
+                group=grp_raw,
+                age_days=age_days,
+                tier=tier,
+                current_proxy=cur_px,
+                has_session=has_sess,
+                sess_exp=sess_exp,
+            )
+            if has_sess or age_days >= min_age:
+                bot_standby_ready.append(cand)
+            else:
+                cand.hold_reason = f"{age_days}d / cần ≥{min_age}d"
+                immature_holding.append(cand)
+
+    def _clean_sort_key(c: IncubationCandidate) -> tuple[int, int, int, tuple[int, int | str, str]]:
+        g_rank = 0 if c.group.startswith("1.") else (1 if c.group.startswith("2.") else 2)
+        has_px = 0 if c.current_proxy else 1
+        return (g_rank, has_px, -c.age_days, natural_name_key(c.name))
+
+    def _bot_sort_key(c: IncubationCandidate) -> tuple[int, int, int, int, tuple[int, int | str, str]]:
+        warm_rank = 0 if c.tier == "bot_warm_standby" else 1
+        g_low = c.group.lower()
+        g_rank = (
+            0 if g_low.startswith("3.") else (1 if g_low.startswith("4.") else 2)
+        )
+        has_px = 0 if c.current_proxy else 1
+        return (warm_rank, g_rank, has_px, -c.age_days, natural_name_key(c.name))
+
+    clean_ready.sort(key=_clean_sort_key)
+    bot_standby_ready.sort(key=_bot_sort_key)
+    immature_holding.sort(key=lambda c: (-c.age_days, natural_name_key(c.name)))
+
+    # Suggest 1-to-1 proxy pairings for ready unproxied embryos
+    clean_iter = iter(clean_pool_free)
+    for c in clean_ready:
+        if not c.current_proxy:
+            nxt_px = next(clean_iter, "")
+            if nxt_px:
+                c.suggested_proxy = nxt_px
+
+    gw_iter = iter(gateway_pool_free)
+    for c in bot_standby_ready:
+        if not c.current_proxy:
+            nxt_px = next(gw_iter, "")
+            if nxt_px:
+                c.suggested_proxy = nxt_px
+
+    return IncubationPlan(
+        clean_ready=clean_ready,
+        bot_standby_ready=bot_standby_ready,
+        immature_holding=immature_holding,
+        blocked_warnings=blocked_warnings,
+        clean_pool_free=clean_pool_free,
+        gateway_pool_free=gateway_pool_free,
     )
 
 

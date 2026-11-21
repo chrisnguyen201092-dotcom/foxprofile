@@ -9,7 +9,12 @@ import flet as ft
 from ..core.strings import get_string
 from ..interfaces.protocols import IBrowserLauncher, IProfileManager, IProxyService
 from ..services.browser.window_title import enqueue_window_action
-from ..services.monitor import MonitorService, extract_proxy_endpoint
+from ..services.monitor import (
+    MonitorService,
+    extract_proxy_endpoint,
+    extract_proxy_port,
+    is_high_risk_embryo_profile,
+)
 from ..services.proxy.geo_check import (
     derive_ip_metadata,
     extract_ip_from_check_detail,
@@ -21,6 +26,7 @@ from ..utils.totp import (
     format_oauth_reader_line,
     generate_totp,
     parse_mail_credentials_line,
+    run_safe_mail_checkpoint_scan,
 )
 from ..utils.validation import (
     normalize_acc_no,
@@ -121,11 +127,24 @@ class AppHandlers:
             return
         page = self._get_page()
         if self._monitor is not None and page is not None:
+            active_now = self._bl.running_profile_names() | set(self._state.loading)
+            all_profs = self._pm.list_profiles()
+            snap_pre = self._monitor.snapshot(all_profs, active_now)
+            info_pre = snap_pre.profiles.get(name)
+            never_launched_on_proxy = bool(
+                profile.proxy
+                and info_pre is not None
+                and info_pre.cookie_count == 0
+                and info_pre.history_pages == 0
+                and info_pre.session_count == 0
+                and not self._monitor.get_ip_history(name)
+            )
             warnings = self._monitor.check_prelaunch(
                 profile,
-                self._pm.list_profiles(),
+                all_profs,
                 self._bl.running_profile_names(),
                 set(self._state.loading),
+                snap=snap_pre,
             )
             if warnings:
 
@@ -140,7 +159,97 @@ class AppHandlers:
                     if not self._state.is_loading(name):
                         self._fast_refresh()
 
-                open_prelaunch_guard_dialog(page, name, warnings, _force)
+                verify_cb = None
+                if not any(w.level == "critical" for w in warnings):
+                    pool_tok_map: dict[str, str] = {}
+                    if hasattr(self._pm, "list_mail_pool"):
+                        for raw_ln in self._pm.list_mail_pool():
+                            parsed_m = parse_mail_credentials_line(raw_ln)
+                            em_m = (parsed_m.get("email") or "").strip().lower()
+                            tok_m = parsed_m.get("mail_token") or parsed_m.get("password") or ""
+                            if em_m and tok_m:
+                                pool_tok_map[em_m] = tok_m
+                    mail_target = self._monitor.resolve_profile_mail_target(
+                        profile, pool_tok_map
+                    )
+                    if mail_target is not None:
+
+                        def _verify_and_launch(
+                            set_status: Callable[[str, str], None],
+                            close_dlg: Callable[[], None],
+                            target_em: str = mail_target[0],
+                            target_tok: str = mail_target[1],
+                        ) -> None:
+                            def _probe() -> None:
+                                try:
+                                    res = run_safe_mail_checkpoint_scan(
+                                        [(name, target_em, target_tok)],
+                                        delay_range=(0.0, 0.0),
+                                        top=6,
+                                        timeout=12,
+                                    )
+                                    hits = res.get("hits") or {}
+                                    if name in hits:
+                                        hit = hits[name]
+                                        if self._monitor is not None:
+                                            self._monitor.record_mail_checkpoint_hit(name, hit)
+                                        if never_launched_on_proxy:
+                                            self._pm.bulk_update_proxies({name: None})
+                                        self._log(
+                                            get_string(
+                                                "guard_cp0_hit_aborted",
+                                                subject=str(hit.get("subject") or "Checkpoint"),
+                                                name=name,
+                                            )
+                                        )
+                                        close_dlg()
+                                        self.quarantine_checkpoint_profiles([name])
+                                        return
+                                    scanned = res.get("scanned_names") or set()
+                                    dead_toks = res.get("dead_tokens") or set()
+                                    if name in scanned:
+                                        if self._monitor is not None:
+                                            self._monitor.record_mail_scan(
+                                                {},
+                                                dead_tokens=dead_toks,
+                                                scanned_names={name},
+                                                update_timestamp=False,
+                                            )
+                                        self._log(
+                                            get_string("guard_cp0_clean_launching", name=name)
+                                        )
+                                        close_dlg()
+                                        _force()
+                                        return
+                                    if dead_toks and self._monitor is not None:
+                                        self._monitor.record_mail_scan(
+                                            {},
+                                            dead_tokens=dead_toks,
+                                            update_timestamp=False,
+                                        )
+                                    st_map = res.get("email_status") or {}
+                                    st_entry = st_map.get(target_em.lower())
+                                    err_msg = (
+                                        st_entry[1]
+                                        if isinstance(st_entry, (list, tuple))
+                                        and len(st_entry) > 1
+                                        else "Inbox check failed"
+                                    )
+                                    set_status(str(err_msg), "error")
+                                except Exception as exc:
+                                    set_status(str(exc)[:140] or "Inbox check failed", "error")
+
+                            threading.Thread(target=_probe, daemon=True).start()
+
+                        verify_cb = _verify_and_launch
+
+                open_prelaunch_guard_dialog(
+                    page,
+                    name,
+                    warnings,
+                    _force,
+                    on_verify_inbox_and_launch=verify_cb,
+                )
                 return
         self._state.set_loading(name, True)
         self._fast_refresh()
@@ -269,6 +378,123 @@ class AppHandlers:
     def on_open_trust_detail(self, name: str) -> None:
         self.on_open_session_history(name, initial_tab="trust")
 
+    def _quarantine_and_swap_target(
+        self,
+        old_target: str,
+        new_proxy: str | None = None,
+        *,
+        reason: str = "burned",
+    ) -> tuple[bool, str]:
+        running = self._bl.running_profile_names() | set(self._state.loading)
+        profiles_list = self._pm.list_profiles()
+        target = (old_target or "").strip()
+        if not target:
+            return False, get_string("validation_invalid_proxy")
+
+        snap = (
+            self._monitor.snapshot(profiles_list, running, fast_init=True)
+            if self._monitor is not None
+            else None
+        )
+        old_ep = "" if target.startswith(":") else extract_proxy_endpoint(target)
+        old_port = target if target.startswith(":") else ""
+        matching_active = []
+        for p in profiles_list:
+            cur = (p.proxy or "").strip()
+            if not cur or p.name in running:
+                continue
+            info = snap.profiles.get(p.name) if snap is not None else None
+            if info is not None and info.is_banned:
+                continue
+            hit = (
+                (extract_proxy_port(cur) == old_port)
+                if old_port
+                else (cur == target or (old_ep and extract_proxy_endpoint(cur) == old_ep))
+            )
+            if hit:
+                matching_active.append(p)
+
+        chosen_px = (new_proxy or "").strip()
+        if chosen_px:
+            if not validate_proxy_format(chosen_px)[0]:
+                return False, get_string("validation_invalid_proxy")
+        else:
+            unassigned = self._pm.list_unassigned_proxies()
+            q_eps = (
+                set(self._pm.list_quarantined_proxies().keys())
+                if hasattr(self._pm, "list_quarantined_proxies")
+                else set()
+            )
+            for_high_risk = any(is_high_risk_embryo_profile(p) for p in matching_active)
+            if self._monitor is not None:
+                spares = self._monitor.rank_clean_spare_proxies(
+                    unassigned,
+                    profiles_list,
+                    running,
+                    quarantined_endpoints=q_eps,
+                    for_high_risk=for_high_risk,
+                    snap=snap,
+                )
+            else:
+                spares = unassigned
+            if not spares:
+                return False, get_string("proxy_pool_no_clean_spare")
+            chosen_px = spares[0]
+
+        updated = self._pm.replace_proxy_across_profiles(
+            target,
+            chosen_px,
+            skip_names=running,
+            preserve_archived=True,
+            quarantine_old=True,
+            quarantine_reason=reason,
+        )
+        for pname in updated:
+            self._state.proxy_status.pop(pname, None)
+        old_lbl = old_ep or extract_proxy_port(target) or target
+        new_lbl = extract_proxy_endpoint(chosen_px) or extract_proxy_port(chosen_px) or chosen_px
+        msg = get_string(
+            "proxy_pool_quarantined_log",
+            old_ep=old_lbl,
+            count=len(updated),
+            new_ep=new_lbl,
+        )
+        self._log(msg)
+        self._refresh_and_schedule_snapshot()
+
+        page = self._get_page()
+        if updated and page is not None and hasattr(page, "run_task"):
+
+            async def _refresh_geo() -> None:
+                ok, detail = await asyncio.to_thread(self._ps.check_proxy_sync, chosen_px, 10)
+                if not ok:
+                    return
+                raw_ip = extract_ip_from_check_detail(detail)
+                if not raw_ip:
+                    return
+                country, auto_tz, auto_loc = await asyncio.to_thread(
+                    derive_ip_metadata, raw_ip, detail
+                )
+                isp_name, ip_type = await asyncio.to_thread(lookup_ip_isp, raw_ip)
+                for pname in updated:
+                    if hasattr(self._pm, "refresh_profile_geo"):
+                        self._pm.refresh_profile_geo(pname, auto_tz, auto_loc)
+                    if self._monitor is not None:
+                        self._monitor.record_exit_ip(
+                            pname,
+                            raw_ip,
+                            country=country,
+                            tz=auto_tz or "",
+                            proxy=chosen_px,
+                            isp=isp_name,
+                            ip_type=ip_type,
+                        )
+                self._refresh_and_schedule_snapshot()
+
+            page.run_task(_refresh_geo)
+
+        return True, msg
+
     def on_open_trust_monitor(self, initial_tab: str = "scores") -> None:
         page = self._get_page()
         if page is None or self._monitor is None:
@@ -285,6 +511,36 @@ class AppHandlers:
             if self._monitor is not None:
                 self._monitor.record_ip_risk(ip_addr, risk_data)
 
+        def _on_quarantine_finding(finding_profiles: list[str]) -> tuple[bool, str]:
+            snap_cur = _get_snap()
+            endpoints: list[str] = []
+            seen_ep: set[str] = set()
+            for pname in finding_profiles:
+                info = snap_cur.profiles.get(pname)
+                if info is not None and info.is_banned:
+                    continue
+                p_obj = self._pm.profiles.get(pname)
+                px = (p_obj.proxy or "").strip() if p_obj else ""
+                if not px:
+                    continue
+                ep = extract_proxy_endpoint(px) or px
+                if ep not in seen_ep:
+                    seen_ep.add(ep)
+                    endpoints.append(px)
+            if not endpoints:
+                return False, get_string("proxy_pool_no_clean_spare")
+            last_msg = ""
+            for ep_px in endpoints:
+                ok, msg = self._quarantine_and_swap_target(
+                    ep_px,
+                    None,
+                    reason="burned_audit",
+                )
+                last_msg = msg
+                if not ok:
+                    return False, msg
+            return True, last_msg
+
         open_trust_monitor_dialog(
             page,
             self._pm.list_profiles,
@@ -295,6 +551,7 @@ class AppHandlers:
             on_log=self._log,
             on_refresh_main=self._state.schedule_refresh,
             initial_tab=initial_tab,
+            on_quarantine_swap_finding=_on_quarantine_finding,
         )
 
     def on_toggle_pin(self, name: str) -> None:
@@ -410,6 +667,50 @@ class AppHandlers:
                     out[pname] = str(hist[0]["ip"])
             return out
 
+        frozen_eps: dict[str, tuple[float, str]] = {}
+        if self._monitor is not None:
+            snap_px = self._monitor.snapshot(
+                self._pm.list_profiles(),
+                _get_running(),
+                fast_init=True,
+            )
+            frozen_eps = dict(snap_px.frozen_endpoints)
+
+        def _get_clean_spares(target_px: str) -> list[str]:
+            unassigned = self._pm.list_unassigned_proxies()
+            if self._monitor is None:
+                return unassigned
+            q_eps = (
+                set(self._pm.list_quarantined_proxies().keys())
+                if hasattr(self._pm, "list_quarantined_proxies")
+                else set()
+            )
+            t_ep = extract_proxy_endpoint(target_px)
+            profiles_list = self._pm.list_profiles()
+            for_high_risk = any(
+                is_high_risk_embryo_profile(p)
+                for p in profiles_list
+                if (p.proxy or "").strip() == target_px
+                or (t_ep and extract_proxy_endpoint(p.proxy) == t_ep)
+            )
+            return self._monitor.rank_clean_spare_proxies(
+                unassigned,
+                profiles_list,
+                _get_running(),
+                quarantined_endpoints=q_eps,
+                for_high_risk=for_high_risk,
+            )
+
+        def _unquarantine(ep: str) -> bool:
+            ok = (
+                self._pm.unquarantine_proxy(ep)
+                if hasattr(self._pm, "unquarantine_proxy")
+                else False
+            )
+            if ok:
+                self._refresh_and_schedule_snapshot()
+            return ok
+
         open_proxy_pool_dialog(
             page,
             self._pm.list_profiles,
@@ -423,6 +724,17 @@ class AppHandlers:
             on_remove_from_pool=_remove_from_pool,
             on_assign_to_profile=_assign_to_profile,
             get_exit_ips=_get_exit_ips,
+            frozen_endpoints=frozen_eps,
+            get_clean_spares=_get_clean_spares,
+            on_quarantine_swap=lambda old_t, new_px: self._quarantine_and_swap_target(
+                old_t, new_px, reason="burned"
+            ),
+            get_quarantined=(
+                self._pm.list_quarantined_proxies
+                if hasattr(self._pm, "list_quarantined_proxies")
+                else None
+            ),
+            on_unquarantine=_unquarantine,
         )
 
     def quarantine_checkpoint_profiles(self, names: list[str]) -> int:
@@ -1118,14 +1430,38 @@ class AppHandlers:
                 on_done=self._state.clear_selection,
             )
 
-    def on_bulk_launch(self) -> None:
+    def _guarded_bulk_launch(
+        self,
+        raw_names: list[str],
+        *,
+        stagger_seconds: tuple[int, int] = (40, 60),
+        shuffle_order: bool = False,
+        on_started: Callable[[list[str]], None] | None = None,
+    ) -> None:
         names = [
             n
-            for n in self._state.selected_names()
-            if not self._bl.is_running(n) and not self._state.is_loading(n)
+            for n in raw_names
+            if n in self._pm.profiles and not self._bl.is_running(n) and not self._state.is_loading(n)
         ]
         if not names:
             return
+
+        def _do_launch(targets: list[str]) -> None:
+            if not targets:
+                return
+            if on_started is not None:
+                on_started(targets)
+            bulk_launch_profiles(
+                targets,
+                self._pm,
+                self._bl,
+                self._state,
+                self._log,
+                stagger_seconds=stagger_seconds,
+                shuffle_order=shuffle_order,
+                monitor=self._monitor,
+            )
+
         page = self._get_page()
         if self._monitor is not None and page is not None:
             issues = self._monitor.check_bulk_prelaunch(
@@ -1138,8 +1474,7 @@ class AppHandlers:
                 safe_names = [n for n in names if n not in issues]
 
                 def _launch_safe() -> None:
-                    if safe_names:
-                        bulk_launch_profiles(safe_names, self._pm, self._bl, self._state, self._log)
+                    _do_launch(safe_names)
 
                 def _force_all() -> None:
                     if self._monitor is not None:
@@ -1147,7 +1482,7 @@ class AppHandlers:
                             p = self._pm.profiles.get(n)
                             if p is not None:
                                 self._monitor.acknowledge_proxy_change(n, p.proxy)
-                    bulk_launch_profiles(names, self._pm, self._bl, self._state, self._log)
+                    _do_launch(names)
 
                 open_bulk_prelaunch_guard_dialog(
                     page,
@@ -1157,7 +1492,10 @@ class AppHandlers:
                     _force_all,
                 )
                 return
-        bulk_launch_profiles(names, self._pm, self._bl, self._state, self._log)
+        _do_launch(names)
+
+    def on_bulk_launch(self) -> None:
+        self._guarded_bulk_launch(list(self._state.selected_names()))
 
     def on_bulk_stop(self) -> None:
         if names := list(self._state.selected_names()):
@@ -1379,8 +1717,41 @@ class AppHandlers:
 
         def _launch_one(name: str) -> None:
             if not self._bl.is_running(name) and not self._state.is_loading(name):
-                launch_or_stop(name, self._pm, self._bl, self._state, self._log)
+                self.on_launch(name)
+
+        def _assign_watch_proxy(prof_name: str, px: str) -> None:
+            if self._bl.is_running(prof_name) or self._state.is_loading(prof_name):
+                return
+            if self._pm.bulk_update_proxies({prof_name: px}) > 0:
+                self._state.proxy_status.pop(prof_name, None)
+                self._log(
+                    get_string(
+                        "schedule_incubation_assigned_log",
+                        name=prof_name,
+                        port=extract_proxy_endpoint(px) or px,
+                    )
+                )
+                self._refresh_and_schedule_snapshot()
+
+        def _stagger_launch_shift(names: list[str], shift_code: str) -> None:
+            shift_lbl = "Ca Sáng" if shift_code == "morning" else "Ca Tối"
+
+            def _log_started(targets: list[str]) -> None:
+                self._log(
+                    get_string(
+                        "schedule_shift_launched_log",
+                        count=len(targets),
+                        shift=shift_lbl,
+                    )
+                )
                 self._fast_refresh()
+
+            self._guarded_bulk_launch(
+                names,
+                stagger_seconds=(45, 60),
+                shuffle_order=False,
+                on_started=_log_started,
+            )
 
         def _apply_plan(plan: SchedulePlan) -> None:
             tag_map = plan.status_tag_map()
@@ -1389,6 +1760,7 @@ class AppHandlers:
                 plan.pairing_records(),
                 plan.shift_records(),
                 plan.cycle_days,
+                schedule_mode=plan.schedule_mode,
             )
             self._state.sort_by = "schedule"
             self._state.current_page = 1
@@ -1428,15 +1800,28 @@ class AppHandlers:
             self._log(get_string("schedule_cleared_log", count=cnt))
             self._refresh_and_schedule_snapshot()
 
+        init_mode = getattr(self._monitor, "schedule_mode", "keepalive")
+        init_days = (
+            12
+            if (init_mode == "keepalive" and self._monitor.schedule_cycle_days < 10)
+            else self._monitor.schedule_cycle_days
+        )
+        free_proxies_fn = getattr(self._pm, "list_unassigned_proxies", None)
+        unassigned_px = free_proxies_fn() if callable(free_proxies_fn) else []
+
         open_safe_schedule_dialog(
             page,
             list(self._pm.profiles.values()),
             snap,
-            initial_cycle_days=self._monitor.schedule_cycle_days,
+            initial_cycle_days=init_days,
+            initial_mode=init_mode,
             last_pairings=self._monitor.last_pairings,
             last_shifts=self._monitor.last_shifts,
             running_names=running_names,
+            unassigned_proxies=unassigned_px,
+            on_assign_proxy=_assign_watch_proxy,
             on_launch_single=_launch_one,
+            on_launch_shift=_stagger_launch_shift,
             on_apply_schedule=_apply_plan,
             on_copy_schedule=_copy_md,
             on_clear_schedule=_clear_tags,
@@ -1474,8 +1859,7 @@ class AppHandlers:
 
         def _launch_one(name: str) -> None:
             if not self._bl.is_running(name) and not self._state.is_loading(name):
-                launch_or_stop(name, self._pm, self._bl, self._state, self._log)
-                self._fast_refresh()
+                self.on_launch(name)
 
         def _save_fixed_squad(key: str, names: list[str] | None, team_idx: int) -> None:
             self._monitor.set_fixed_work_squad(key, names)
@@ -1495,29 +1879,23 @@ class AppHandlers:
             for n in selected_names:
                 self._state.toggle_selection(n)
             self._state.current_page = 1
-            to_open = [
-                n
-                for n in selected_names
-                if not self._bl.is_running(n) and not self._state.is_loading(n)
-            ]
-            self._log(
-                get_string(
-                    "work_squad_stagger_started_log",
-                    count=len(to_open),
-                    mode=_mode_label(mode),
+
+            def _log_started(targets: list[str]) -> None:
+                self._log(
+                    get_string(
+                        "work_squad_stagger_started_log",
+                        count=len(targets),
+                        mode=_mode_label(mode),
+                    )
                 )
+                self._fast_refresh()
+
+            self._guarded_bulk_launch(
+                selected_names,
+                stagger_seconds=(40, 60),
+                shuffle_order=(mode == "fixed"),
+                on_started=_log_started,
             )
-            self._fast_refresh()
-            if to_open:
-                bulk_launch_profiles(
-                    to_open,
-                    self._pm,
-                    self._bl,
-                    self._state,
-                    self._log,
-                    stagger_seconds=(40, 60),
-                    shuffle_order=(mode == "fixed"),
-                )
 
         open_work_squad_dialog(
             page,

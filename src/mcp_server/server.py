@@ -387,6 +387,20 @@ async def assign_proxy_from_pool(
     )
 
 
+@mcp.tool()
+async def quarantine_and_swap_proxy(
+    old_target: str,
+    new_proxy: str | None = None,
+    reason: str = "burned",
+) -> dict:
+    """Quarantine a burned/dead proxy endpoint (preserving archived/banned profile history)
+    and cleanly swap active stopped profiles to `new_proxy` or the cleanest unburned spare in the pool."""
+    body: dict[str, Any] = {"old_target": old_target, "reason": reason}
+    if new_proxy is not None:
+        body["new_proxy"] = new_proxy
+    return await _arequest("POST", "/proxy/pool/quarantine-swap", body)
+
+
 # --- Page control -----------------------------------------------------------
 
 

@@ -107,7 +107,7 @@ def resolve_tag_label(tag: dict[str, str], get_str_fn=None) -> str:
 
 
 _SCHEDULE_TAG_RE = re.compile(
-    r"^(T[2-7]|CN)(?:[-·\s]*C(\d{1,2}))?(?:[-·\s]*(S|T|M|E|SÁNG|TỐI|SANG|TOI))?$",
+    r"^(?:W([12])[-·\s]*)?(T[2-7]|CN)(?:[-·\s]*([CQ])(\d{1,2}))?(?:[-·\s]*(S|T|M|E|SÁNG|TỐI|SANG|TOI))?$",
     re.IGNORECASE,
 )
 _WEEKDAY_TAG_TO_INT: dict[str, int] = {
@@ -131,15 +131,33 @@ _WEEKDAY_COLORS: dict[str, str] = {
 
 
 def parse_schedule_tag(status: str | None) -> tuple[str, int] | None:
-    """Return `(weekday_tag, pair_index)` (e.g. `('T7', 1)`) if `status` is a schedule tag, else `None`."""
+    """Return `(weekday_tag, slot_index)` (e.g. `('T7', 1)`) if `status` is a schedule tag, else `None`."""
     if not status:
         return None
     m = _SCHEDULE_TAG_RE.match(status.strip())
     if not m:
         return None
-    day_tag = m.group(1).upper()
-    pair_num = int(m.group(2)) if m.group(2) else 0
+    day_tag = m.group(2).upper()
+    pair_num = int(m.group(4)) if m.group(4) else 0
     return day_tag, pair_num
+
+
+def parse_schedule_week(status: str | None) -> int:
+    """Return `1` or `2` indicating which cycle week a schedule tag belongs to (defaults to `1`)."""
+    if not status:
+        return 1
+    m = _SCHEDULE_TAG_RE.match(status.strip())
+    if not m or not m.group(1):
+        return 1
+    return 2 if m.group(1) == "2" else 1
+
+
+def is_quarantine_schedule_tag(status: str | None) -> bool:
+    """Return True if `status` encodes a Quarantine Solo end-of-day slot (`Q1`, `Q2`...)."""
+    if not status:
+        return False
+    m = _SCHEDULE_TAG_RE.match(status.strip())
+    return bool(m and (m.group(3) or "").upper() == "Q")
 
 
 def parse_schedule_shift(status: str | None) -> str | None:
@@ -147,9 +165,9 @@ def parse_schedule_shift(status: str | None) -> str | None:
     if not status:
         return None
     m = _SCHEDULE_TAG_RE.match(status.strip())
-    if not m or not m.group(3):
+    if not m or not m.group(5):
         return None
-    raw_s = m.group(3).upper()
+    raw_s = m.group(5).upper()
     if raw_s in {"S", "M", "SÁNG", "SANG"}:
         return "morning"
     if raw_s in {"T", "E", "TỐI", "TOI"}:
@@ -173,16 +191,17 @@ def natural_name_key(name: str | None) -> tuple[str, ...]:
 
 
 def schedule_sort_key(status: str | None, today: date | None = None) -> tuple[int, int, int, int]:
-    """Sort key ordering scheduled profiles by day offset (0..6), shift (Sáng before Tối), and pair number."""
+    """Sort key ordering scheduled profiles by week+day offset (0..13), shift (Morning < Evening < Quarantine), and slot number."""
     parsed = parse_schedule_tag(status)
     if parsed is None:
         return (1, 99, 9, 99)
     day_tag, pair_num = parsed
+    week_idx = parse_schedule_week(status) - 1
     shift = parse_schedule_shift(status)
-    shift_rank = 1 if shift == "evening" else 0
+    shift_rank = 2 if is_quarantine_schedule_tag(status) else (1 if shift == "evening" else 0)
     ref_wd = (today or date.today()).weekday()
     day_wd = _WEEKDAY_TAG_TO_INT.get(day_tag, 0)
-    day_offset = (day_wd - ref_wd) % 7
+    day_offset = ((day_wd - ref_wd) % 7) + week_idx * 7
     return (0, day_offset, shift_rank, pair_num if pair_num > 0 else 99)
 
 
@@ -196,15 +215,19 @@ def resolve_status_display(status: str | None, get_str_fn=None) -> tuple[str, st
     parsed_sched = parse_schedule_tag(clean)
     if parsed_sched is not None:
         day_tag, pair_num = parsed_sched
+        week_num = parse_schedule_week(clean)
+        w_prefix = "W2·" if week_num == 2 else ""
+        if is_quarantine_schedule_tag(clean):
+            return f"{w_prefix}{day_tag}·Cách ly #{pair_num or 1}", "#DC2626"
         shift = parse_schedule_shift(clean)
         col = _WEEKDAY_COLORS.get(day_tag, "#2C524A")
         if pair_num > 0:
             if shift == "morning":
-                return f"{day_tag}·C{pair_num}·Sáng", col
+                return f"{w_prefix}{day_tag}·C{pair_num}·Sáng", col
             if shift == "evening":
-                return f"{day_tag}·C{pair_num}·Tối", col
-            return f"{day_tag}·C{pair_num}", col
-        return day_tag, col
+                return f"{w_prefix}{day_tag}·C{pair_num}·Tối", col
+            return f"{w_prefix}{day_tag}·C{pair_num}", col
+        return f"{w_prefix}{day_tag}", col
     low = clean.casefold()
     for tag in _ACTIVE_STATUS_TAGS:
         t_code = (tag.get("code") or "").strip()

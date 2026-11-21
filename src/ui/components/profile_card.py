@@ -701,6 +701,7 @@ def build_profile_card(
         or token_val
         or profile.notes
         or on_open_mail_credentials is not None
+        or bool(monitor_info is not None and monitor_info.muse_bridge_model)
     ):
         sub_parts: list[ft.Control] = []
         if email_val:
@@ -768,6 +769,39 @@ def build_profile_card(
                 ),
             )
             sub_parts.append(vault_chip)
+        if monitor_info is not None and monitor_info.muse_bridge_model:
+            bot_lbl = monitor_info.muse_bridge_bot or monitor_info.muse_bridge_model
+            if monitor_info.muse_bridge_tripped:
+                mb_txt = get_string("card_muse_bridge_tripped", bot=bot_lbl)
+                mb_col = COLORS["error"]
+                mb_tip = monitor_info.muse_bridge_trip_reason or mb_txt
+            elif monitor_info.muse_bridge_running:
+                mb_txt = get_string(
+                    "card_muse_bridge_running",
+                    bot=bot_lbl,
+                    mins=monitor_info.today_minutes,
+                )
+                mb_col = "#15803D"
+                mb_tip = f"{monitor_info.muse_bridge_model} · {bot_lbl}"
+            else:
+                mb_txt = get_string("card_muse_bridge_idle", bot=bot_lbl)
+                mb_col = "#6D28D9"
+                mb_tip = f"{monitor_info.muse_bridge_model} · {bot_lbl}"
+            sub_parts.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                    border_radius=4,
+                    bgcolor=ft.Colors.with_opacity(0.11, mb_col),
+                    border=ft.Border.all(1, ft.Colors.with_opacity(0.55, mb_col)),
+                    tooltip=mb_tip,
+                    content=ft.Text(
+                        mb_txt,
+                        size=10,
+                        font_family=FONT_SEMIBOLD,
+                        color=mb_col,
+                    ),
+                )
+            )
         if profile.notes:
             single_line_note = " ".join(profile.notes.splitlines()).strip()
             note_widget: ft.Control = ft.Text(

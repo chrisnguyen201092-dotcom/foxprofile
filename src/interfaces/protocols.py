@@ -147,7 +147,23 @@ class IProfileManager(Protocol):
         new_proxy: str | None,
         *,
         skip_names: set[str] | None = None,
+        preserve_archived: bool = True,
+        quarantine_old: bool = False,
+        quarantine_reason: str = "replaced",
     ) -> list[str]: ...
+
+    def list_quarantined_proxies(self) -> dict[str, dict[str, str]]: ...
+
+    def quarantine_proxy(self, proxy_or_endpoint: str, reason: str = "burned") -> bool: ...
+
+    def unquarantine_proxy(self, proxy_or_endpoint: str) -> bool: ...
+
+    def refresh_profile_geo(
+        self,
+        name: str,
+        timezone: str | None,
+        locale: str | None,
+    ) -> bool: ...
 
     def list_proxy_pool(self) -> list[str]: ...
 

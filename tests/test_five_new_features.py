@@ -6196,7 +6196,83 @@ def test_trust_score_30d_lifts_origin_and_creation_ceiling_caps():
     assert bd_tuan_alive["final_score"] >= 68
 
 
+def test_hatch_checkpoint_oidc_return_cookie_not_treated_as_meta_checkpoint(tmp_path):
+    """Verify strict domain/sender scoping across Cookie, URL, and Mail Checkpoint detection."""
+    import sqlite3
+    import time
 
+    from src.models.profile import Profile
+    from src.services.monitor import MonitorService
+    from src.utils.totp import detect_meta_checkpoint_mail, extract_otp_from_text
 
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    now_s = time.time()
+
+    def _seed(name: str, extra_cookie: tuple[str, str], extra_url: str | None = None) -> None:
+        pdir = data_dir / name
+        pdir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(pdir / "cookies.sqlite"))
+        conn.execute(
+            "CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT, creationTime INTEGER, lastAccessed INTEGER, expiry INTEGER)"
+        )
+        rows = [
+            (".auth.meta.com", "datr", "x", int((now_s - 28 * 86400) * 1e6), int(now_s * 1e6), int(now_s + 365 * 86400)),
+            (".muse.ai", "hatch_sess", "s", int(now_s * 1e6), int(now_s * 1e6), int(now_s + 30 * 86400)),
+            (".muse.ai", "hatch_gw", "g", int(now_s * 1e6), int(now_s * 1e6), int(now_s + 365 * 86400)),
+            (extra_cookie[0], extra_cookie[1], "1", int(now_s * 1e6), int(now_s * 1e6), int(now_s + 30 * 86400)),
+        ]
+        conn.executemany("INSERT INTO moz_cookies VALUES (?, ?, ?, ?, ?, ?)", rows)
+        conn.commit()
+        conn.close()
+        if extra_url:
+            pconn = sqlite3.connect(str(pdir / "places.sqlite"))
+            pconn.execute("CREATE TABLE moz_places (url TEXT, rev_host TEXT, visit_count INTEGER)")
+            pconn.execute("INSERT INTO moz_places VALUES (?, '', 1)", (extra_url,))
+            pconn.commit()
+            pconn.close()
+
+    _seed("HealthyOidc", (".muse.ai", "hatch_checkpoint_oidc_return"))
+    _seed(
+        "ThirdPartyWarmup",
+        (".cnn.com", "cf_checkpoint_id"),
+        extra_url="https://www.google.com/search?q=auth.meta.com/checkpoints/",
+    )
+    _seed("RealMetaChk", (".facebook.com", "checkpoint"))
+
+    mon = MonitorService(data_dir=str(data_dir), log_dir=str(log_dir))
+    snap = mon.snapshot(
+        [
+            Profile(name="HealthyOidc", proxy="sp02-usa103.proxysystem.net:11106:u:p", created_at="2026-10-20"),
+            Profile(name="ThirdPartyWarmup", proxy="sp02-usa103.proxysystem.net:11108:u:p", created_at="2026-10-20"),
+            Profile(name="RealMetaChk", proxy="sp02-usa103.proxysystem.net:11107:u:p", created_at="2026-10-20"),
+        ],
+        running_names=set(),
+    )
+    assert snap.profiles["HealthyOidc"].has_meta_checkpoint is False
+    assert snap.profiles["HealthyOidc"].trust_score > 0
+    assert snap.profiles["ThirdPartyWarmup"].has_meta_checkpoint is False
+    assert snap.profiles["ThirdPartyWarmup"].trust_score > 0
+    assert snap.profiles["RealMetaChk"].has_meta_checkpoint is True
+    assert snap.profiles["RealMetaChk"].trust_score == 0
+
+    # Mail layer: non-Meta sender with generic suspension text must NOT trigger Meta Checkpoint
+    assert (
+        detect_meta_checkpoint_mail(
+            [{"sender": "noreply@tiktok.com", "subject": "We suspended your account", "preview": "30 days to take action"}]
+        )
+        is None
+    )
+    assert (
+        detect_meta_checkpoint_mail(
+            [{"sender": "notification@email.meta.com", "subject": "We suspended your account", "preview": "30 days to take action"}]
+        )
+        is not None
+    )
+
+    # Zip codes in login alert footers must not be extracted as OTPs
+    assert extract_otp_from_text("Microsoft account unusual sign-in activity", "One Microsoft Way, Redmond, WA 98052") == ""
+    assert extract_otp_from_text("Did you just log in on a new device?", "1 Meta Way, Menlo Park, CA 94025") == ""
 
 

@@ -13,7 +13,12 @@ from ...models.profile import ENGINES
 from ...services.browser import chrome_prefetch, cookies, fingerprint
 from ...services.browser.launcher import ProfileBusyError
 from ...services.proxy.geo_check import check_geo
-from ...utils.totp import fetch_hotmail_messages, generate_totp
+from ...utils.totp import (
+    detect_meta_checkpoint_mail,
+    fetch_hotmail_messages,
+    generate_totp,
+    parse_mail_credentials_line,
+)
 from ...utils.validation import (
     validate_color,
     validate_group,
@@ -28,6 +33,7 @@ from ..dependencies import (
     get_browser_launcher,
     get_event_bus,
     get_monitor_service,
+    get_optional_monitor_service,
     get_profile_manager,
 )
 from ..helpers import build_profile_response, profile_response, require_profile
@@ -161,7 +167,11 @@ def monitor_overview(
             )
         )
         has_warn = bool(info and info.has_warning)
-        is_ready = bool(p.proxy and not is_run and not in_cooldown and not has_warn)
+        is_banned = bool(info and info.is_banned)
+        has_cp = bool(info and info.has_meta_checkpoint)
+        is_ready = bool(
+            p.proxy and not is_run and not in_cooldown and not has_warn and not is_banned and not has_cp
+        )
 
         if is_ready:
             ready_count += 1
@@ -184,6 +194,8 @@ def monitor_overview(
                 "proxy_port": info.port if info else "",
                 "is_running": is_run,
                 "ready_to_launch": is_ready,
+                "is_banned": is_banned,
+                "has_meta_checkpoint": has_cp,
                 "in_cooldown": in_cooldown,
                 "cooldown_mins": info.cooldown_mins if info else None,
                 "busy_by": list(info.busy_by) if info else [],
@@ -455,30 +467,63 @@ def fetch_profile_mail_otp(
     name: str,
     top: int = Query(8, ge=1, le=20),
     pm: IProfileManager = Depends(get_profile_manager),
+    mon: MonitorService = Depends(get_monitor_service),
 ) -> dict:
-    """Read the profile's Hotmail/Outlook inbox via Microsoft OAuth2 and extract the latest OTP."""
+    """Read the profile's inbox, extract the latest OTP, and detect Meta Checkpoint alerts."""
     profile = require_profile(name, pm)
+    em = getattr(profile, "email", None)
+    tok = getattr(profile, "mail_token", None)
+    pwd = getattr(profile, "password", None)
+    if (not tok or not pwd) and em and hasattr(pm, "list_mail_pool"):
+        em_low = str(em).strip().lower()
+        for raw_ln in pm.list_mail_pool():
+            parsed = parse_mail_credentials_line(raw_ln)
+            if (parsed.get("email") or "").strip().lower() == em_low:
+                if not tok and parsed.get("mail_token"):
+                    tok = parsed["mail_token"]
+                if not pwd and parsed.get("password"):
+                    pwd = parsed["password"]
+                break
+
     ok, otp_or_err, messages = fetch_hotmail_messages(
-        getattr(profile, "email", None),
-        getattr(profile, "mail_token", None),
+        em,
+        tok,
         top=top,
-        password=getattr(profile, "password", None),
+        password=pwd,
     )
     if not ok:
         return {
             "name": name,
-            "email": getattr(profile, "email", None),
+            "email": em,
             "success": False,
             "error": otp_or_err,
             "latest_otp": "",
+            "checkpoint_detected": False,
+            "checkpoint_hit": None,
             "messages": [],
         }
+    cp = detect_meta_checkpoint_mail(messages)
+    if cp is not None:
+        mon.record_mail_checkpoint_hit(
+            name,
+            {
+                "email": str(em or ""),
+                "subject": cp.get("subject", ""),
+                "time": cp.get("time", ""),
+                "preview": cp.get("preview", ""),
+                "resolved": cp.get("resolved", "false"),
+            },
+        )
+    else:
+        mon.record_mail_scan({}, scanned_names=[name], update_timestamp=False)
     return {
         "name": name,
-        "email": getattr(profile, "email", None),
+        "email": em,
         "success": True,
         "error": "",
         "latest_otp": otp_or_err,
+        "checkpoint_detected": cp is not None,
+        "checkpoint_hit": cp,
         "messages": messages,
     }
 
@@ -532,6 +577,7 @@ def update_profile(
     body: ProfileUpdate,
     pm: IProfileManager = Depends(get_profile_manager),
     bl: IBrowserLauncher = Depends(get_browser_launcher),
+    mon: MonitorService | None = Depends(get_optional_monitor_service),
     bus: EventBus = Depends(get_event_bus),
 ) -> ProfileResponse:
     profile = require_profile(name, pm)
@@ -601,6 +647,8 @@ def update_profile(
     ):
         raise HTTPException(status_code=409, detail="Update failed (name conflict?)")
 
+    if new_name != name and mon is not None:
+        mon.rename_profile(name, new_name)
     logger.info("API updated profile: %s -> %s", name, new_name)
     bus.emit()
     return build_profile_response(new_name, pm, bl)

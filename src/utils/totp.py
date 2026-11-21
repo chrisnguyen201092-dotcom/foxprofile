@@ -54,6 +54,9 @@ _OTP_STANDALONE_6_8_RE = re.compile(r"\b(\d{5,8})\b")
 _NO_OTP_SUBJECT_HINTS = (
     "new app(s) connected",
     "security info was added",
+    "unusual sign-in activity",
+    "did you just log in",
+    "có phải bạn vừa đăng nhập",
     "welcome to your new outlook.com",
     "security alert",
     "cảnh báo bảo mật",
@@ -572,8 +575,18 @@ def detect_meta_checkpoint_mail(
             continue
         subj = str(msg.get("subject") or "").strip()
         prev = str(msg.get("preview") or "").strip()
+        sender_low = str(msg.get("sender") or "").strip().lower()
         combined = f"{subj}\n{prev}".lower()
         subj_low = subj.lower()
+        if (
+            sender_low
+            and not any(
+                d in sender_low
+                for d in ("meta.com", "facebookmail.com", "facebook.com", "instagram.com", "meta")
+            )
+            and "meta" not in combined
+        ):
+            continue
 
         if any(k in subj_low for k in _META_ACTIVE_AGAIN_SUBJECTS):
             has_active_again = True

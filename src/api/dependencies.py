@@ -43,3 +43,9 @@ def get_monitor_service(
     container: Container = Depends(_container),
 ) -> MonitorService:
     return container.monitor_service
+
+
+def get_optional_monitor_service(
+    container: Container = Depends(_container),
+) -> MonitorService | None:
+    return getattr(container, "monitor_service", None)

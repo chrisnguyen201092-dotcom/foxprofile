@@ -193,6 +193,23 @@ async def bulk_check_proxies(
     log(get_string("bulk_proxy_summary", ok=ok_count, fail=fail_count, skip=skip_count))
 
 
+_STAGGER_ABORT_CODES = frozenset(
+    {
+        "no_proxy",
+        "port_busy",
+        "cluster_busy",
+        "dead_port_freeze",
+        "high_risk_clean_asn",
+        "muse_bridge_running",
+        "muse_bridge_tripped",
+        "meta_checkpoint_banned",
+        "profile_banned",
+        "port_reassigned_live",
+        "proxy_changed_with_session",
+    }
+)
+
+
 def bulk_launch_profiles(
     names: list[str],
     pm: IProfileManager,
@@ -202,6 +219,7 @@ def bulk_launch_profiles(
     *,
     stagger_seconds: tuple[int, int] = (40, 60),
     shuffle_order: bool = False,
+    monitor: MonitorService | None = None,
 ) -> None:
     to_launch = [
         name
@@ -244,8 +262,27 @@ def bulk_launch_profiles(
             )
             state.schedule_refresh()
             time.sleep(delay_s)
-            if name in pm.profiles and not bl.is_running(name) and not state.is_loading(name):
-                launch_or_stop(name, pm, bl, state, log)
+            if name not in pm.profiles or bl.is_running(name) or state.is_loading(name):
+                continue
+            if monitor is not None:
+                re_warns = monitor.check_prelaunch(
+                    pm.profiles[name],
+                    pm.list_profiles(),
+                    bl.running_profile_names(),
+                    set(state.loading),
+                )
+                abort_w = next((w for w in re_warns if w.code in _STAGGER_ABORT_CODES), None)
+                if abort_w is not None:
+                    log(
+                        get_string(
+                            "bulk_stagger_aborted_guard_log",
+                            name=name,
+                            reason=abort_w.code,
+                        )
+                    )
+                    state.schedule_refresh()
+                    continue
+            launch_or_stop(name, pm, bl, state, log)
 
     threading.Thread(target=_stagger_worker, daemon=True).start()
 

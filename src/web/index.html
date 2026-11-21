@@ -501,6 +501,7 @@ const I18N = {
     page_select: "Chọn profile cho trang này (đã chọn {n})", page_filter: "Lọc nhanh profile...",
     delete_page: "Xoá trang", bulk_add_page: "Thêm vào trang", bulk_remove_page: "Gỡ khỏi trang",
     add_to_page_title: "Thêm {n} profile vào trang", pick_page: "Chọn trang có sẵn", or_new_page: "Hoặc nhập tên trang mới", add_btn: "Thêm",
+    guard_blocked_n: "Đã bỏ qua {n} profile vướng cảnh báo an toàn",
   },
   en: {
     tagline: "Anti-detect profile manager", new_profile: "New profile", filters: "Filter", groups: "Groups",
@@ -566,6 +567,7 @@ const I18N = {
     page_select: "Select profiles for this page ({n} selected)", page_filter: "Filter profiles...",
     delete_page: "Delete page", bulk_add_page: "Add to page", bulk_remove_page: "Remove from page",
     add_to_page_title: "Add {n} profile(s) to page", pick_page: "Pick an existing page", or_new_page: "Or enter a new page name", add_btn: "Add",
+    guard_blocked_n: "Skipped {n} unsafe profile(s)",
   },
 };
 
@@ -1167,7 +1169,34 @@ async function bulk(action) {
     return refresh();
   }
   const targets = profiles.filter((p) => names.includes(p.name) && (action === "launch" ? !running.has(p.name) : running.has(p.name)));
-  await Promise.all(targets.map((p) => toggle(p, { quiet: true })));
+  if (action !== "launch") {
+    await Promise.all(targets.map((p) => toggle(p, { quiet: true })));
+    return;
+  }
+  const safeTargets = [];
+  let blocked = 0;
+  for (const p of targets) {
+    try {
+      const chk = await api("GET", `/browser/${enc(p.name)}/prelaunch-check`);
+      if (chk && chk.safe) {
+        safeTargets.push(p);
+      } else {
+        blocked++;
+        const firstMsg = chk && chk.warnings && chk.warnings.length ? chk.warnings[0].message : "Pre-Launch Safety Guard";
+        failed.set(p.name, firstMsg);
+      }
+    } catch (e) {
+      blocked++;
+      failed.set(p.name, e.message);
+    }
+  }
+  if (blocked) {
+    render();
+    toast(t("guard_blocked_n", { n: blocked }), true);
+  }
+  for (const p of safeTargets) {
+    await toggle(p, { quiet: true });
+  }
 }
 
 async function toggle(p, { quiet = false } = {}) {

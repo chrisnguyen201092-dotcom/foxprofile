@@ -4,14 +4,16 @@ import flet as ft
 
 from ...core.strings import current_language, get_string
 from ...models.profile import Profile
-from ...services.monitor import MonitorSnapshot, PreLaunchWarning
+from ...services.monitor import MonitorSnapshot, PreLaunchWarning, extract_proxy_endpoint
 from ...services.scheduler import (
+    IncubationCandidate,
     ScheduledAccount,
     ScheduledDay,
     ScheduledPair,
     SchedulePlan,
     SquadCandidate,
     WorkSquadPlan,
+    build_incubation_recommendations,
     build_safe_schedule,
     format_schedule_markdown,
     is_gateway_ipv6_cluster,
@@ -22,6 +24,8 @@ from ..theme.styles import ACCENT_STYLE, DLG_FIELD_KWARGS, ERROR_STYLE, OUTLINE_
 
 _COOLDOWN_PRESETS = (0, 5, 10, 15, 20, 30, 60)
 _CYCLE_PRESETS = (4, 5, 6)
+_KEEPALIVE_PRESETS = (10, 12, 14)
+_WORK_PRESETS = (5, 6, 7)
 
 
 def _warning_card(w: PreLaunchWarning) -> ft.Container:
@@ -54,12 +58,80 @@ def open_prelaunch_guard_dialog(
     profile_name: str,
     warnings: list[PreLaunchWarning],
     on_force_launch: Callable[[], None],
+    *,
+    on_verify_inbox_and_launch: (
+        Callable[[Callable[[str, str], None], Callable[[], None]], None] | None
+    ) = None,
 ) -> None:
     """Modal safety interlock shown before launching a profile with detected risks."""
+    import contextlib
+
+    probe_status = ft.Text(
+        "",
+        size=12,
+        font_family=FONT_SEMIBOLD,
+        visible=False,
+    )
+
+    def _close_dlg() -> None:
+        with contextlib.suppress(Exception):
+            page.pop_dialog()
 
     def _force(_: ft.ControlEvent) -> None:
-        page.pop_dialog()
+        _close_dlg()
         on_force_launch()
+
+    cancel_btn = ft.Button(
+        get_string("guard_cancel_safe"),
+        icon=ft.Icons.SHIELD,
+        style=ACCENT_STYLE,
+        on_click=lambda _: _close_dlg(),
+    )
+    force_btn = ft.Button(
+        get_string("guard_force_launch"),
+        icon=ft.Icons.WARNING_AMBER_ROUNDED,
+        style=ERROR_STYLE,
+        on_click=_force,
+    )
+    actions_list: list[ft.Control] = [cancel_btn]
+
+    if on_verify_inbox_and_launch is not None:
+        verify_btn = ft.Button(
+            get_string("guard_verify_cp0_launch_btn"),
+            icon=ft.Icons.MARK_EMAIL_READ_OUTLINED,
+            style=OUTLINE_STYLE,
+        )
+
+        def _set_probe_status(msg: str, level: str) -> None:
+            probe_status.value = msg
+            probe_status.color = (
+                COLORS["error"]
+                if level == "error"
+                else (COLORS["ok"] if level == "ok" else COLORS["accent"])
+            )
+            probe_status.visible = bool(msg)
+            if level == "error":
+                cancel_btn.disabled = False
+                verify_btn.disabled = False
+                force_btn.disabled = False
+            with contextlib.suppress(Exception):
+                page.update()
+
+        def _verify_and_launch(_: ft.ControlEvent) -> None:
+            cancel_btn.disabled = True
+            verify_btn.disabled = True
+            force_btn.disabled = True
+            probe_status.value = get_string("guard_verifying_cp0_status")
+            probe_status.color = COLORS["accent"]
+            probe_status.visible = True
+            with contextlib.suppress(Exception):
+                page.update()
+            on_verify_inbox_and_launch(_set_probe_status, _close_dlg)
+
+        verify_btn.on_click = _verify_and_launch
+        actions_list.append(verify_btn)
+
+    actions_list.append(force_btn)
 
     dlg = ft.AlertDialog(
         modal=False,
@@ -90,23 +162,11 @@ def open_prelaunch_guard_dialog(
                         color=COLORS["text_sub"],
                     ),
                     *[_warning_card(w) for w in warnings],
+                    probe_status,
                 ],
             ),
         ),
-        actions=[
-            ft.Button(
-                get_string("guard_cancel_safe"),
-                icon=ft.Icons.SHIELD,
-                style=ACCENT_STYLE,
-                on_click=lambda _: page.pop_dialog(),
-            ),
-            ft.Button(
-                get_string("guard_force_launch"),
-                icon=ft.Icons.WARNING_AMBER_ROUNDED,
-                style=ERROR_STYLE,
-                on_click=_force,
-            ),
-        ],
+        actions=actions_list,
     )
     page.show_dialog(dlg)
 
@@ -531,6 +591,31 @@ def _build_account_pill(
                 ),
             )
         )
+    if acc.sess_exp_days is not None:
+        if acc.sess_exp_days < 0:
+            exp_txt = "✕ Hết hạn"
+            exp_col = COLORS["error"]
+        elif acc.sess_exp_days <= 10:
+            exp_txt = f"⏳ {acc.sess_exp_days}d"
+            exp_col = "#B45309"
+        else:
+            exp_txt = f"✓ {acc.sess_exp_days}d"
+            exp_col = "#15803D"
+        badges.append(
+            ft.Container(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4,
+                bgcolor=ft.Colors.with_opacity(0.10, exp_col),
+                border=ft.Border.all(1, ft.Colors.with_opacity(0.55, exp_col)),
+                content=ft.Text(
+                    exp_txt,
+                    size=10.0,
+                    font_family=FONT_DATA,
+                    weight=ft.FontWeight.W_600,
+                    color=exp_col,
+                ),
+            )
+        )
     if acc.shared_endpoint:
         badges.append(
             ft.Container(
@@ -661,8 +746,11 @@ def _build_day_card(
     *,
     opened_names: set[str] | None = None,
     on_open_one: Callable[[str], None] | None = None,
+    on_launch_shift: Callable[[list[str], str], None] | None = None,
 ) -> ft.Container:
     day_name = day.weekday_name_vi if lang == "vi" else day.weekday_name_en
+    disp_tag = f"W2-{day.weekday_tag}" if day.day_index >= 7 else day.weekday_tag
+    active_opened = opened_names or set()
     sections: list[ft.Control] = [
         ft.Row(
             spacing=8,
@@ -673,7 +761,7 @@ def _build_day_card(
                     border_radius=6,
                     bgcolor=COLORS["sidebar"],
                     content=ft.Text(
-                        day.weekday_tag,
+                        disp_tag,
                         size=12,
                         font_family=FONT_BOLD,
                         color=COLORS["cover_ink"],
@@ -684,7 +772,7 @@ def _build_day_card(
                         "schedule_day_header",
                         idx=day.day_index + 1,
                         day_name=day_name,
-                        tag=day.weekday_tag,
+                        tag=disp_tag,
                         date=day.date_str,
                         count=day.total_accounts,
                     ),
@@ -697,13 +785,56 @@ def _build_day_card(
         ),
     ]
 
+    def _shift_hdr(
+        title_txt: str,
+        title_col: str,
+        pairs: list[ScheduledPair],
+        shift_code: str,
+    ) -> ft.Control:
+        hdr_lbl = ft.Text(
+            title_txt,
+            size=12,
+            font_family=FONT_SEMIBOLD,
+            color=title_col,
+        )
+        if on_launch_shift is None:
+            return hdr_lbl
+        shift_names = [
+            n
+            for pr in pairs
+            for n in (pr.first.name, pr.second.name if pr.second is not None else None)
+            if n and n not in active_opened
+        ]
+        if not shift_names:
+            return hdr_lbl
+        btn_key = (
+            "schedule_launch_morning_btn"
+            if shift_code == "morning"
+            else "schedule_launch_evening_btn"
+        )
+        return ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                hdr_lbl,
+                ft.OutlinedButton(
+                    get_string(btn_key, count=len(shift_names)),
+                    height=26,
+                    style=OUTLINE_STYLE,
+                    on_click=lambda _, ns=list(shift_names), sc=shift_code: on_launch_shift(
+                        ns, sc
+                    ),
+                ),
+            ],
+        )
+
     if day.morning_pairs:
         sections.append(
-            ft.Text(
+            _shift_hdr(
                 get_string("schedule_morning_title", count=len(day.morning_pairs)),
-                size=12,
-                font_family=FONT_SEMIBOLD,
-                color=COLORS["accent"],
+                COLORS["accent"],
+                day.morning_pairs,
+                "morning",
             )
         )
         for pr in day.morning_pairs:
@@ -718,11 +849,11 @@ def _build_day_card(
 
     if day.evening_pairs:
         sections.append(
-            ft.Text(
+            _shift_hdr(
                 get_string("schedule_evening_title", count=len(day.evening_pairs)),
-                size=12,
-                font_family=FONT_SEMIBOLD,
-                color="#0284C7",
+                "#0284C7",
+                day.evening_pairs,
+                "evening",
             )
         )
         for pr in day.evening_pairs:
@@ -735,6 +866,48 @@ def _build_day_card(
                 )
             )
 
+    if day.quarantine_solos:
+        sections.append(
+            ft.Text(
+                get_string("schedule_quarantine_title", count=len(day.quarantine_solos)),
+                size=12,
+                font_family=FONT_SEMIBOLD,
+                color=COLORS["error"],
+            )
+        )
+        for q_idx, q_acc in enumerate(day.quarantine_solos, start=1):
+            sections.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+                    content=ft.Row(
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                width=84,
+                                padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+                                border_radius=6,
+                                bgcolor=ft.Colors.with_opacity(0.12, COLORS["error"]),
+                                border=ft.Border.all(1, COLORS["error"]),
+                                alignment=ft.Alignment(0, 0),
+                                content=ft.Text(
+                                    get_string("schedule_quarantine_badge", idx=q_idx),
+                                    size=10.5,
+                                    font_family=FONT_SEMIBOLD,
+                                    color=COLORS["error"],
+                                ),
+                            ),
+                            _build_account_pill(
+                                q_acc,
+                                day.day_index,
+                                is_opened=(q_acc.name in active_opened),
+                                on_open_one=on_open_one,
+                            ),
+                        ],
+                    ),
+                )
+            )
+
     return ft.Container(
         padding=ft.Padding.symmetric(horizontal=14, vertical=12),
         border_radius=10,
@@ -744,49 +917,165 @@ def _build_day_card(
     )
 
 
+def _build_incubation_card(
+    cand: IncubationCandidate,
+    *,
+    assigned_ep: str = "",
+    on_assign: Callable[[str, str], None] | None = None,
+) -> ft.Container:
+    ep_cur = extract_proxy_endpoint(cand.current_proxy) if cand.current_proxy else ""
+    ep_sug = extract_proxy_endpoint(cand.suggested_proxy) if cand.suggested_proxy else ""
+    badge_col = "#15803D" if cand.tier == "clean_watch" else (
+        "#0284C7" if cand.tier == "bot_warm_standby" else "#B45309"
+    )
+    sub_parts = [f"{cand.group or '-'}", f"{cand.age_days}d"]
+    if cand.has_session:
+        sub_parts.append(f"GW+ ({cand.sess_exp})")
+    if cand.hold_reason:
+        sub_parts.append(cand.hold_reason)
+    elif assigned_ep:
+        sub_parts.append(f"✓ {assigned_ep}")
+    elif ep_cur:
+        sub_parts.append(ep_cur)
+    elif ep_sug:
+        sub_parts.append(f"→ Đề xuất {ep_sug}")
+
+    row_ctrls: list[ft.Control] = [
+        ft.Column(
+            spacing=2,
+            tight=True,
+            expand=True,
+            controls=[
+                ft.Text(
+                    f"{cand.name} · {cand.email}" if cand.email != cand.name else cand.name,
+                    size=12,
+                    font_family=FONT_SEMIBOLD,
+                    color=COLORS["text_main"],
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Text(
+                    " · ".join(sub_parts),
+                    size=11,
+                    font_family=FONT_DATA,
+                    color=badge_col,
+                ),
+            ],
+        )
+    ]
+    if on_assign is not None and not ep_cur and not assigned_ep and cand.suggested_proxy:
+        row_ctrls.append(
+            ft.OutlinedButton(
+                get_string("schedule_incubation_assign_btn"),
+                icon=ft.Icons.HUB_OUTLINED,
+                height=28,
+                style=OUTLINE_STYLE,
+                on_click=lambda _, n=cand.name, px=cand.suggested_proxy: on_assign(n, px),
+            )
+        )
+    return ft.Container(
+        padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+        border_radius=7,
+        bgcolor=COLORS["input_bg"],
+        border=ft.Border.all(1, COLORS["card_border"]),
+        content=ft.Row(
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=row_ctrls,
+        ),
+    )
+
+
 def open_safe_schedule_dialog(
     page: ft.Page,
     profiles: list[Profile],
     snap: MonitorSnapshot,
     *,
     initial_cycle_days: int = 5,
+    initial_mode: str | None = None,
     last_pairings: list[list[str]] | None = None,
     last_shifts: dict[str, str] | None = None,
     running_names: set[str] | None = None,
+    unassigned_proxies: list[str] | None = None,
+    on_assign_proxy: Callable[[str, str], None] | None = None,
     on_launch_single: Callable[[str], None] | None = None,
+    on_launch_shift: Callable[[list[str], str], None] | None = None,
     on_apply_schedule: Callable[[SchedulePlan], None],
     on_copy_schedule: Callable[[str], None] | None = None,
     on_clear_schedule: Callable[[], None] | None = None,
 ) -> None:
-    """Modal dialog displaying the multi-day paired safe farming schedule & tag applicator."""
+    """Modal dialog displaying the multi-day schedule, keepalive, work shifts, and embryos."""
     lang = current_language()
     launched_in_dialog: set[str] = set(running_names or set())
-    state = {
-        "cycle_days": max(4, min(6, int(initial_cycle_days or 5))),
+    eff_init_mode = (
+        initial_mode
+        if initial_mode in ("pair", "keepalive", "work", "incubation")
+        else "pair"
+    )
+    if eff_init_mode == "keepalive":
+        init_days = max(10, min(14, int(initial_cycle_days or 12)))
+    elif eff_init_mode == "work":
+        init_days = max(5, min(7, int(initial_cycle_days or 5)))
+    else:
+        init_days = max(4, min(6, int(initial_cycle_days or 5)))
+
+    assigned_override: dict[str, str] = {}
+    remaining_pool: list[str] = list(unassigned_proxies or [])
+    state: dict[str, object] = {
+        "mode": eff_init_mode,
+        "cycle_days": init_days,
+        "include_healthy": False,
         "seed_offset": 0,
-        "selected_day": -1,  # -1 = all days
+        "selected_day": -1,
         "plan": None,
     }
 
-    cycle_row = ft.Row(spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    mode_row = ft.Row(spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    cycle_row = ft.Row(spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
     day_filter_row = ft.Row(spacing=6, wrap=True)
-    days_list_col = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=440)
+    info_banner_col = ft.Column(spacing=4, tight=True, visible=False)
+    days_list_col = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, height=410)
+    apply_btn = ft.Button(
+        get_string("schedule_apply_tags_btn"),
+        icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
+        style=ACCENT_STYLE,
+    )
 
     def _recompute() -> SchedulePlan:
-        base_seed = 20261024 + state["seed_offset"] * 97
+        base_seed = 20261024 + int(state["seed_offset"]) * 97  # type: ignore[arg-type]
+        cur_mode = str(state["mode"])
+        sched_mode = cur_mode if cur_mode in ("pair", "keepalive", "work") else "pair"
         plan = build_safe_schedule(
             profiles,
             snap,
-            cycle_days=state["cycle_days"],
+            cycle_days=int(state["cycle_days"]),  # type: ignore[arg-type]
+            schedule_mode=sched_mode,
+            include_healthy_in_keepalive=bool(state["include_healthy"]),
             last_pairings=last_pairings,
             last_shifts=last_shifts,
-            shuffle_seed=base_seed if state["seed_offset"] > 0 else None,
+            shuffle_seed=base_seed if int(state["seed_offset"]) > 0 else None,  # type: ignore[arg-type]
         )
         state["plan"] = plan
         return plan
 
+    def _set_mode(m: str) -> None:
+        state["mode"] = m
+        state["selected_day"] = -1
+        if m == "keepalive" and int(state["cycle_days"]) not in _KEEPALIVE_PRESETS:  # type: ignore[arg-type]
+            state["cycle_days"] = 12
+        elif m == "work" and int(state["cycle_days"]) not in _WORK_PRESETS:  # type: ignore[arg-type]
+            state["cycle_days"] = 5
+        _refresh_view(recompute=(m != "incubation"))
+        page.update()
+
     def _set_cycle(days_val: int) -> None:
         state["cycle_days"] = days_val
+        state["selected_day"] = -1
+        _refresh_view()
+        page.update()
+
+    def _toggle_include_healthy(_: ft.ControlEvent) -> None:
+        state["include_healthy"] = not bool(state["include_healthy"])
         state["selected_day"] = -1
         _refresh_view()
         page.update()
@@ -797,19 +1086,19 @@ def open_safe_schedule_dialog(
         page.update()
 
     def _reshuffle(_: ft.ControlEvent) -> None:
-        state["seed_offset"] += 1
+        state["seed_offset"] = int(state["seed_offset"]) + 1  # type: ignore[arg-type]
         _refresh_view()
         page.update()
 
     def _copy_md(_: ft.ControlEvent) -> None:
-        plan: SchedulePlan | None = state["plan"]
+        plan: SchedulePlan | None = state["plan"]  # type: ignore[assignment]
         if plan is not None and on_copy_schedule is not None:
             on_copy_schedule(format_schedule_markdown(plan))
 
     def _apply(_: ft.ControlEvent) -> None:
-        plan: SchedulePlan | None = state["plan"]
+        plan: SchedulePlan | None = state["plan"]  # type: ignore[assignment]
         page.pop_dialog()
-        if plan is not None:
+        if plan is not None and state["mode"] != "incubation":
             on_apply_schedule(plan)
 
     def _clear(_: ft.ControlEvent) -> None:
@@ -826,10 +1115,155 @@ def open_safe_schedule_dialog(
         _refresh_view(recompute=False)
         page.update()
 
+    def _handle_launch_shift(names: list[str], shift_code: str) -> None:
+        unopened = [n for n in names if n not in launched_in_dialog]
+        if not unopened:
+            return
+        launched_in_dialog.update(unopened)
+        if on_launch_shift is not None:
+            on_launch_shift(unopened, shift_code)
+        _refresh_view(recompute=False)
+        page.update()
+
+    def _handle_assign_inc(name: str, px: str) -> None:
+        ep = extract_proxy_endpoint(px)
+        assigned_override[name] = ep or px
+        if px in remaining_pool:
+            remaining_pool.remove(px)
+        if on_assign_proxy is not None:
+            on_assign_proxy(name, px)
+        _refresh_view(recompute=False)
+        page.update()
+
+    def _mode_pill(mode_key: str, label_key: str) -> ft.Container:
+        is_on = state["mode"] == mode_key
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+            border_radius=6,
+            bgcolor=COLORS["sidebar"] if is_on else COLORS["input_bg"],
+            border=ft.Border.all(
+                1,
+                COLORS["sidebar"] if is_on else COLORS["rule_strong"],
+            ),
+            ink=True,
+            on_click=lambda _, mk=mode_key: _set_mode(mk),
+            content=ft.Text(
+                get_string(label_key),
+                size=12,
+                font_family=FONT_SEMIBOLD if is_on else FONT_DATA,
+                color=COLORS["cover_ink"] if is_on else COLORS["text_main"],
+            ),
+        )
+
     def _refresh_view(*, recompute: bool = True) -> None:
-        plan: SchedulePlan = _recompute() if (recompute or state["plan"] is None) else state["plan"]
+        cur_mode = str(state["mode"])
+        mode_row.controls = [
+            _mode_pill("keepalive", "schedule_tab_keepalive"),
+            _mode_pill("work", "schedule_tab_work"),
+            _mode_pill("incubation", "schedule_tab_incubation"),
+        ]
+
+        if cur_mode == "incubation":
+            cycle_row.visible = False
+            day_filter_row.visible = False
+            info_banner_col.visible = False
+            apply_btn.disabled = True
+            inc = build_incubation_recommendations(
+                profiles,
+                snap,
+                remaining_pool,
+            )
+            inc_ctrls: list[ft.Control] = []
+            if inc.blocked_warnings:
+                inc_ctrls.append(
+                    ft.Text(
+                        get_string(
+                            "schedule_incubation_warn_title",
+                            count=len(inc.blocked_warnings),
+                        ),
+                        size=12.5,
+                        font_family=FONT_BOLD,
+                        color=COLORS["error"],
+                    )
+                )
+                for w_msg in inc.blocked_warnings[:25]:
+                    inc_ctrls.append(
+                        ft.Container(
+                            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                            border_radius=6,
+                            bgcolor=ft.Colors.with_opacity(0.08, COLORS["error"]),
+                            border=ft.Border.all(1, COLORS["error"]),
+                            content=ft.Text(w_msg, size=11.5, color=COLORS["text_main"]),
+                        )
+                    )
+            inc_ctrls.append(
+                ft.Text(
+                    get_string(
+                        "schedule_incubation_clean_title",
+                        count=len(inc.clean_ready),
+                        free=len(inc.clean_pool_free),
+                    ),
+                    size=12.5,
+                    font_family=FONT_BOLD,
+                    color="#15803D",
+                )
+            )
+            for c_item in inc.clean_ready[:25]:
+                inc_ctrls.append(
+                    _build_incubation_card(
+                        c_item,
+                        assigned_ep=assigned_override.get(c_item.name, ""),
+                        on_assign=_handle_assign_inc if on_assign_proxy is not None else None,
+                    )
+                )
+            inc_ctrls.append(
+                ft.Text(
+                    get_string(
+                        "schedule_incubation_bot_title",
+                        count=len(inc.bot_standby_ready),
+                        free=len(inc.gateway_pool_free),
+                    ),
+                    size=12.5,
+                    font_family=FONT_BOLD,
+                    color="#0284C7",
+                )
+            )
+            for b_item in inc.bot_standby_ready[:25]:
+                inc_ctrls.append(
+                    _build_incubation_card(
+                        b_item,
+                        assigned_ep=assigned_override.get(b_item.name, ""),
+                        on_assign=_handle_assign_inc if on_assign_proxy is not None else None,
+                    )
+                )
+            if inc.immature_holding:
+                inc_ctrls.append(
+                    ft.Text(
+                        get_string(
+                            "schedule_incubation_hold_title",
+                            count=len(inc.immature_holding),
+                        ),
+                        size=12.5,
+                        font_family=FONT_BOLD,
+                        color="#B45309",
+                    )
+                )
+                for h_item in inc.immature_holding[:15]:
+                    inc_ctrls.append(_build_incubation_card(h_item))
+            days_list_col.controls = inc_ctrls
+            return
+
+        cycle_row.visible = True
+        day_filter_row.visible = True
+        apply_btn.disabled = False
+        plan: SchedulePlan = _recompute() if (recompute or state["plan"] is None) else state["plan"]  # type: ignore[assignment]
 
         # 1. Cycle selector pills
+        presets = (
+            _KEEPALIVE_PRESETS
+            if cur_mode == "keepalive"
+            else (_WORK_PRESETS if cur_mode == "work" else _CYCLE_PRESETS)
+        )
         cyc_ctrls: list[ft.Control] = [
             ft.Text(
                 get_string("schedule_cycle_label"),
@@ -838,7 +1272,7 @@ def open_safe_schedule_dialog(
                 color=COLORS["text_sub"],
             )
         ]
-        for cyc in _CYCLE_PRESETS:
+        for cyc in presets:
             is_on = cyc == state["cycle_days"]
             cyc_ctrls.append(
                 ft.Container(
@@ -856,6 +1290,30 @@ def open_safe_schedule_dialog(
                         size=12,
                         font_family=FONT_SEMIBOLD if is_on else FONT_DATA,
                         color=COLORS["cover_ink"] if is_on else COLORS["text_main"],
+                    ),
+                )
+            )
+        if cur_mode == "keepalive" and (plan.healthy_deferred or state["include_healthy"]):
+            inc_on = bool(state["include_healthy"])
+            cyc_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=9, vertical=5),
+                    border_radius=6,
+                    bgcolor=COLORS["sidebar"] if inc_on else COLORS["input_bg"],
+                    border=ft.Border.all(
+                        1,
+                        COLORS["sidebar"] if inc_on else COLORS["rule_strong"],
+                    ),
+                    ink=True,
+                    on_click=_toggle_include_healthy,
+                    content=ft.Text(
+                        get_string(
+                            "schedule_include_healthy_chk",
+                            count=len(plan.healthy_deferred),
+                        ),
+                        size=11.5,
+                        font_family=FONT_SEMIBOLD if inc_on else FONT_DATA,
+                        color=COLORS["cover_ink"] if inc_on else COLORS["text_main"],
                     ),
                 )
             )
@@ -880,7 +1338,71 @@ def open_safe_schedule_dialog(
             )
         cycle_row.controls = cyc_ctrls
 
-        # 2. Day filter tabs
+        # 2. Banners (Healthy Deferred / MuseBridge Autonomy / MuseBridge Ping Alert)
+        banner_ctrls: list[ft.Control] = []
+        if plan.muse_bridge_ping_needed:
+            banner_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=6,
+                    bgcolor=ft.Colors.with_opacity(0.11, COLORS["warning"]),
+                    border=ft.Border.all(1, COLORS["warning"]),
+                    content=ft.Text(
+                        get_string(
+                            "schedule_muse_bridge_ping_warn",
+                            names=", ".join(
+                                f"{a.name} ({a.sess_exp})"
+                                for a in plan.muse_bridge_ping_needed
+                            ),
+                        ),
+                        size=11.5,
+                        font_family=FONT_SEMIBOLD,
+                        color=COLORS["text_main"],
+                    ),
+                )
+            )
+        elif plan.muse_bridge_accounts:
+            banner_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=6,
+                    bgcolor=ft.Colors.with_opacity(0.10, "#6D28D9"),
+                    border=ft.Border.all(1, "#6D28D9"),
+                    content=ft.Text(
+                        get_string(
+                            "schedule_muse_bridge_banner",
+                            count=len(plan.muse_bridge_accounts),
+                            models=", ".join(
+                                f"{a.name} ({a.muse_bridge_model})"
+                                for a in plan.muse_bridge_accounts
+                            ),
+                        ),
+                        size=11.5,
+                        color=COLORS["text_main"],
+                    ),
+                )
+            )
+        if plan.healthy_deferred:
+            banner_ctrls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=6,
+                    bgcolor=COLORS["input_bg"],
+                    border=ft.Border.all(1, COLORS["card_border"]),
+                    content=ft.Text(
+                        get_string(
+                            "schedule_deferred_banner",
+                            count=len(plan.healthy_deferred),
+                        ),
+                        size=11.5,
+                        color=COLORS["text_sub"],
+                    ),
+                )
+            )
+        info_banner_col.controls = banner_ctrls
+        info_banner_col.visible = bool(banner_ctrls)
+
+        # 3. Day filter tabs
         df_ctrls: list[ft.Control] = [
             ft.Container(
                 padding=ft.Padding.symmetric(horizontal=10, vertical=4),
@@ -904,6 +1426,7 @@ def open_safe_schedule_dialog(
         ]
         for d in plan.days:
             is_sel = state["selected_day"] == d.day_index
+            disp_tag = f"W2-{d.weekday_tag}" if d.day_index >= 7 else d.weekday_tag
             df_ctrls.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(horizontal=10, vertical=4),
@@ -916,7 +1439,7 @@ def open_safe_schedule_dialog(
                     ink=True,
                     on_click=lambda _, idx=d.day_index: _set_day_filter(idx),
                     content=ft.Text(
-                        f"{d.weekday_tag} · {d.date_str[:5]} ({d.total_accounts})",
+                        f"{disp_tag} · {d.date_str[:5]} ({d.total_accounts})",
                         size=11.5,
                         font_family=FONT_SEMIBOLD,
                         color=COLORS["cover_ink"] if is_sel else COLORS["text_main"],
@@ -937,11 +1460,13 @@ def open_safe_schedule_dialog(
                 lang,
                 opened_names=launched_in_dialog,
                 on_open_one=_handle_open_one if on_launch_single is not None else None,
+                on_launch_shift=_handle_launch_shift if on_launch_shift is not None else None,
             )
             for d in visible_days
         ]
 
     _refresh_view(recompute=True)
+    apply_btn.on_click = _apply
 
     dlg = ft.AlertDialog(
         modal=False,
@@ -968,12 +1493,14 @@ def open_safe_schedule_dialog(
             ],
         ),
         content=ft.Container(
-            width=820,
+            width=840,
             content=ft.Column(
-                spacing=10,
+                spacing=8,
                 tight=True,
                 controls=[
+                    mode_row,
                     cycle_row,
+                    info_banner_col,
                     day_filter_row,
                     days_list_col,
                 ],
@@ -997,18 +1524,13 @@ def open_safe_schedule_dialog(
                 if on_clear_schedule is not None
                 else []
             ),
-            ft.Button(
-                get_string("schedule_apply_tags_btn"),
-                icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-                style=ACCENT_STYLE,
-                on_click=_apply,
-            ),
+            apply_btn,
         ],
     )
     page.show_dialog(dlg)
 
 
-_SQUAD_SIZES = (2, 4, 6, 8, 10)
+_SQUAD_SIZES = (2, 4, 6, 8)
 
 
 def _build_squad_candidate_row(
@@ -1351,7 +1873,7 @@ def open_work_squad_dialog(
                 if c.name not in (running_names | launched_in_dialog) and not c.is_conflict
             ]
             if not names:
-                names = [c.name for c in plan.candidates]
+                return
             mode_str = str(state["mode"])
             if on_launch_staggered is not None:
                 on_launch_staggered(names, mode_str)
@@ -1496,11 +2018,25 @@ def open_work_squad_dialog(
         else:
             squad_bar_slot.visible = False
 
-        if plan.busy_clusters:
-            locked_str = ", ".join(
-                f"{cl} ({', '.join(names)})"
-                for cl, names in sorted(plan.busy_clusters.items())
-            )
+        mb_running = getattr(snap, "muse_bridge_running_names", set()) or set()
+        mb_gw_map = getattr(snap, "muse_bridge_running_gw_clusters", {}) or {}
+        if plan.busy_clusters or mb_running:
+            banner_msgs: list[str] = []
+            if mb_running:
+                gw_used = max(mb_gw_map.values(), default=0)
+                banner_msgs.append(
+                    get_string(
+                        "work_squad_muse_bridge_notice",
+                        count=len(mb_running),
+                        gw_left=max(0, 3 - int(gw_used)),
+                    )
+                )
+            if plan.busy_clusters:
+                locked_str = ", ".join(
+                    f"{cl} ({', '.join(names)})"
+                    for cl, names in sorted(plan.busy_clusters.items())
+                )
+                banner_msgs.append(get_string("work_squad_busy_banner", clusters=locked_str))
             banner_slot.visible = True
             banner_slot.content = ft.Container(
                 padding=ft.Padding.symmetric(horizontal=10, vertical=6),
@@ -1513,7 +2049,7 @@ def open_work_squad_dialog(
                     controls=[
                         ft.Icon(ft.Icons.LOCK_CLOCK_OUTLINED, size=14, color=COLORS["warning"]),
                         ft.Text(
-                            get_string("work_squad_busy_banner", clusters=locked_str),
+                            " · ".join(banner_msgs),
                             size=11.5,
                             color=COLORS["text_main"],
                             expand=True,
